@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 智能面试综合复盘报告</title>
+    <style>
+      :root {
+        color: #1f2937;
+        background: #f5f7fa;
+        font-family: Inter, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: linear-gradient(180deg, #eef4fb 0, #f5f7fa 240px, #f5f7fa 100%);
+      }
+      button { font: inherit; }
+      h1, h2, h3, p { margin: 0; }
+      .app-shell { min-height: 100vh; padding: 24px; }
+      .report-page { max-width: 1180px; margin: 0 auto; }
+      .topbar, .summary-panel, .panel, .kpi-grid {
+        border: 1px solid #e5e7eb;
+        background: #fff;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+      }
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        height: 56px;
+        padding: 0 18px;
+        border-radius: 8px;
+        margin-bottom: 16px;
+      }
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 6px;
+        color: #1677ff;
+        background: #eaf3ff;
+        font-weight: 800;
+      }
+      .topbar strong { display: block; font-size: 14px; color: #111827; }
+      .topbar span { display: block; font-size: 12px; color: #6b7280; }
+      .icon-button {
+        display: grid;
+        place-items: center;
+        width: 36px;
+        height: 36px;
+        border: 1px solid #d9e2ef;
+        border-radius: 6px;
+        margin-left: auto;
+        color: #374151;
+        background: #fff;
+        cursor: pointer;
+      }
+      .summary-panel {
+        display: flex;
+        justify-content: space-between;
+        gap: 28px;
+        padding: 28px;
+        border-radius: 8px;
+      }
+      .candidate-block { display: flex; align-items: flex-start; gap: 18px; }
+      .avatar {
+        display: grid;
+        place-items: center;
+        width: 68px;
+        height: 68px;
+        flex: 0 0 auto;
+        border-radius: 8px;
+        color: #1677ff;
+        background: #f0f7ff;
+        border: 1px solid #cfe4ff;
+        font-size: 28px;
+        font-weight: 700;
+      }
+      .eyebrow { color: #1677ff; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+      h1 { color: #111827; font-size: 24px; line-height: 1.25; letter-spacing: 0; }
+      .candidate-meta {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(120px, 1fr));
+        gap: 14px 24px;
+        margin: 20px 0 0;
+      }
+      .candidate-meta dt { color: #6b7280; font-size: 12px; margin-bottom: 4px; }
+      .candidate-meta dd { margin: 0; color: #111827; font-size: 14px; font-weight: 600; }
+      .decision-badge {
+        width: 156px;
+        min-height: 156px;
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        border: 2px solid #52c41a;
+        border-radius: 8px;
+        color: #237804;
+        background: #f6ffed;
+      }
+      .decision-badge span { font-size: 16px; font-weight: 700; }
+      .decision-badge strong { font-size: 48px; line-height: 1.1; }
+      .decision-badge small { color: #3f6212; font-size: 12px; }
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        border-radius: 8px;
+        margin: 16px 0;
+      }
+      .kpi-item {
+        display: grid;
+        grid-template-columns: 20px 1fr;
+        gap: 4px 10px;
+        padding: 16px 18px;
+        border-right: 1px solid #eef2f7;
+      }
+      .kpi-item:last-child { border-right: 0; }
+      .kpi-icon { color: #1677ff; grid-row: span 2; margin-top: 1px; font-weight: 800; }
+      .kpi-item span { color: #6b7280; font-size: 12px; }
+      .kpi-item strong { color: #111827; font-size: 16px; }
+      .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+      .dashboard-grid.secondary { grid-template-columns: 1.15fr 0.85fr; }
+      .panel { border-radius: 8px; overflow: hidden; }
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 52px;
+        padding: 0 18px;
+        border-bottom: 1px solid #eef2f7;
+      }
+      .panel-title { display: flex; align-items: center; gap: 8px; color: #1677ff; }
+      .panel-title h2 { color: #111827; font-size: 16px; font-weight: 700; }
+      .panel-icon { display: inline-grid; place-items: center; width: 20px; height: 20px; font-weight: 800; }
+      .radar-wrap { display: grid; place-items: center; height: 320px; padding: 12px 8px 18px; }
+      .radar-svg { width: min(100%, 340px); height: 300px; }
+      .radar-grid { fill: none; stroke: #d9e2ef; stroke-width: 1; }
+      .radar-axis { stroke: #e5e7eb; stroke-width: 1; }
+      .radar-area { fill: rgba(22, 119, 255, 0.18); stroke: #1677ff; stroke-width: 2.5; }
+      .radar-dot { fill: #1677ff; stroke: #fff; stroke-width: 2; }
+      .radar-label { fill: #4b5563; font-size: 12px; font-weight: 600; }
+      .metrics-list { display: grid; gap: 18px; padding: 18px; }
+      .metric-topline { display: flex; align-items: center; justify-content: space-between; color: #111827; margin-bottom: 8px; }
+      .metric-topline strong, .metric-topline span { font-size: 14px; }
+      .progress-track { height: 8px; overflow: hidden; border-radius: 999px; background: #edf2f7; }
+      .progress-fill { height: 100%; border-radius: inherit; background: #1677ff; }
+      .metric-row p { color: #6b7280; font-size: 12px; margin-top: 8px; }
+      .review-list { display: grid; gap: 12px; padding: 18px; }
+      .review-card {
+        padding: 14px;
+        border: 1px solid #eef2f7;
+        border-radius: 6px;
+        background: #fbfdff;
+      }
+      .review-card div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .review-card strong { color: #111827; font-size: 14px; }
+      .review-card p, .risk-table p { color: #4b5563; font-size: 13px; margin-top: 8px; }
+      .status-tag {
+        display: inline-flex;
+        align-items: center;
+        height: 24px;
+        padding: 0 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 700;
+        border: 1px solid transparent;
+        white-space: nowrap;
+      }
+      .green { color: #237804; background: #f6ffed; border-color: #b7eb8f; }
+      .blue { color: #0958d9; background: #eaf3ff; border-color: #91caff; }
+      .amber { color: #ad6800; background: #fff7e6; border-color: #ffd591; }
+      .risk-table { display: grid; padding: 6px 18px 18px; }
+      .risk-table div { padding: 14px 0; border-bottom: 1px solid #eef2f7; }
+      .risk-table div:last-child { border-bottom: 0; }
+      .risk-table span:first-child { display: inline-block; color: #111827; font-size: 14px; font-weight: 700; margin-right: 8px; }
+      .timeline-panel { margin-bottom: 28px; }
+      .timeline { padding: 18px 18px 22px; }
+      .timeline-item { position: relative; padding-left: 34px; }
+      .timeline-item::before {
+        content: "";
+        position: absolute;
+        top: 28px;
+        bottom: -12px;
+        left: 13px;
+        width: 1px;
+        background: #d9e2ef;
+      }
+      .timeline-item:last-child::before { display: none; }
+      .timeline-marker {
+        position: absolute;
+        top: 10px;
+        left: 0;
+        z-index: 1;
+        display: grid;
+        place-items: center;
+        width: 27px;
+        height: 27px;
+        border-radius: 50%;
+        color: #1677ff;
+        background: #fff;
+        border: 1px solid #91caff;
+        font-size: 13px;
+        font-weight: 800;
+      }
+      .timeline-toggle {
+        width: 100%;
+        min-height: 48px;
+        display: grid;
+        grid-template-columns: 1fr auto 20px;
+        align-items: center;
+        gap: 14px;
+        padding: 8px 0;
+        border: 0;
+        text-align: left;
+        color: #111827;
+        background: transparent;
+        cursor: pointer;
+      }
+      .timeline-toggle small { display: block; color: #6b7280; font-size: 12px; }
+      .timeline-toggle strong { font-size: 14px; }
+      .timeline-score { color: #0958d9; font-size: 13px; font-weight: 700; }
+      .chevron { color: #6b7280; transition: transform 160ms ease; }
+      .timeline-item.open .chevron { transform: rotate(180deg); }
+      .timeline-body {
+        display: none;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        padding: 0 0 18px;
+      }
+      .timeline-item.open .timeline-body { display: grid; }
+      .answer-block, .review-block { min-width: 0; border-radius: 6px; padding: 14px; }
+      .answer-block { border: 1px solid #eef2f7; background: #fafafa; }
+      .review-block { border-left: 4px solid #1677ff; background: #eaf3ff; }
+      .answer-block h3, .review-block h3 { color: #111827; font-size: 14px; margin-bottom: 8px; }
+      .answer-block p, .review-block p { color: #374151; font-size: 13px; line-height: 1.8; }
+      @media (max-width: 900px) {
+        .summary-panel, .dashboard-grid, .dashboard-grid.secondary, .timeline-body { grid-template-columns: 1fr; }
+        .summary-panel { display: grid; }
+        .candidate-meta, .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+        .decision-badge { width: 100%; min-height: 120px; }
+      }
+      @media (max-width: 560px) {
+        .app-shell { padding: 12px; }
+        .summary-panel { padding: 18px; }
+        .candidate-block { display: grid; }
+        .candidate-meta, .kpi-grid { grid-template-columns: 1fr; }
+        .kpi-item { border-right: 0; border-bottom: 1px solid #eef2f7; }
+        .timeline-toggle { grid-template-columns: 1fr auto; }
+        .timeline-toggle .chevron { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="report-page">
+        <div class="topbar">
+          <div class="brand-mark">AI</div>
+          <div>
+            <strong>AI Interview Intelligence</strong>
+            <span>多 Agent 面试评估系统</span>
+          </div>
+          <button class="icon-button" aria-label="下载报告">↓</button>
+        </div>
+
+        <header class="summary-panel">
+          <div class="candidate-block">
+            <div class="avatar">林</div>
+            <div>
+              <div class="eyebrow">综合复盘报告</div>
+              <h1>AI 智能面试综合复盘报告</h1>
+              <dl class="candidate-meta">
+                <div><dt>候选人</dt><dd>林致远</dd></div>
+                <div><dt>应聘岗位</dt><dd>高级前端开发工程师</dd></div>
+                <div><dt>目标职级</dt><dd>P6 / Senior</dd></div>
+                <div><dt>报告编号</dt><dd>INT-20260609-FE-027</dd></div>
+              </dl>
+            </div>
+          </div>
+          <div class="decision-badge">
+            <span>建议录用</span>
+            <strong>A</strong>
+            <small>综合评分 86/100</small>
+          </div>
+        </header>
+
+        <section class="kpi-grid">
+          <div class="kpi-item"><b class="kpi-icon">◎</b><span>面试轮次</span><strong>4</strong></div>
+          <div class="kpi-item"><b class="kpi-icon">✓</b><span>通过 Agent</span><strong>2/3</strong></div>
+          <div class="kpi-item"><b class="kpi-icon">T</b><span>生成时间</span><strong>2026-06-09 16:40</strong></div>
+          <div class="kpi-item"><b class="kpi-icon">★</b><span>人才画像</span><strong>稳健型专家</strong></div>
+        </section>
+
+        <section class="dashboard-grid">
+          <section class="panel">
+            <header class="panel-header"><div class="panel-title"><span class="panel-icon">△</span><h2>核心能力模型</h2></div></header>
+            <div class="radar-wrap">
+              <svg class="radar-svg" viewBox="0 0 300 300" role="img" aria-label="核心能力雷达图">
+                <polygon class="radar-grid" points="150,124 172.5,137 172.5,163 150,176 127.5,163 127.5,137"></polygon>
+                <polygon class="radar-grid" points="150,98 195,124 195,176 150,202 105,176 105,124"></polygon>
+                <polygon class="radar-grid" points="150,72 217.5,111 217.5,189 150,228 82.5,189 82.5,111"></polygon>
+                <polygon class="radar-grid" points="150,46 240,98 240,202 150,254 60,202 60,98"></polygon>
+                <line class="radar-axis" x1="150" y1="150" x2="150" y2="46"></line>
+                <line class="radar-axis" x1="150" y1="150" x2="240" y2="98"></line>
+                <line class="radar-axis" x1="150" y1="150" x2="240" y2="202"></line>
+                <line class="radar-axis" x1="150" y1="150" x2="150" y2="254"></line>
+                <line class="radar-axis" x1="150" y1="150" x2="60" y2="202"></line>
+                <line class="radar-axis" x1="150" y1="150" x2="60" y2="98"></line>
+                <polygon class="radar-area" points="150,58.5 225.6,106.3 220.2,190.6 150,235.3 76.2,192.6 69.6,103.6"></polygon>
+                <text class="radar-label" x="150" y="25" text-anchor="middle">硬技能</text>
+                <text class="radar-label" x="258" y="88" text-anchor="start">架构思维</text>
+                <text class="radar-label" x="258" y="212" text-anchor="start">业务理解</text>
+                <text class="radar-label" x="150" y="277" text-anchor="middle">沟通表达</text>
+                <text class="radar-label" x="42" y="212" text-anchor="end">稳定抗压</text>
+                <text class="radar-label" x="42" y="88" text-anchor="end">学习迁移</text>
+                <circle class="radar-dot" cx="150" cy="58.5" r="3.5"></circle>
+                <circle class="radar-dot" cx="225.6" cy="106.3" r="3.5"></circle>
+                <circle class="radar-dot" cx="220.2" cy="190.6" r="3.5"></circle>
+                <circle class="radar-dot" cx="150" cy="235.3" r="3.5"></circle>
+                <circle class="radar-dot" cx="76.2" cy="192.6" r="3.5"></circle>
+                <circle class="radar-dot" cx="69.6" cy="103.6" r="3.5"></circle>
+              </svg>
+            </div>
+          </section>
+
+          <section class="panel">
+            <header class="panel-header"><div class="panel-title"><span class="panel-icon">≡</span><h2>逐项得分指标</h2></div></header>
+            <div class="metrics-list">
+              <div class="metric-row"><div class="metric-topline"><strong>技术深度</strong><span>89/100</span></div><div class="progress-track"><div class="progress-fill" style="width:89%"></div></div><p>React Fiber、状态管理与性能优化回答完整，能解释底层机制与工程权衡。</p></div>
+              <div class="metric-row"><div class="metric-topline"><strong>系统设计</strong><span>84/100</span></div><div class="progress-track"><div class="progress-fill" style="width:84%"></div></div><p>组件边界、缓存策略、灰度发布思路清晰，异常链路还可继续量化。</p></div>
+              <div class="metric-row"><div class="metric-topline"><strong>业务判断</strong><span>78/100</span></div><div class="progress-track"><div class="progress-fill" style="width:78%"></div></div><p>能围绕转化与稳定性做取舍，但对指标拆解的主动性略弱。</p></div>
+              <div class="metric-row"><div class="metric-topline"><strong>表达协作</strong><span>91/100</span></div><div class="progress-track"><div class="progress-fill" style="width:91%"></div></div><p>回答结构稳定，能先给结论再展开，追问下仍能保持节奏。</p></div>
+            </div>
+          </section>
+        </section>
+
+        <section class="dashboard-grid secondary">
+          <section class="panel">
+            <header class="panel-header"><div class="panel-title"><span class="panel-icon">□</span><h2>面试官综合评价</h2></div></header>
+            <div class="review-list">
+              <div class="review-card"><div><strong>技术一面 Agent</strong><span class="status-tag green">通过</span></div><p>候选人对现代前端工程体系理解成熟，能从调度、渲染和工程治理三个层面展开。</p></div>
+              <div class="review-card"><div><strong>架构二面 Agent</strong><span class="status-tag blue">通过</span></div><p>有大型项目复杂度意识，方案表达克制，具备主导中型模块的能力。</p></div>
+              <div class="review-card"><div><strong>HR Agent</strong><span class="status-tag amber">待确认</span></div><p>职业动机稳定，薪资与到岗时间需在 offer 前进一步确认。</p></div>
+            </div>
+          </section>
+          <section class="panel">
+            <header class="panel-header"><div class="panel-title"><span class="panel-icon">!</span><h2>录用风险提示</h2></div></header>
+            <div class="risk-table">
+              <div><span>业务指标拆解</span><span class="status-tag amber">中风险</span><p>建议终面追问增长指标、监控口径和复盘案例。</p></div>
+              <div><span>架构 owner 经验</span><span class="status-tag blue">可培养</span><p>具备模块治理能力，需确认跨团队推进深度。</p></div>
+              <div><span>到岗稳定性</span><span class="status-tag green">低风险</span><p>职业动机与岗位方向匹配，表达稳定。</p></div>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel timeline-panel">
+          <header class="panel-header"><div class="panel-title"><span class="panel-icon">T</span><h2>面试深度对线复盘</h2></div></header>
+          <div class="timeline">
+            <article class="timeline-item open">
+              <div class="timeline-marker">技</div>
+              <button class="timeline-toggle"><span><small>第 1 轮</small><strong>Q1: 谈谈你对 React Fiber 的理解</strong></span><span class="timeline-score">90 分</span><span class="chevron">⌄</span></button>
+              <div class="timeline-body"><div class="answer-block"><h3>候选人回答</h3><p>Fiber 是 React 为了解决同步渲染阻塞主线程而引入的数据结构和调度模型。它把渲染工作拆成可中断的小单元，并结合优先级调度，让高优先级任务可以更快响应。</p></div><div class="review-block"><h3>AI 导师复盘意见</h3><p>亮点：能抓住可中断渲染、优先级和用户体验之间的关系。不足：如果补充双缓存树、commit 阶段不可中断，以及 lane 模型的演进，会更接近资深候选人的完整答案。示范：可以先定义 Fiber，再按数据结构、调度流程、渲染阶段、实际收益四层展开。</p></div></div>
+            </article>
+            <article class="timeline-item">
+              <div class="timeline-marker">架</div>
+              <button class="timeline-toggle"><span><small>第 2 轮</small><strong>Q2: 如何设计一个稳定的低代码表单渲染器</strong></span><span class="timeline-score">84 分</span><span class="chevron">⌄</span></button>
+              <div class="timeline-body"><div class="answer-block"><h3>候选人回答</h3><p>我会把 schema 解析、组件注册、联动规则和校验策略拆开。核心渲染层保持纯粹，复杂业务通过插件或 hook 注入，避免表单引擎被业务逻辑污染。</p></div><div class="review-block"><h3>AI 导师复盘意见</h3><p>亮点：边界意识好，提到了注册表、规则引擎和插件化。不足：缺少对运行时性能、版本兼容、灰度回滚的说明。示范：建议补充 schema version、字段依赖图、局部渲染、错误隔离和埋点观测。</p></div></div>
+            </article>
+            <article class="timeline-item">
+              <div class="timeline-marker">业</div>
+              <button class="timeline-toggle"><span><small>第 3 轮</small><strong>Q3: 如果排期与质量冲突，你如何推动决策</strong></span><span class="timeline-score">82 分</span><span class="chevron">⌄</span></button>
+              <div class="timeline-body"><div class="answer-block"><h3>候选人回答</h3><p>我会先把质量风险显性化，列出必须修复和可延期项，再和产品确认核心业务目标。如果风险会影响主链路，就推动缩范围而不是压测试。</p></div><div class="review-block"><h3>AI 导师复盘意见</h3><p>亮点：有风险分级和范围管理意识，态度稳。不足：可以更主动量化影响，例如故障概率、影响用户量、回滚成本。示范：先对齐目标，再给出三套方案和推荐路径，让决策者看到取舍。</p></div></div>
+            </article>
+            <article class="timeline-item">
+              <div class="timeline-marker">HR</div>
+              <button class="timeline-toggle"><span><small>第 4 轮</small><strong>Q4: 你为什么考虑这次机会</strong></span><span class="timeline-score">87 分</span><span class="chevron">⌄</span></button>
+              <div class="timeline-body"><div class="answer-block"><h3>候选人回答</h3><p>我希望参与更复杂的业务平台建设，也希望从单点功能负责人转向更完整的系统 owner 角色。</p></div><div class="review-block"><h3>AI 导师复盘意见</h3><p>亮点：动机与岗位成长路径匹配，表达真实。不足：可以补充对团队业务的具体理解。示范：把个人成长、岗位职责和公司业务阶段连接起来，会更有说服力。</p></div></div>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script>
+      document.querySelectorAll('.timeline-toggle').forEach((button) => {
+        button.addEventListener('click', () => {
+          button.closest('.timeline-item').classList.toggle('open');
+        });
+      });
+    </script>
+  </body>
+</html>

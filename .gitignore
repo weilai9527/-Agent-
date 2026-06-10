@@ -23,3 +23,9 @@ Thumbs.db
 # Build and cache output
 .vite/
 coverage/
+
+# Local database files
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

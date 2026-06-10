@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   AlertTriangle,
@@ -13,15 +13,22 @@ import {
   Download,
   FileText,
   Headphones,
+  KeyRound,
+  LockKeyhole,
+  LogIn,
+  LogOut,
+  Mail,
   Layers3,
   MessageSquareText,
   Mic,
   Phone,
   PhoneOff,
   Radio,
+  Save,
   Send,
   ShieldCheck,
   Sparkles,
+  UserPlus,
   UserRound,
   Volume2,
   Wrench,
@@ -216,6 +223,59 @@ const interviewerProfile = {
   scoring: ['技术深度', '表达清晰度', '工程经验', '问题拆解', '反思能力'],
 };
 
+const authHighlights = [
+  {
+    title: '个人空间',
+    text: '登录后只展示当前用户的简历、模拟面试记录和复盘报告。',
+  },
+  {
+    title: '安全登录',
+    text: '正式接入后密码只保存哈希，登录态使用 HttpOnly Cookie。',
+  },
+  {
+    title: '访问隔离',
+    text: '每次读取报告、简历和消息都要同时校验 interview_id 与 user_id。',
+  },
+];
+
+const defaultProfile = {
+  nickname: '',
+  avatar_url: '',
+  target_role: '',
+  experience_level: '',
+  company_type: '',
+  target_city: '',
+  expected_salary: '',
+  years_of_experience: '',
+  education_level: '',
+  skills: '',
+  project_keywords: '',
+  resume_text: '',
+  project_experience: '',
+  portfolio_links: '',
+  preferred_interview_type: '',
+  preferred_difficulty: '',
+  preferred_interviewer_style: '',
+};
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+    ...options,
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.error || '请求失败，请稍后再试。');
+  }
+
+  return data;
+}
+
 function StatusTag({ children, tone = 'blue' }) {
   return <span className={`status-tag ${tone}`}>{children}</span>;
 }
@@ -337,6 +397,208 @@ function TimelineItem({ item, index }) {
   );
 }
 
+function AuthInput({ icon, label, type = 'text', value, onChange, placeholder }) {
+  return (
+    <label className="auth-field">
+      <span>{label}</span>
+      <div>
+        {icon}
+        <input
+          type={type}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+        />
+      </div>
+    </label>
+  );
+}
+
+function LoginPage({ onAuthenticated }) {
+  const [mode, setMode] = useState('login');
+  const [form, setForm] = useState({
+    email: 'candidate@example.com',
+    password: '',
+    confirmPassword: '',
+  });
+  const [authMessage, setAuthMessage] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const updateForm = (key, value) => {
+    setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const switchMode = (nextMode) => {
+    setMode(nextMode);
+    setAuthMessage('');
+    setAuthError('');
+  };
+
+  const isRegister = mode === 'register';
+  const isReset = mode === 'reset';
+  const title = isReset ? '重置登录密码' : isRegister ? '创建个人训练账号' : '登录个人面试空间';
+  const subtitle = isReset
+    ? '输入注册邮箱后，系统会发送一次性的密码重置链接。'
+    : '你的简历、模拟面试记录和复盘报告会保存在个人空间中，仅你可见。';
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setAuthMessage('');
+    setAuthError('');
+
+    if (isRegister && form.password !== form.confirmPassword) {
+      setAuthError('两次输入的密码不一致。');
+      return;
+    }
+
+    setSubmitting(true);
+
+    try {
+      if (isReset) {
+        await apiRequest('/api/auth/password-reset/request', {
+          method: 'POST',
+          body: JSON.stringify({ email: form.email }),
+        });
+        setAuthMessage('如果邮箱存在，我们会发送密码重置链接。');
+        return;
+      }
+
+      const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
+      const data = await apiRequest(endpoint, {
+        method: 'POST',
+        body: JSON.stringify({
+          email: form.email,
+          password: form.password,
+        }),
+      });
+
+      onAuthenticated(data.user);
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-page">
+        <div className="auth-brand-panel">
+          <div className="auth-brand-head">
+            <div className="brand-mark">
+              <ShieldCheck size={22} />
+            </div>
+            <div>
+              <strong>AI Interview Intelligence</strong>
+              <span>多 Agent 面试评估系统</span>
+            </div>
+          </div>
+
+          <div className="auth-copy">
+            <p className="eyebrow">Private Interview Workspace</p>
+            <h1>进入你的个人面试训练档案</h1>
+            <p>
+              从登录开始建立清晰的数据边界：每位用户只能看到自己的简历、训练记录、AI 面试官配置和复盘报告。
+            </p>
+          </div>
+
+          <div className="auth-highlight-list">
+            {authHighlights.map((item) => (
+              <div className="auth-highlight" key={item.title}>
+                <CheckCircle2 size={17} />
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>{item.text}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <form className="auth-card" onSubmit={handleSubmit}>
+          <div className="auth-card-head">
+            <div className="auth-icon">
+              {isReset ? <KeyRound size={22} /> : isRegister ? <UserPlus size={22} /> : <LogIn size={22} />}
+            </div>
+            <div>
+              <h2>{title}</h2>
+              <p>{subtitle}</p>
+            </div>
+          </div>
+
+          <div className="auth-tabs" aria-label="登录模式切换">
+            <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => switchMode('login')}>
+              登录
+            </button>
+            <button
+              type="button"
+              className={mode === 'register' ? 'active' : ''}
+              onClick={() => switchMode('register')}
+            >
+              注册
+            </button>
+          </div>
+
+          <div className="auth-form">
+            <AuthInput
+              icon={<Mail size={17} />}
+              label="邮箱"
+              type="email"
+              value={form.email}
+              onChange={(value) => updateForm('email', value)}
+              placeholder="name@example.com"
+            />
+            {!isReset && (
+              <AuthInput
+                icon={<LockKeyhole size={17} />}
+                label="密码"
+                type="password"
+                value={form.password}
+                onChange={(value) => updateForm('password', value)}
+                placeholder="输入登录密码"
+              />
+            )}
+            {isRegister && (
+              <AuthInput
+                icon={<LockKeyhole size={17} />}
+                label="确认密码"
+                type="password"
+                value={form.confirmPassword}
+                onChange={(value) => updateForm('confirmPassword', value)}
+                placeholder="再次输入密码"
+              />
+            )}
+          </div>
+
+          {!isReset && (
+            <div className="auth-options">
+              <label>
+                <input type="checkbox" defaultChecked />
+                保持登录状态
+              </label>
+              <button type="button" onClick={() => switchMode('reset')}>
+                忘记密码
+              </button>
+            </div>
+          )}
+
+          {authError && <p className="auth-alert error">{authError}</p>}
+          {authMessage && <p className="auth-alert success">{authMessage}</p>}
+
+          <button className="auth-submit" type="submit" disabled={submitting}>
+            {submitting ? '处理中...' : isReset ? '发送重置链接' : isRegister ? '创建账号并进入' : '登录并进入工作台'}
+          </button>
+
+          <p className="auth-notice">
+            当前已接入后端登录与 SQLite 数据库；密码使用加盐哈希保存，登录态通过 HttpOnly Cookie 维护。
+          </p>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function ViewSwitch({ view, onChange }) {
   return (
     <div className="view-switch" aria-label="页面视图切换">
@@ -368,6 +630,207 @@ function OptionGroup({ label, options, value, onChange }) {
         ))}
       </select>
     </label>
+  );
+}
+
+function TextField({ label, value, onChange, placeholder, type = 'text', disabled = false }) {
+  return (
+    <label className="profile-field">
+      <span>{label}</span>
+      <input
+        type={type}
+        value={value || ''}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+      />
+    </label>
+  );
+}
+
+function TextAreaField({ label, value, onChange, placeholder }) {
+  return (
+    <label className="profile-field wide">
+      <span>{label}</span>
+      <textarea value={value || ''} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+    </label>
+  );
+}
+
+function ProfilePage({ user, onUserUpdate, onLogout }) {
+  const [profile, setProfile] = useState(defaultProfile);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+
+    apiRequest('/api/profile')
+      .then((data) => {
+        if (mounted) {
+          setProfile({ ...defaultProfile, ...(data.profile || {}), nickname: data.profile?.nickname || user.name });
+        }
+      })
+      .catch((requestError) => {
+        if (mounted) {
+          setError(requestError.message);
+        }
+      })
+      .finally(() => {
+        if (mounted) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [user.name]);
+
+  const updateProfile = (key, value) => {
+    setProfile((current) => ({ ...current, [key]: value }));
+    setMessage('');
+    setError('');
+  };
+
+  const handleSave = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setMessage('');
+    setError('');
+
+    try {
+      const data = await apiRequest('/api/profile', {
+        method: 'PUT',
+        body: JSON.stringify(profile),
+      });
+      setProfile({ ...defaultProfile, ...(data.profile || {}) });
+      onUserUpdate({ ...user, name: data.profile?.nickname || user.name });
+      setMessage('个人资料已保存，新的面试配置会优先参考这些信息。');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <section className="profile-page">
+        <div className="profile-loading">正在读取个人训练档案</div>
+      </section>
+    );
+  }
+
+  return (
+    <form className="profile-page" onSubmit={handleSave}>
+      <section className="profile-hero">
+        <div className="profile-identity">
+          <div className="profile-avatar">
+            {profile.avatar_url ? <img src={profile.avatar_url} alt="" /> : <UserRound size={34} />}
+          </div>
+          <div>
+            <p className="eyebrow">Personal Interview Profile</p>
+            <h1>个人面试训练档案</h1>
+            <span>你填写的信息会用于生成更贴近目标岗位的模拟面试官和复盘建议。</span>
+          </div>
+        </div>
+        <button className="primary-action" type="submit" disabled={saving}>
+          <Save size={17} />
+          {saving ? '保存中' : '保存资料'}
+        </button>
+      </section>
+
+      {(message || error) && (
+        <div className={`profile-message ${error ? 'error' : 'success'}`}>{error || message}</div>
+      )}
+
+      <section className="profile-layout">
+        <aside className="profile-sidebar">
+          <div className="profile-summary">
+            <strong>{profile.nickname || user.name}</strong>
+            <span>{user.email}</span>
+            <p>{profile.target_role || '还没有设置目标岗位'}</p>
+          </div>
+          <div className="profile-anchor-list">
+            <a href="#basic">基础资料</a>
+            <a href="#target">求职目标</a>
+            <a href="#background">技能背景</a>
+            <a href="#resume">简历资料</a>
+            <a href="#preference">面试偏好</a>
+            <a href="#security">账号安全</a>
+          </div>
+        </aside>
+
+        <div className="profile-content">
+          <Card title="基础资料" icon={<UserRound size={18} />} className="profile-section-card">
+            <div className="profile-form-grid" id="basic">
+              <TextField label="昵称" value={profile.nickname} onChange={(value) => updateProfile('nickname', value)} />
+              <TextField label="邮箱" value={user.email} onChange={() => {}} disabled />
+              <TextField label="头像链接" value={profile.avatar_url} onChange={(value) => updateProfile('avatar_url', value)} placeholder="https://..." />
+            </div>
+          </Card>
+
+          <Card title="我的目标" icon={<BriefcaseBusiness size={18} />} className="profile-section-card">
+            <div className="profile-form-grid" id="target">
+              <TextField label="目标岗位" value={profile.target_role} onChange={(value) => updateProfile('target_role', value)} placeholder="前端开发 / AI Agent 工程师" />
+              <TextField label="经验水平" value={profile.experience_level} onChange={(value) => updateProfile('experience_level', value)} placeholder="应届 / 初级 / 中级 / 高级" />
+              <TextField label="目标公司类型" value={profile.company_type} onChange={(value) => updateProfile('company_type', value)} placeholder="大厂 / 创业公司 / 外企" />
+              <TextField label="目标城市" value={profile.target_city} onChange={(value) => updateProfile('target_city', value)} placeholder="上海 / 北京 / 远程" />
+              <TextField label="期望薪资" value={profile.expected_salary} onChange={(value) => updateProfile('expected_salary', value)} placeholder="例如 25k-35k" />
+            </div>
+          </Card>
+
+          <Card title="技能背景" icon={<Wrench size={18} />} className="profile-section-card">
+            <div className="profile-form-grid" id="background">
+              <TextField label="工作年限" value={profile.years_of_experience} onChange={(value) => updateProfile('years_of_experience', value)} placeholder="例如 3 年" />
+              <TextField label="学历背景" value={profile.education_level} onChange={(value) => updateProfile('education_level', value)} placeholder="本科 / 硕士 / 自学转行" />
+              <TextField label="技能标签" value={profile.skills} onChange={(value) => updateProfile('skills', value)} placeholder="React, Node.js, SQL, Agent" />
+              <TextField label="项目关键词" value={profile.project_keywords} onChange={(value) => updateProfile('project_keywords', value)} placeholder="低代码、性能优化、RAG、支付链路" />
+            </div>
+          </Card>
+
+          <Card title="简历资料" icon={<FileText size={18} />} className="profile-section-card">
+            <div className="profile-form-grid" id="resume">
+              <TextAreaField label="简历文本" value={profile.resume_text} onChange={(value) => updateProfile('resume_text', value)} placeholder="粘贴你的简历核心内容，AI 会用于项目深挖和追问。" />
+              <TextAreaField label="项目经历" value={profile.project_experience} onChange={(value) => updateProfile('project_experience', value)} placeholder="写下最想被练习的项目背景、职责、难点和结果。" />
+              <TextField label="作品链接" value={profile.portfolio_links} onChange={(value) => updateProfile('portfolio_links', value)} placeholder="GitHub / 博客 / 作品集链接" />
+              <div className="privacy-note">
+                <ShieldCheck size={16} />
+                <span>简历和面试记录仅用于生成你的模拟面试与复盘报告，不会展示给其他用户。</span>
+              </div>
+            </div>
+          </Card>
+
+          <Card title="面试偏好" icon={<Sparkles size={18} />} className="profile-section-card">
+            <div className="profile-form-grid" id="preference">
+              <TextField label="默认面试类型" value={profile.preferred_interview_type} onChange={(value) => updateProfile('preferred_interview_type', value)} placeholder="技术一面 / HR 面 / 综合模拟" />
+              <TextField label="默认难度" value={profile.preferred_difficulty} onChange={(value) => updateProfile('preferred_difficulty', value)} placeholder="轻松 / 标准 / 严格" />
+              <TextField label="面试官风格" value={profile.preferred_interviewer_style} onChange={(value) => updateProfile('preferred_interviewer_style', value)} placeholder="友好引导 / 犀利追问" />
+            </div>
+          </Card>
+
+          <Card title="账号安全" icon={<KeyRound size={18} />} className="profile-section-card">
+            <div className="security-panel" id="security">
+              <div>
+                <strong>最近登录时间</strong>
+                <span>{user.lastLoginAt || '暂无记录'}</span>
+              </div>
+              <div>
+                <strong>登录账号</strong>
+                <span>{user.email}</span>
+              </div>
+              <button type="button" className="secondary-action" onClick={onLogout}>
+                <LogOut size={16} />
+                退出登录
+              </button>
+            </div>
+          </Card>
+        </div>
+      </section>
+    </form>
   );
 }
 
@@ -770,7 +1233,52 @@ function ReportPage() {
 }
 
 function App() {
+  const [user, setUser] = useState(undefined);
   const [view, setView] = useState('setup');
+
+  useEffect(() => {
+    let mounted = true;
+
+    apiRequest('/api/auth/me')
+      .then((data) => {
+        if (mounted) {
+          setUser(data.user);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setUser(null);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const handleLogout = async () => {
+    await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    setUser(null);
+    setView('setup');
+  };
+
+  if (user === undefined) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-loading">
+          <div className="brand-mark">
+            <ShieldCheck size={22} />
+          </div>
+          <strong>正在确认登录状态</strong>
+          <span>我们会先检查当前浏览器是否已有有效的安全会话。</span>
+        </section>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage onAuthenticated={setUser} />;
+  }
 
   return (
     <main className="app-shell">
@@ -784,12 +1292,25 @@ function App() {
             <span>多 Agent 面试评估系统</span>
           </div>
           <ViewSwitch view={view} onChange={setView} />
+          <button
+            className={`topbar-account ${view === 'profile' ? 'active' : ''}`}
+            type="button"
+            onClick={() => setView('profile')}
+            aria-label="打开个人中心"
+          >
+            <UserRound size={16} />
+            <span>{user.name}</span>
+          </button>
           <button className="icon-button" aria-label="下载报告">
             <Download size={18} />
+          </button>
+          <button className="icon-button" aria-label="退出登录" onClick={handleLogout}>
+            <LogOut size={18} />
           </button>
         </div>
 
         {view === 'setup' && <SetupPage onStart={() => setView('phone')} />}
+        {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
         {view === 'phone' && <PhoneInterviewPage />}
         {view === 'report' && <ReportPage />}
       </div>

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   AlertTriangle,
@@ -13,6 +13,7 @@ import {
   Download,
   FileText,
   Headphones,
+  History,
   KeyRound,
   LockKeyhole,
   LogIn,
@@ -28,6 +29,9 @@ import {
   Send,
   ShieldCheck,
   Sparkles,
+  Target,
+  TrendingUp,
+  Upload,
   UserPlus,
   UserRound,
   Volume2,
@@ -223,6 +227,135 @@ const interviewerProfile = {
   scoring: ['技术深度', '表达清晰度', '工程经验', '问题拆解', '反思能力'],
 };
 
+const resumeAnalysis = {
+  matchScore: 86,
+  targetRole: '高级前端开发工程师',
+  summary:
+    '简历整体与高级前端岗位匹配度较高，核心优势集中在中后台复杂业务、性能优化、低代码表单和组件库治理。建议补充更明确的业务指标和跨团队推进案例。',
+  parsedSections: [
+    { label: '基础信息', value: '已识别姓名、联系方式、目标岗位' },
+    { label: '技能栈', value: 'React、Node.js、性能优化、工程治理' },
+    { label: '项目经历', value: '低代码表单、组件库、中后台性能治理' },
+    { label: '求职意向', value: '高级前端 / AI 工具平台 / 中大型团队' },
+  ],
+  highlights: [
+    '有完整的中后台性能优化经验，适合展开指标拆解、瓶颈定位和收益验证。',
+    '低代码表单项目能体现抽象能力，可重点讲 schema、插件化、联动规则和版本兼容。',
+    '组件库治理经历能支撑工程 owner 能力表达，适合补充规范制定和推广过程。',
+  ],
+  risks: [
+    '项目结果需要进一步量化，例如首屏耗时、长任务占比、转化率或缺陷率变化。',
+    '架构 owner 经验描述偏隐性，建议补充跨团队协作、方案评审和灰度发布案例。',
+    'AI Agent 相关经验如果作为目标方向，需要补充真实场景、工具链或落地边界。',
+  ],
+  questions: [
+    '你在最近一次性能优化中，如何判断瓶颈来自渲染、接口还是资源加载？',
+    '低代码表单的 schema 如何做版本兼容和灰度回滚？',
+    '组件库治理如何推动业务团队采用，而不是停留在工具建设？',
+    '如果线上优化指标变好但业务指标没有变化，你会如何复盘？',
+  ],
+  suggestions: [
+    '把每段项目经历改成“背景-职责-技术难点-结果指标”的结构。',
+    '为核心项目补充 2-3 个可被追问的技术细节，避免只写宏观职责。',
+    '把“参与/负责”改成更明确的动作，例如设计、落地、推动、复盘。',
+  ],
+  recommendedSetup: [
+    { label: '面试类型', value: '技术二面' },
+    { label: '面试难度', value: '严格' },
+    { label: '练习重点', value: '项目深挖' },
+    { label: '面试官风格', value: '犀利追问' },
+  ],
+};
+
+function hasAnyKeyword(text, keywords) {
+  const lowerText = text.toLowerCase();
+  return keywords.some((keyword) => lowerText.includes(keyword.toLowerCase()));
+}
+
+function buildResumeAnalysis(text, fileName = '') {
+  const normalizedText = String(text || '').trim();
+  const sourceName = fileName || '粘贴文本';
+  const hasFrontend = hasAnyKeyword(normalizedText, ['react', 'vue', '前端', '组件', '性能', 'vite']);
+  const hasBackend = hasAnyKeyword(normalizedText, ['node', 'java', 'go', '后端', '接口', '数据库', 'express']);
+  const hasAgent = hasAnyKeyword(normalizedText, ['agent', 'ai', 'llm', 'rag', '大模型', '智能体']);
+  const hasMetrics = /(\d+%|\d+\s*(ms|秒|分钟|万|k|K)|提升|降低|减少|增长)/.test(normalizedText);
+  const hasProjects = hasAnyKeyword(normalizedText, ['项目', '负责', '主导', '设计', '落地', '优化']);
+  const targetRole = hasAgent
+    ? 'AI Agent 工程师'
+    : hasBackend && !hasFrontend
+      ? '后端开发工程师'
+      : '高级前端开发工程师';
+  const matchScore = Math.min(
+    96,
+    62 +
+      (hasFrontend ? 10 : 0) +
+      (hasBackend ? 7 : 0) +
+      (hasAgent ? 8 : 0) +
+      (hasProjects ? 8 : 0) +
+      (hasMetrics ? 7 : 0) +
+      Math.min(8, Math.floor(normalizedText.length / 350))
+  );
+  const skills = [
+    hasFrontend && '前端工程化 / 组件化',
+    hasBackend && '后端接口 / 数据库',
+    hasAgent && 'AI Agent / 大模型应用',
+    hasMetrics && '结果指标表达',
+  ].filter(Boolean);
+
+  return {
+    matchScore,
+    targetRole,
+    summary: normalizedText
+      ? `已基于“${sourceName}”解析 ${normalizedText.length} 个字符。简历与${targetRole}方向的匹配度为 ${matchScore}/100，后续面试建议重点围绕项目职责、技术难点、指标结果和复盘能力展开。`
+      : resumeAnalysis.summary,
+    parsedSections: [
+      { label: '来源文件', value: sourceName },
+      { label: '文本规模', value: normalizedText ? `${normalizedText.length} 个字符` : '暂无简历文本' },
+      { label: '识别技能', value: skills.length ? skills.join('、') : '建议补充技术栈、项目职责和业务结果' },
+      { label: '求职意向', value: targetRole },
+    ],
+    highlights: [
+      hasProjects
+        ? '简历中出现了项目职责和落地描述，适合在面试中继续展开背景、动作和结果。'
+        : '建议补充 1-2 个完整项目案例，突出你承担的角色和关键动作。',
+      hasMetrics
+        ? '简历中包含量化表达，可继续把指标和业务收益讲得更完整。'
+        : '目前量化结果偏少，建议补充耗时、转化率、稳定性、缺陷率或效率提升等指标。',
+      skills.length
+        ? `当前可围绕 ${skills.slice(0, 2).join('、')} 设计追问。`
+        : '技能关键词不够集中，建议补充核心技术栈和熟悉程度。',
+    ],
+    risks: [
+      hasMetrics
+        ? '需要准备好指标口径，避免面试官追问时无法解释数据来源。'
+        : '项目结果缺少量化指标，容易被追问“具体收益是什么”。',
+      '如果只描述参与事项，不说明个人决策和取舍，资深度会显得不足。',
+      hasAgent
+        ? 'AI Agent 经历需要说明真实边界、工具链、失败场景和评估方式。'
+        : '如目标是 AI 相关岗位，需要补充大模型或 Agent 项目的真实落地经验。',
+    ],
+    questions: [
+      '请挑一个最复杂的项目，说明你的职责边界、核心难点和最终结果。',
+      '你如何判断这个方案是最优解，而不是只满足当时需求？',
+      hasMetrics
+        ? '简历中的量化指标是如何采集和验证的？'
+        : '如果让你补充项目指标，你会选择哪些指标证明价值？',
+      `针对${targetRole}岗位，你认为自己最能被追问的技术点是什么？`,
+    ],
+    suggestions: [
+      '把核心经历整理成“背景-任务-动作-结果-复盘”的结构。',
+      '每个重点项目准备 2-3 个可被深入追问的技术细节。',
+      '把“参与、负责”改成更具体的动作，例如设计、拆解、推动、优化、复盘。',
+    ],
+    recommendedSetup: [
+      { label: '面试类型', value: hasProjects ? '技术二面' : '技术一面' },
+      { label: '面试难度', value: matchScore >= 82 ? '严格' : '标准' },
+      { label: '练习重点', value: hasMetrics ? '项目深挖' : '指标表达' },
+      { label: '面试官风格', value: matchScore >= 82 ? '犀利追问' : '友好引导' },
+    ],
+  };
+}
+
 const authHighlights = [
   {
     title: '个人空间',
@@ -257,6 +390,106 @@ const defaultProfile = {
   preferred_difficulty: '',
   preferred_interviewer_style: '',
 };
+
+const dimensionLabels = {
+  technical_depth: '技术深度',
+  expression_clarity: '表达清晰度',
+  business_understanding: '业务理解',
+};
+
+const recommendationLabels = {
+  strong_pass: '强烈建议通过',
+  pass: '建议通过',
+  borderline: '谨慎推进',
+  no_pass: '暂不通过',
+};
+
+function parseJsonValue(value, fallback) {
+  if (!value) return fallback;
+  if (typeof value !== 'string') return value;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function formatDateTime(value) {
+  if (!value) return '暂无';
+  return new Date(value).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function createInitialQuestion(interview, agent) {
+  const role = interview?.target_role || '目标岗位';
+  const focus = interview?.focus_areas || '项目经历';
+  return `我们先从你的${focus}开始。请结合一次真实经历，说明你在${role}相关工作中遇到的关键问题、你的行动以及最终结果。`;
+}
+
+function createFollowUpQuestion(answer, interview) {
+  const text = String(answer || '');
+  if (/指标|数据|百分比|耗时|成本|收益/.test(text)) {
+    return '你刚才提到了结果或收益，请继续说明这些指标是如何采集、验证和复盘的？';
+  }
+  if (/架构|设计|模块|系统|边界/.test(text)) {
+    return '这个方案的边界条件是什么？如果流量、团队规模或业务优先级变化，你会如何调整设计？';
+  }
+  if (/协作|推动|沟通|团队/.test(text)) {
+    return '在推动过程中有没有遇到分歧？你是如何对齐目标并让方案落地的？';
+  }
+  return `请再补充一个更具体的例子：当时的限制条件是什么，你做了哪些取舍，最后对${interview?.target_role || '目标岗位'}能力有什么体现？`;
+}
+
+function reportToViewModel(reportData, user) {
+  const abilityRadar = parseJsonValue(reportData?.ability_radar, {});
+  const agentFeedback = parseJsonValue(reportData?.agent_feedback, []);
+  const timelineReview = parseJsonValue(reportData?.timeline_review, []);
+  const suggestions = String(reportData?.suggestions || '')
+    .split('\n')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return {
+    candidate: user?.name || '候选人',
+    role: reportData?.target_role || '目标岗位',
+    result: recommendationLabels[reportData?.pass_recommendation] || '待判断',
+    grade: reportData?.grade || '-',
+    score: reportData?.total_score || 0,
+    generatedAt: formatDateTime(reportData?.updated_at || reportData?.created_at),
+    interviewId: reportData?.interview_id || '-',
+    summary: reportData?.summary || '暂无报告摘要。',
+    suggestions,
+    radar: Object.entries(abilityRadar).map(([key, value]) => ({
+      subject: dimensionLabels[key] || key,
+      value: Number(value) || 0,
+    })),
+    metrics: Object.entries(abilityRadar).map(([key, value]) => ({
+      label: dimensionLabels[key] || key,
+      value: Number(value) || 0,
+      note: `${dimensionLabels[key] || key}当前均分 ${Number(value) || 0}/100，来自本场候选人回答的单轮评价。`,
+    })),
+    interviewers: agentFeedback.map((item) => ({
+      name: item.agent_name,
+      decision: item.score >= 80 ? '表现稳定' : item.score >= 70 ? '继续观察' : '需要加强',
+      color: item.score >= 80 ? 'green' : item.score >= 70 ? 'blue' : 'amber',
+      text: item.comment,
+    })),
+    timeline: timelineReview
+      .filter((item) => item.sender_type === 'candidate' || item.sender_type === 'agent')
+      .map((item) => ({
+        type: item.sender_type === 'candidate' ? 'business' : item.agent_name?.includes('HR') ? 'hr' : 'tech',
+        title: `${item.agent_name || (item.sender_type === 'candidate' ? '候选人' : '系统')} · ${item.message_type}`,
+        answer: item.content_preview,
+        review: item.score ? `本轮候选人回答得分 ${item.score}/100。` : '这是一条面试官提问或追问，用于串联本场面试上下文。',
+        score: item.score || 0,
+      })),
+  };
+}
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(path, {
@@ -606,6 +839,10 @@ function ViewSwitch({ view, onChange }) {
         <Layers3 size={15} />
         面试配置
       </button>
+      <button className={view === 'resume' ? 'active' : ''} onClick={() => onChange('resume')}>
+        <Upload size={15} />
+        简历分析
+      </button>
       <button className={view === 'phone' ? 'active' : ''} onClick={() => onChange('phone')}>
         <Phone size={15} />
         电话面试
@@ -613,6 +850,14 @@ function ViewSwitch({ view, onChange }) {
       <button className={view === 'report' ? 'active' : ''} onClick={() => onChange('report')}>
         <FileText size={15} />
         复盘报告
+      </button>
+      <button className={view === 'history' ? 'active' : ''} onClick={() => onChange('history')}>
+        <History size={15} />
+        历史记录
+      </button>
+      <button className={view === 'stats' ? 'active' : ''} onClick={() => onChange('stats')}>
+        <TrendingUp size={15} />
+        能力画像
       </button>
     </div>
   );
@@ -834,6 +1079,236 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
   );
 }
 
+function ResumeAnalysisPage({ onUseSetup }) {
+  const [resumeText, setResumeText] = useState(
+    '负责过中后台性能优化、低代码表单搭建和组件库治理，希望重点练习项目深挖与架构表达。'
+  );
+  const [fileName, setFileName] = useState('');
+  const [analysis, setAnalysis] = useState(() => buildResumeAnalysis(resumeText));
+  const [analyzed, setAnalyzed] = useState(true);
+  const [profile, setProfile] = useState(null);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [analyzing, setAnalyzing] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    apiRequest('/api/profile')
+      .then((data) => {
+        if (!mounted) return;
+        const currentProfile = { ...defaultProfile, ...(data.profile || {}) };
+        const savedResume = currentProfile.resume_text || currentProfile.project_experience;
+        setProfile(currentProfile);
+
+        if (savedResume) {
+          setResumeText(savedResume);
+          setAnalysis(buildResumeAnalysis(savedResume));
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setMessage('当前先使用页面内文本进行分析，登录资料读取失败时不会影响本次预览。');
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const handleFileChange = (event) => {
+    const file = event.target.files?.[0];
+    setFileName(file?.name || '');
+    setMessage('');
+    setError('');
+
+    if (!file) {
+      setAnalyzed(false);
+      return;
+    }
+
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    const readableTextExtensions = new Set(['txt', 'md', 'json']);
+
+    if (!readableTextExtensions.has(extension)) {
+      setAnalyzed(false);
+      setError('当前版本只会解析 txt、md、json 文本文件。PDF、Word、图片需要后端文件解析能力，暂时请复制简历文字粘贴到文本框。');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const nextText = String(reader.result || '').trim();
+      setResumeText(nextText);
+      setAnalysis(buildResumeAnalysis(nextText, file.name));
+      setAnalyzed(true);
+      setMessage(`已读取 ${file.name}，并刷新分析结果。`);
+    };
+    reader.onerror = () => {
+      setError('文件读取失败，请重新选择文件或直接粘贴简历文本。');
+    };
+    reader.readAsText(file);
+  };
+
+  const handleAnalyze = async () => {
+    setAnalyzing(true);
+    setMessage('');
+    setError('');
+
+    const nextAnalysis = buildResumeAnalysis(resumeText, fileName);
+    setAnalysis(nextAnalysis);
+    setAnalyzed(true);
+
+    try {
+      const currentProfile = profile || defaultProfile;
+      const data = await apiRequest('/api/profile', {
+        method: 'PUT',
+        body: JSON.stringify({
+          ...currentProfile,
+          resume_text: resumeText,
+          project_experience: currentProfile.project_experience || resumeText,
+          target_role: currentProfile.target_role || nextAnalysis.targetRole,
+          preferred_interview_type: currentProfile.preferred_interview_type || nextAnalysis.recommendedSetup[0].value,
+          preferred_difficulty: currentProfile.preferred_difficulty || nextAnalysis.recommendedSetup[1].value,
+          preferred_interviewer_style: currentProfile.preferred_interviewer_style || nextAnalysis.recommendedSetup[3].value,
+        }),
+      });
+      setProfile({ ...defaultProfile, ...(data.profile || {}) });
+      setMessage('分析结果已刷新，并同步保存到个人资料。');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  return (
+    <section className="resume-page">
+      <div className="resume-hero">
+        <div>
+          <p className="eyebrow">P0 Resume Intelligence</p>
+          <h1>简历上传与分析</h1>
+          <span>
+            先解析真实简历，再生成岗位匹配、亮点风险、高概率追问和推荐面试配置，让后续多 Agent 面试更贴近候选人经历。
+          </span>
+        </div>
+        <button className="primary-action" onClick={handleAnalyze} disabled={analyzing}>
+          <Sparkles size={17} />
+          {analyzing ? '分析中' : '开始分析'}
+        </button>
+      </div>
+
+      {(message || error) && (
+        <div className={`profile-message ${error ? 'error' : 'success'}`}>{error || message}</div>
+      )}
+
+      <section className="resume-grid">
+        <Card title="上传或粘贴简历" icon={<Upload size={18} />}>
+          <div className="resume-input-panel">
+            <label className="resume-upload-box">
+              <Upload size={24} />
+              <strong>{fileName || '上传简历文件'}</strong>
+              <span>支持 txt、md、json 文本解析；PDF、Word、图片请先复制文字粘贴。</span>
+              <input type="file" accept=".txt,.md,.json,.pdf,.doc,.docx,.png,.jpg,.jpeg" onChange={handleFileChange} />
+            </label>
+
+            <label className="brief-field">
+              <span>粘贴简历 / 项目简介</span>
+              <textarea value={resumeText} onChange={(event) => {
+                setResumeText(event.target.value);
+                setAnalyzed(false);
+                setMessage('');
+                setError('');
+              }} />
+            </label>
+
+            <div className="privacy-note">
+              <ShieldCheck size={16} />
+              <span>简历分析结果会用于生成本场面试官、追问路线和复盘维度，默认只在当前用户个人空间内可见。</span>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="岗位匹配结果" icon={<Target size={18} />}>
+          <div className="match-card">
+            <div className="match-score">
+              <span>匹配度</span>
+              <strong>{analysis.matchScore}</strong>
+              <small>/100</small>
+            </div>
+            <div className="match-copy">
+              <StatusTag tone="green">P0 核心能力</StatusTag>
+              <h2>{analysis.targetRole}</h2>
+              <p>{analysis.summary}</p>
+            </div>
+          </div>
+        </Card>
+      </section>
+
+      <section className="analysis-grid">
+        <Card title="结构化解析" icon={<FileText size={18} />}>
+          <div className="parsed-list">
+            {analysis.parsedSections.map((item) => (
+              <div key={item.label}>
+                <strong>{item.label}</strong>
+                <span>{item.value}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card title="简历亮点" icon={<Award size={18} />}>
+          <InsightList items={analysis.highlights} tone="green" />
+        </Card>
+
+        <Card title="风险点与短板" icon={<AlertTriangle size={18} />}>
+          <InsightList items={analysis.risks} tone="amber" />
+        </Card>
+
+        <Card title="高概率面试题" icon={<MessageSquareText size={18} />}>
+          <InsightList items={analysis.questions} tone="blue" />
+        </Card>
+      </section>
+
+      <section className="resume-bottom-grid">
+        <Card title="简历优化建议" icon={<Wrench size={18} />}>
+          <InsightList items={analysis.suggestions} tone="blue" />
+        </Card>
+
+        <Card title="推荐面试配置" icon={<Layers3 size={18} />}>
+          <div className="recommended-setup">
+            {analysis.recommendedSetup.map((item) => (
+              <div key={item.label}>
+                <span>{item.label}</span>
+                <strong>{item.value}</strong>
+              </div>
+            ))}
+            <button className="primary-action" onClick={onUseSetup}>
+              生成本场面试配置
+            </button>
+          </div>
+        </Card>
+      </section>
+
+      {!analyzed && <div className="resume-draft-note">简历内容已更新，点击“开始分析”刷新分析结果。</div>}
+    </section>
+  );
+}
+
+function InsightList({ items, tone }) {
+  return (
+    <div className="insight-list">
+      {items.map((item, index) => (
+        <div className={`insight-item ${tone}`} key={item}>
+          <span>{String(index + 1).padStart(2, '0')}</span>
+          <p>{item}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SetupPage({ onStart }) {
   const [form, setForm] = useState({
     role: setupOptions.roles[0],
@@ -846,9 +1321,68 @@ function SetupPage({ onStart }) {
     brief:
       '负责过中后台性能优化、低代码表单搭建和组件库治理，希望重点练习项目深挖与架构表达。',
   });
+  const [loadingProfile, setLoadingProfile] = useState(true);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+
+    apiRequest('/api/profile')
+      .then((data) => {
+        if (!mounted) return;
+        const profile = data.profile || {};
+        setForm((current) => ({
+          ...current,
+          role: profile.target_role || current.role,
+          level: profile.experience_level || current.level,
+          interviewType: profile.preferred_interview_type || current.interviewType,
+          intensity: profile.preferred_difficulty || current.intensity,
+          style: profile.preferred_interviewer_style || current.style,
+          brief: profile.project_experience || profile.resume_text || current.brief,
+        }));
+      })
+      .catch((requestError) => {
+        if (mounted) setError(requestError.message);
+      })
+      .finally(() => {
+        if (mounted) setLoadingProfile(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const updateForm = (key, value) => {
     setForm((current) => ({ ...current, [key]: value }));
+    setError('');
+  };
+
+  const handleStart = async () => {
+    setStarting(true);
+    setError('');
+
+    try {
+      const data = await apiRequest('/api/interviews', {
+        method: 'POST',
+        body: JSON.stringify({
+          target_role: form.role,
+          experience_level: form.level,
+          interview_type: form.interviewType,
+          company_context: form.companyScene,
+          focus_areas: [form.focusArea, form.brief].filter(Boolean).join('；'),
+          difficulty: form.intensity,
+          interviewer_style: form.style,
+        }),
+      });
+      await apiRequest(`/api/interviews/${data.interview.id}/start`, { method: 'POST' });
+      onStart(data.interview.id);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setStarting(false);
+    }
   };
 
   return (
@@ -861,11 +1395,13 @@ function SetupPage({ onStart }) {
             先用少量关键信息确定训练目标，再生成面试官策略、追问方式和评分标准。
           </span>
         </div>
-        <button className="primary-action" onClick={onStart}>
+        <button className="primary-action" onClick={handleStart} disabled={starting || loadingProfile}>
           <Phone size={17} />
-          开始电话面试
+          {starting ? '创建中' : '开始电话面试'}
         </button>
       </div>
+
+      {error && <div className="profile-message error">{error}</div>}
 
       <section className="setup-grid">
         <Card title="面试前配置" icon={<Layers3 size={18} />}>
@@ -980,15 +1516,18 @@ function AgentRoster({ agents, currentAgent }) {
   return (
     <div className="agent-roster">
       {agents.map((agent) => {
-        const active = agent.name === currentAgent;
+        const name = agent.agent_name || agent.name;
+        const role = agent.agent_role || agent.role;
+        const active = name === currentAgent;
+        const statusText = active ? '正在提问' : agent.status === 'completed' ? '已完成' : '待接入';
         return (
-          <div className={`agent-row ${active ? 'active' : ''}`} key={agent.name}>
-            <AgentAvatar name={agent.name} active={active} />
+          <div className={`agent-row ${active ? 'active' : ''}`} key={agent.id || name}>
+            <AgentAvatar name={name} active={active} />
             <div>
-              <strong>{agent.name}</strong>
-              <span>{agent.role}</span>
+              <strong>{name}</strong>
+              <span>{role}</span>
             </div>
-            <StatusTag tone={agent.tone}>{agent.status}</StatusTag>
+            <StatusTag tone={active ? 'green' : 'blue'}>{statusText}</StatusTag>
           </div>
         );
       })}
@@ -997,22 +1536,348 @@ function AgentRoster({ agents, currentAgent }) {
 }
 
 function TranscriptMessage({ item }) {
-  const isCandidate = item.type === 'candidate';
+  const isCandidate = item.sender_type === 'candidate' || item.type === 'candidate';
+  const speaker = item.agent_name || item.speaker || (isCandidate ? '候选人' : 'Agent');
+  const time = item.created_at ? formatDateTime(item.created_at) : item.time;
+  const text = item.content || item.text;
 
   return (
     <article className={`transcript-message ${isCandidate ? 'candidate' : 'agent'}`}>
       <div className="message-meta">
-        <strong>{item.speaker}</strong>
-        <span>{item.time}</span>
+        <strong>{speaker}</strong>
+        <span>{time}</span>
       </div>
-      <p>{item.text}</p>
+      <p>{text}</p>
     </article>
   );
 }
 
-function PhoneInterviewPage() {
+function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
+  const [interview, setInterview] = useState(null);
+  const [agents, setAgents] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [answer, setAnswer] = useState('');
+  const [loading, setLoading] = useState(Boolean(interviewId));
+  const [submitting, setSubmitting] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [error, setError] = useState('');
+  const [voiceStatus, setVoiceStatus] = useState('idle');
+  const [voiceMessage, setVoiceMessage] = useState('点击麦克风开始真实语音通话');
+
+  const peerConnectionRef = useRef(null);
+  const dataChannelRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteAudioRef = useRef(null);
+  const savedRealtimeEventsRef = useRef(new Set());
+
+  const activeAgent = agents[0] || null;
+  const currentAgentName = activeAgent?.agent_name || liveInterview.currentAgent;
+  const currentQuestion =
+    [...messages].reverse().find((message) => message.sender_type === 'agent')?.content ||
+    createInitialQuestion(interview, activeAgent);
+
+  const reloadMessages = async () => {
+    const data = await apiRequest(`/api/interviews/${interviewId}/messages`);
+    setMessages(data.messages || []);
+    return data.messages || [];
+  };
+
+  const stopRealtimeCall = () => {
+    dataChannelRef.current?.close();
+    peerConnectionRef.current?.close();
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
+      remoteAudioRef.current.remove();
+    }
+
+    dataChannelRef.current = null;
+    peerConnectionRef.current = null;
+    localStreamRef.current = null;
+    remoteAudioRef.current = null;
+    setVoiceStatus('idle');
+    setVoiceMessage('语音通话已断开，可再次点击麦克风重连');
+  };
+
+  const saveRealtimeMessage = async ({ senderType, messageType, content }) => {
+    const text = String(content || '').trim();
+    if (!text || !interviewId) return;
+
+    const eventKey = `${senderType}:${messageType}:${text}`;
+    if (savedRealtimeEventsRef.current.has(eventKey)) return;
+    savedRealtimeEventsRef.current.add(eventKey);
+
+    const messageData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_id: senderType === 'agent' ? activeAgent?.id : undefined,
+        sender_type: senderType,
+        message_type: messageType,
+        content: text,
+        transcript_text: text,
+      }),
+    });
+
+    if (senderType === 'candidate') {
+      await apiRequest(`/api/interviews/${interviewId}/evaluations`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: messageData.message.id }),
+      }).catch(() => {});
+    }
+
+    await reloadMessages();
+  };
+
+  const handleRealtimeEvent = (event) => {
+    if (event.type === 'input_audio_buffer.speech_started') {
+      setVoiceMessage('正在聆听候选人回答');
+      return;
+    }
+
+    if (event.type === 'input_audio_buffer.speech_stopped') {
+      setVoiceMessage('候选人回答结束，正在生成追问');
+      return;
+    }
+
+    if (event.type === 'conversation.item.input_audio_transcription.completed') {
+      saveRealtimeMessage({
+        senderType: 'candidate',
+        messageType: 'transcript',
+        content: event.transcript,
+      }).catch((requestError) => setError(requestError.message));
+      return;
+    }
+
+    if (event.type === 'response.audio_transcript.done' || event.type === 'response.text.done' || event.type === 'response.output_text.done') {
+      saveRealtimeMessage({
+        senderType: 'agent',
+        messageType: 'follow_up',
+        content: event.transcript || event.text,
+      }).catch((requestError) => setError(requestError.message));
+      setVoiceMessage('AI 面试官已完成本轮追问');
+      return;
+    }
+
+    if (event.type === 'error') {
+      setError(event.error?.message || '实时语音会话发生错误。');
+      setVoiceStatus('error');
+    }
+  };
+
+  const startRealtimeCall = async () => {
+    if (!interviewId || voiceStatus === 'connecting') return;
+
+    if (voiceStatus === 'connected') {
+      stopRealtimeCall();
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('当前浏览器不支持麦克风采集。');
+      setVoiceStatus('error');
+      return;
+    }
+
+    setVoiceStatus('connecting');
+    setVoiceMessage('正在请求麦克风权限并建立实时语音连接');
+    setError('');
+
+    try {
+      const peerConnection = new RTCPeerConnection();
+      peerConnectionRef.current = peerConnection;
+
+      const remoteAudio = document.createElement('audio');
+      remoteAudio.autoplay = true;
+      remoteAudioRef.current = remoteAudio;
+      peerConnection.ontrack = (event) => {
+        remoteAudio.srcObject = event.streams[0];
+      };
+
+      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localStreamRef.current = localStream;
+      localStream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+
+      const dataChannel = peerConnection.createDataChannel('oai-events');
+      dataChannelRef.current = dataChannel;
+      dataChannel.addEventListener('open', () => {
+        setVoiceStatus('connected');
+        setVoiceMessage('语音通话已接通，AI 面试官正在开场');
+        dataChannel.send(JSON.stringify({
+          type: 'response.create',
+          response: {
+            instructions: '请用一句自然的中文电话面试开场白开始，并提出当前问题。',
+          },
+        }));
+      });
+      dataChannel.addEventListener('message', (event) => {
+        try {
+          handleRealtimeEvent(JSON.parse(event.data));
+        } catch {
+          setVoiceMessage('收到一条无法解析的实时事件');
+        }
+      });
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      const response = await fetch(`/api/interviews/${interviewId}/realtime/sdp`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp,
+      });
+      const responseBody = await response.text();
+
+      if (!response.ok) {
+        let message = responseBody || '实时语音连接失败。';
+        try {
+          message = JSON.parse(responseBody).error || message;
+        } catch {
+          // Keep the raw server message.
+        }
+        throw new Error(message);
+      }
+
+      await peerConnection.setRemoteDescription({ type: 'answer', sdp: responseBody });
+      setVoiceMessage('语音通话连接中，等待数据通道打开');
+    } catch (requestError) {
+      stopRealtimeCall();
+      setVoiceStatus('error');
+      setError(requestError.message);
+      setVoiceMessage('语音通话连接失败，请检查麦克风权限和 OPENAI_API_KEY');
+    }
+  };
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadInterview = async () => {
+      if (!interviewId) {
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      setError('');
+
+      try {
+        const [interviewData, agentData, messageData] = await Promise.all([
+          apiRequest(`/api/interviews/${interviewId}`),
+          apiRequest(`/api/interviews/${interviewId}/agents`),
+          apiRequest(`/api/interviews/${interviewId}/messages`),
+        ]);
+
+        if (!mounted) return;
+        setInterview(interviewData.interview);
+        setAgents(agentData.agents || []);
+
+        let nextMessages = messageData.messages || [];
+        if (nextMessages.length === 0 && agentData.agents?.[0]) {
+          const created = await apiRequest(`/api/interviews/${interviewId}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+              agent_id: agentData.agents[0].id,
+              sender_type: 'agent',
+              message_type: 'question',
+              content: createInitialQuestion(interviewData.interview, agentData.agents[0]),
+            }),
+          });
+          nextMessages = [created.message];
+        }
+
+        if (mounted) setMessages(nextMessages);
+      } catch (requestError) {
+        if (mounted) setError(requestError.message);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+
+    loadInterview();
+
+    return () => {
+      mounted = false;
+    };
+  }, [interviewId]);
+
+  useEffect(() => () => stopRealtimeCall(), []);
+
+  const handleSubmitAnswer = async () => {
+    const content = answer.trim();
+    if (!content || !interviewId || submitting) return;
+
+    setSubmitting(true);
+    setError('');
+
+    try {
+      const answerData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sender_type: 'candidate',
+          message_type: 'answer',
+          content,
+        }),
+      });
+      await apiRequest(`/api/interviews/${interviewId}/evaluations`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: answerData.message.id }),
+      });
+      if (activeAgent) {
+        await apiRequest(`/api/interviews/${interviewId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            agent_id: activeAgent.id,
+            sender_type: 'agent',
+            message_type: 'follow_up',
+            content: createFollowUpQuestion(content, interview),
+          }),
+        });
+      }
+      setAnswer('');
+      await reloadMessages();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleFinish = async () => {
+    if (!interviewId || finishing) return;
+    stopRealtimeCall();
+    setFinishing(true);
+    setError('');
+
+    try {
+      await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
+      await apiRequest(`/api/interviews/${interviewId}/report`, { method: 'POST' });
+      onReportReady(interviewId);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setFinishing(false);
+    }
+  };
+
+  if (!interviewId) {
+    return (
+      <section className="phone-page">
+        <div className="empty-state">
+          <strong>还没有进行中的面试</strong>
+          <span>请先在面试配置页创建一场真实面试。</span>
+          <button className="primary-action" onClick={onBackToSetup}>去配置面试</button>
+        </div>
+      </section>
+    );
+  }
+
+  if (loading) {
+    return <div className="profile-loading">正在读取真实面试、Agent 和消息流</div>;
+  }
+
   return (
     <section className="phone-page">
+      {error && <div className="profile-message error">{error}</div>}
       <div className="phone-hero">
         <div className="call-stage">
           <div className="call-status">
@@ -1028,9 +1893,9 @@ function PhoneInterviewPage() {
                 <Headphones size={42} />
               </div>
             </div>
-            <div className="caller-copy">
-              <p className="eyebrow">当前接入</p>
-              <h1>{liveInterview.currentAgent}</h1>
+          <div className="caller-copy">
+            <p className="eyebrow">当前接入</p>
+              <h1>{currentAgentName}</h1>
               <span>正在围绕项目复杂度进行追问</span>
             </div>
           </div>
@@ -1040,54 +1905,70 @@ function PhoneInterviewPage() {
               <Sparkles size={16} />
               <strong>当前问题</strong>
             </div>
-            <p>{liveInterview.currentQuestion}</p>
+            <p>{currentQuestion}</p>
           </div>
 
           <div className="call-controls" aria-label="电话面试控制">
-            <button className="control-button">
+            <button
+              className={`control-button ${voiceStatus === 'connected' ? 'primary' : ''}`}
+              onClick={startRealtimeCall}
+              disabled={voiceStatus === 'connecting'}
+              title={voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音'}
+            >
               <Mic size={20} />
             </button>
-            <button className="control-button primary">
+            <button className="control-button" disabled title="AI 语音回复会自动播放">
               <Volume2 size={20} />
             </button>
-            <button className="control-button danger">
+            <button className="control-button danger" onClick={handleFinish} disabled={finishing}>
               <PhoneOff size={20} />
             </button>
+          </div>
+          <div className={`voice-status ${voiceStatus}`}>
+            <span>{voiceStatus === 'connected' ? '实时语音已接通' : voiceStatus === 'connecting' ? '正在连接实时语音' : voiceStatus === 'error' ? '实时语音连接失败' : '实时语音待接入'}</span>
+            <small>{voiceMessage}</small>
           </div>
         </div>
 
         <aside className="call-sidebar">
           <div className="session-card">
-            <span>通话时长</span>
-            <strong>{liveInterview.duration}</strong>
-            <p>{liveInterview.candidate} · {liveInterview.role}</p>
+            <span>面试状态</span>
+            <strong>{interview?.status === 'completed' ? '已结束' : '进行中'}</strong>
+            <p>{interview?.target_role} · {interview?.interview_type || '综合模拟'}</p>
           </div>
           <div className="signal-grid">
-            {liveInterview.signals.map((signal) => (
-              <div className="signal-card" key={signal.label}>
-                <span>{signal.label}</span>
-                <strong>{signal.value}</strong>
-                <small>{signal.trend}</small>
-              </div>
-            ))}
+            <div className="signal-card">
+              <span>真实消息</span>
+              <strong>{messages.length}</strong>
+              <small>已写入后端</small>
+            </div>
+            <div className="signal-card">
+              <span>候选回答</span>
+              <strong>{messages.filter((item) => item.sender_type === 'candidate').length}</strong>
+              <small>已触发单轮评价</small>
+            </div>
           </div>
         </aside>
       </div>
 
       <section className="phone-grid">
         <Card title="面试官接入队列" icon={<Radio size={18} />}>
-          <AgentRoster agents={liveInterview.agents} currentAgent={liveInterview.currentAgent} />
+          <AgentRoster agents={agents} currentAgent={currentAgentName} />
         </Card>
 
         <Card title="实时语音转写" icon={<MessageSquareText size={18} />}>
           <div className="transcript-list">
-            {liveInterview.transcript.map((item) => (
-              <TranscriptMessage item={item} key={`${item.speaker}-${item.time}`} />
+            {messages.map((item) => (
+              <TranscriptMessage item={item} key={item.id} />
             ))}
           </div>
           <div className="reply-box">
-            <span>候选人正在回答，系统持续记录语义片段</span>
-            <button>
+            <textarea
+              value={answer}
+              onChange={(event) => setAnswer(event.target.value)}
+              placeholder="输入候选人回答，提交后会保存消息、生成单轮评价和下一条 mock 追问。"
+            />
+            <button onClick={handleSubmitAnswer} disabled={submitting || !answer.trim()}>
               <Send size={15} />
             </button>
           </div>
@@ -1095,7 +1976,7 @@ function PhoneInterviewPage() {
 
         <Card title="追问路线" icon={<CircleDot size={18} />} className="question-route-panel">
           <div className="question-route">
-            {liveInterview.queue.map((item, index) => (
+            {['项目背景', '方案取舍', '结果指标', '复盘改进'].map((item, index) => (
               <div className={index === 1 ? 'current' : ''} key={item}>
                 <span>{String(index + 1).padStart(2, '0')}</span>
                 <strong>{item}</strong>
@@ -1104,11 +1985,72 @@ function PhoneInterviewPage() {
           </div>
         </Card>
       </section>
+      <div className="finish-bar">
+        <button className="primary-action" onClick={handleFinish} disabled={finishing}>
+          <FileText size={17} />
+          {finishing ? '生成报告中' : '结束面试并生成报告'}
+        </button>
+      </div>
     </section>
   );
 }
 
-function ReportPage() {
+function ReportPage({ interviewId, user }) {
+  const [reportData, setReportData] = useState(null);
+  const [loading, setLoading] = useState(Boolean(interviewId));
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+
+    if (!interviewId) {
+      setLoading(false);
+      return () => {
+        mounted = false;
+      };
+    }
+
+    setLoading(true);
+    setError('');
+    apiRequest(`/api/interviews/${interviewId}/report`)
+      .then((data) => {
+        if (mounted) setReportData(data.report);
+      })
+      .catch((requestError) => {
+        if (mounted) setError(requestError.message);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [interviewId]);
+
+  if (!interviewId) {
+    return (
+      <section className="report-page">
+        <div className="empty-state">
+          <strong>还没有可查看的真实报告</strong>
+          <span>完成一场面试后，报告页会读取 `GET /api/interviews/:id/report`。</span>
+        </div>
+      </section>
+    );
+  }
+
+  if (loading) {
+    return <div className="profile-loading">正在读取真实面试报告</div>;
+  }
+
+  if (error) {
+    return <div className="profile-message error">{error}</div>;
+  }
+
+  const currentReport = reportToViewModel(reportData, user);
+  const radarData = currentReport.radar.length > 0 ? currentReport.radar : report.radar.slice(0, 3);
+  const metrics = currentReport.metrics.length > 0 ? currentReport.metrics : report.metrics.slice(0, 3);
+
   return (
     <section className="report-page">
       <header className="summary-panel">
@@ -1122,45 +2064,45 @@ function ReportPage() {
             <dl className="candidate-meta">
               <div>
                 <dt>候选人</dt>
-                <dd>{report.candidate}</dd>
+                <dd>{currentReport.candidate}</dd>
               </div>
               <div>
                 <dt>应聘岗位</dt>
-                <dd>{report.role}</dd>
+                <dd>{currentReport.role}</dd>
               </div>
               <div>
-                <dt>目标职级</dt>
-                <dd>{report.level}</dd>
+                <dt>报告来源</dt>
+                <dd>真实后端</dd>
               </div>
               <div>
                 <dt>报告编号</dt>
-                <dd>{report.interviewId}</dd>
+                <dd>{currentReport.interviewId}</dd>
               </div>
             </dl>
           </div>
         </div>
         <div className="decision-badge">
-          <span>{report.result}</span>
-          <strong>{report.grade}</strong>
-          <small>综合评分 {report.score}/100</small>
+          <span>{currentReport.result}</span>
+          <strong>{currentReport.grade}</strong>
+          <small>综合评分 {currentReport.score}/100</small>
         </div>
       </header>
 
       <section className="kpi-grid">
         <div className="kpi-item">
           <CircleDot size={16} />
-          <span>面试轮次</span>
-          <strong>4</strong>
+          <span>报告状态</span>
+          <strong>已生成</strong>
         </div>
         <div className="kpi-item">
           <CheckCircle2 size={16} />
-          <span>通过 Agent</span>
-          <strong>2/3</strong>
+          <span>面试官</span>
+          <strong>{currentReport.interviewers.length}</strong>
         </div>
         <div className="kpi-item">
           <Clock3 size={16} />
           <span>生成时间</span>
-          <strong>{report.generatedAt}</strong>
+          <strong>{currentReport.generatedAt}</strong>
         </div>
         <div className="kpi-item">
           <Award size={16} />
@@ -1172,13 +2114,13 @@ function ReportPage() {
       <section className="dashboard-grid">
         <Card title="核心能力模型" icon={<BarChart3 size={18} />}>
           <div className="radar-wrap">
-            <CompetencyRadar data={report.radar} />
+            <CompetencyRadar data={radarData} />
           </div>
         </Card>
 
         <Card title="逐项得分指标" icon={<FileText size={18} />}>
           <div className="metrics-list">
-            {report.metrics.map((item) => (
+            {metrics.map((item) => (
               <ProgressMetric key={item.label} item={item} />
             ))}
           </div>
@@ -1188,7 +2130,7 @@ function ReportPage() {
       <section className="dashboard-grid secondary">
         <Card title="面试官综合评价" icon={<MessageSquareText size={18} />}>
           <div className="review-list">
-            {report.interviewers.map((item) => (
+            {currentReport.interviewers.map((item) => (
               <div className="review-card" key={item.name}>
                 <div>
                   <strong>{item.name}</strong>
@@ -1203,27 +2145,24 @@ function ReportPage() {
         <Card title="录用风险提示" icon={<AlertTriangle size={18} />}>
           <div className="risk-table">
             <div>
-              <span>业务指标拆解</span>
-              <StatusTag tone="amber">中风险</StatusTag>
-              <p>建议终面追问增长指标、监控口径和复盘案例。</p>
+              <span>报告摘要</span>
+              <StatusTag tone="blue">真实生成</StatusTag>
+              <p>{currentReport.summary}</p>
             </div>
-            <div>
-              <span>架构 owner 经验</span>
-              <StatusTag tone="blue">可培养</StatusTag>
-              <p>具备模块治理能力，需确认跨团队推进深度。</p>
-            </div>
-            <div>
-              <span>到岗稳定性</span>
-              <StatusTag tone="green">低风险</StatusTag>
-              <p>职业动机与岗位方向匹配，表达稳定。</p>
-            </div>
+            {currentReport.suggestions.map((item) => (
+              <div key={item}>
+                <span>训练建议</span>
+                <StatusTag tone="amber">下一步</StatusTag>
+                <p>{item}</p>
+              </div>
+            ))}
           </div>
         </Card>
       </section>
 
       <Card title="面试深度对线复盘" icon={<Clock3 size={18} />} className="timeline-panel">
         <div className="timeline">
-          {report.timeline.map((item, index) => (
+          {(currentReport.timeline.length > 0 ? currentReport.timeline : report.timeline).map((item, index) => (
             <TimelineItem key={item.title} item={item} index={index} />
           ))}
         </div>
@@ -1232,9 +2171,181 @@ function ReportPage() {
   );
 }
 
+function HistoryPage({ onOpenReport }) {
+  const [reports, setReports] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+
+    apiRequest('/api/reports')
+      .then((data) => {
+        if (mounted) setReports(data.reports || []);
+      })
+      .catch((requestError) => {
+        if (mounted) setError(requestError.message);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  if (loading) return <div className="profile-loading">正在读取历史报告</div>;
+  if (error) return <div className="profile-message error">{error}</div>;
+
+  return (
+    <section className="history-page">
+      <div className="resume-hero">
+        <div>
+          <p className="eyebrow">Interview History</p>
+          <h1>真实面试历史记录</h1>
+          <span>这里读取 `GET /api/reports`，只展示当前登录用户已经生成报告的面试。</span>
+        </div>
+      </div>
+
+      {reports.length === 0 ? (
+        <div className="empty-state">
+          <strong>暂无报告</strong>
+          <span>完成一次面试并生成报告后，历史记录会出现在这里。</span>
+        </div>
+      ) : (
+        <div className="history-list">
+          {reports.map((item) => (
+            <article className="history-item" key={item.id}>
+              <div>
+                <strong>{item.target_role}</strong>
+                <span>{item.interview_type || '综合模拟'} · {formatDateTime(item.updated_at || item.created_at)}</span>
+                <p>{item.summary}</p>
+              </div>
+              <div className="history-score">
+                <strong>{item.total_score}</strong>
+                <span>{item.grade}</span>
+                <button className="secondary-action" onClick={() => onOpenReport(item.interview_id)}>
+                  查看报告
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function StatsPage() {
+  const [stats, setStats] = useState(null);
+  const [dimensions, setDimensions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+
+    Promise.all([apiRequest('/api/stats/me'), apiRequest('/api/stats/me/dimensions')])
+      .then(([statsData, dimensionData]) => {
+        if (!mounted) return;
+        setStats(statsData.stats);
+        setDimensions(dimensionData.dimensions || []);
+      })
+      .catch((requestError) => {
+        if (mounted) setError(requestError.message);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  if (loading) return <div className="profile-loading">正在读取长期能力画像</div>;
+  if (error) return <div className="profile-message error">{error}</div>;
+
+  const weakPoints = parseJsonValue(stats?.weak_points, []);
+
+  return (
+    <section className="stats-page">
+      <div className="resume-hero">
+        <div>
+          <p className="eyebrow">Long-term Skill Profile</p>
+          <h1>长期能力画像</h1>
+          <span>这里读取 `/api/stats/me` 和 `/api/stats/me/dimensions`，根据真实报告累计更新。</span>
+        </div>
+      </div>
+
+      <section className="kpi-grid">
+        <div className="kpi-item">
+          <CircleDot size={16} />
+          <span>总面试</span>
+          <strong>{stats?.total_interviews || 0}</strong>
+        </div>
+        <div className="kpi-item">
+          <CheckCircle2 size={16} />
+          <span>已完成</span>
+          <strong>{stats?.completed_interviews || 0}</strong>
+        </div>
+        <div className="kpi-item">
+          <Award size={16} />
+          <span>平均分</span>
+          <strong>{stats?.average_total_score || 0}</strong>
+        </div>
+        <div className="kpi-item">
+          <Target size={16} />
+          <span>近期重点</span>
+          <strong>{stats?.recent_training_focus || '暂无'}</strong>
+        </div>
+      </section>
+
+      <section className="dashboard-grid">
+        <Card title="能力维度趋势" icon={<TrendingUp size={18} />}>
+          <div className="metrics-list">
+            {dimensions.map((item) => (
+              <ProgressMetric
+                key={item.key}
+                item={{
+                  label: item.label,
+                  value: item.average_score,
+                  note: `趋势：${item.trend === 'up' ? '上升' : item.trend === 'down' ? '下降' : '稳定'}`,
+                }}
+              />
+            ))}
+          </div>
+        </Card>
+
+        <Card title="优先训练短板" icon={<AlertTriangle size={18} />}>
+          <div className="risk-table">
+            {weakPoints.length === 0 ? (
+              <div>
+                <span>暂无短板</span>
+                <StatusTag tone="blue">等待数据</StatusTag>
+                <p>完成报告后，系统会根据维度均分自动更新这里。</p>
+              </div>
+            ) : (
+              weakPoints.map((item) => (
+                <div key={item.dimension}>
+                  <span>{dimensionLabels[item.dimension] || item.dimension}</span>
+                  <StatusTag tone="amber">{item.score}/100</StatusTag>
+                  <p>建议下一轮面试优先加强该维度的回答结构、案例细节和量化结果。</p>
+                </div>
+              ))
+            )}
+          </div>
+        </Card>
+      </section>
+    </section>
+  );
+}
+
 function App() {
   const [user, setUser] = useState(undefined);
   const [view, setView] = useState('setup');
+  const [activeInterviewId, setActiveInterviewId] = useState('');
 
   useEffect(() => {
     let mounted = true;
@@ -1260,6 +2371,17 @@ function App() {
     await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
     setUser(null);
     setView('setup');
+    setActiveInterviewId('');
+  };
+
+  const handleStartInterview = (interviewId) => {
+    setActiveInterviewId(interviewId);
+    setView('phone');
+  };
+
+  const handleOpenReport = (interviewId) => {
+    setActiveInterviewId(interviewId);
+    setView('report');
   };
 
   if (user === undefined) {
@@ -1309,10 +2431,19 @@ function App() {
           </button>
         </div>
 
-        {view === 'setup' && <SetupPage onStart={() => setView('phone')} />}
+        {view === 'setup' && <SetupPage onStart={handleStartInterview} />}
+        {view === 'resume' && <ResumeAnalysisPage onUseSetup={() => setView('setup')} />}
         {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
-        {view === 'phone' && <PhoneInterviewPage />}
-        {view === 'report' && <ReportPage />}
+        {view === 'phone' && (
+          <PhoneInterviewPage
+            interviewId={activeInterviewId}
+            onReportReady={handleOpenReport}
+            onBackToSetup={() => setView('setup')}
+          />
+        )}
+        {view === 'report' && <ReportPage interviewId={activeInterviewId} user={user} />}
+        {view === 'history' && <HistoryPage onOpenReport={handleOpenReport} />}
+        {view === 'stats' && <StatsPage />}
       </div>
     </main>
   );

@@ -404,6 +404,12 @@ const recommendationLabels = {
   no_pass: '暂不通过',
 };
 
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+
+function apiUrl(path) {
+  return `${apiBaseUrl}${path}`;
+}
+
 function parseJsonValue(value, fallback) {
   if (!value) return fallback;
   if (typeof value !== 'string') return value;
@@ -431,18 +437,263 @@ function createInitialQuestion(interview, agent) {
   return `我们先从你的${focus}开始。请结合一次真实经历，说明你在${role}相关工作中遇到的关键问题、你的行动以及最终结果。`;
 }
 
-function createFollowUpQuestion(answer, interview) {
+function includesAny(text, keywords) {
+  return keywords.some((keyword) => text.includes(keyword));
+}
+
+function pickMentionedTopic(text) {
+  const topics = [
+    'React',
+    'Vue',
+    'Node',
+    '性能',
+    '低代码',
+    '表单',
+    '组件库',
+    '架构',
+    '缓存',
+    '数据库',
+    '接口',
+    '监控',
+    '灰度',
+    '回滚',
+    '埋点',
+    '虚拟滚动',
+    '懒加载',
+    '状态管理',
+    '团队协作',
+  ];
+  return topics.find((topic) => text.includes(topic)) || '这个项目';
+}
+
+function pickUnusedQuestion(candidates, askedQuestions) {
+  return candidates.find((question) => !askedQuestions.some((asked) => asked.includes(question.slice(0, 16)))) || candidates[0];
+}
+
+function analyzeAnswerCoverage(answer) {
   const text = String(answer || '');
-  if (/指标|数据|百分比|耗时|成本|收益/.test(text)) {
-    return '你刚才提到了结果或收益，请继续说明这些指标是如何采集、验证和复盘的？';
+  return {
+    background: includesAny(text, ['背景', '业务', '场景', '目标', '问题']),
+    responsibility: includesAny(text, ['负责', '我做', '我来', '主导', '推进', 'owner', 'Owner']),
+    solution: /方案|设计|实现|改造|优化|拆分|封装|接入|建设|React|Vue|Node|Schema|schema/.test(text),
+    tradeoff: includesAny(text, ['取舍', '权衡', '备选', '为什么', '成本', '复杂度', '边界']),
+    metrics: /指标|数据|百分比|耗时|成本|收益|成功率|转化率|P95|PV|UV|QPS|ms|秒|提升|降低/.test(text),
+    risk: includesAny(text, ['风险', '线上', '故障', '异常', '回滚', '灰度', '监控', '报警', '稳定性']),
+    collaboration: includesAny(text, ['协作', '推动', '沟通', '团队', '评审', '对齐', '产品', '业务方']),
+    reflection: includesAny(text, ['复盘', '沉淀', '规范', '推广', '重新', '改进', '方法论']),
+  };
+}
+
+function summarizeCoverage(messages, nextAnswer = '') {
+  const answers = [
+    ...messages.filter((item) => item.sender_type === 'candidate').map((item) => item.content || item.text || ''),
+    nextAnswer,
+  ].filter(Boolean);
+
+  return answers.reduce(
+    (summary, answer) => {
+      const coverage = analyzeAnswerCoverage(answer);
+      Object.entries(coverage).forEach(([key, value]) => {
+        summary[key] = summary[key] || value;
+      });
+      return summary;
+    },
+    {
+      background: false,
+      responsibility: false,
+      solution: false,
+      tradeoff: false,
+      metrics: false,
+      risk: false,
+      collaboration: false,
+      reflection: false,
+    }
+  );
+}
+
+function countCovered(coverage, keys) {
+  return keys.filter((key) => coverage[key]).length;
+}
+
+function getAgentRound(messages, agent) {
+  if (!agent) return 0;
+  const lastOtherAgentMessageIndex = messages.reduce((matchedIndex, item, index) => {
+    return item.sender_type === 'agent' && item.agent_id && item.agent_id !== agent.id ? index : matchedIndex;
+  }, -1);
+  return messages.slice(lastOtherAgentMessageIndex + 1).filter((item) => item.sender_type === 'candidate').length;
+}
+
+function createAgentOpeningQuestion(nextAgent, interview, coverage) {
+  const role = interview?.target_role || '目标岗位';
+  if (nextAgent?.agent_type === 'architecture') {
+    const missing = !coverage.risk
+      ? '灰度、回滚和观测体系'
+      : !coverage.tradeoff
+        ? '模块边界和方案取舍'
+        : '长期演进和复杂度治理';
+    return `技术一面先了解到这里，接下来进入架构二面。我们换一个视角：如果这个项目要支撑更多业务线，你会如何设计${missing}？`;
   }
-  if (/架构|设计|模块|系统|边界/.test(text)) {
-    return '这个方案的边界条件是什么？如果流量、团队规模或业务优先级变化，你会如何调整设计？';
+  if (nextAgent?.agent_type === 'hr') {
+    return `架构二面先到这里，接下来进入 HR 面。我想了解一下你的职业动机：你现在选择${role}相关机会时，最看重团队和岗位的哪些因素？`;
   }
-  if (/协作|推动|沟通|团队/.test(text)) {
-    return '在推动过程中有没有遇到分歧？你是如何对齐目标并让方案落地的？';
+  return `我们进入下一轮面试。请结合${role}要求，补充一个最能体现你能力的真实经历。`;
+}
+
+function createAgentClosing(agent, nextAgent, coverage) {
+  if (agent?.agent_type === 'technical') {
+    return `技术一面我先了解到这里。你已经覆盖了项目背景、方案实现和部分结果验证，当前信息足够进入下一轮；剩下的系统边界和长期治理，我会交给${nextAgent?.agent_name || '架构二面 Agent'}继续追问。`;
   }
-  return `请再补充一个更具体的例子：当时的限制条件是什么，你做了哪些取舍，最后对${interview?.target_role || '目标岗位'}能力有什么体现？`;
+  if (agent?.agent_type === 'architecture') {
+    return `架构二面我先了解到这里。系统设计、复杂度治理和风险意识已经有了基本判断，接下来切到${nextAgent?.agent_name || 'HR Agent'}，看一下动机、协作和稳定性。`;
+  }
+  return '这一轮我先了解到这里。';
+}
+
+function decideNextInterviewAction({ interview, agents, messages, activeAgent, lastAnswer }) {
+  const coverage = summarizeCoverage(messages, lastAnswer);
+  const round = getAgentRound(messages, activeAgent) + 1;
+  const askedQuestions = messages.filter((item) => item.sender_type === 'agent').map((item) => item.content || '');
+  const nextAgent = agents.find((agent) => agent.order_index > (activeAgent?.order_index ?? 0) && agent.status !== 'completed');
+  const agentType = activeAgent?.agent_type || 'technical';
+
+  if (agentType === 'technical') {
+    const enoughCoverage = countCovered(coverage, ['background', 'responsibility', 'solution', 'tradeoff', 'metrics', 'risk']) >= 4;
+    if ((round >= 5 && enoughCoverage) || round >= 7) {
+      return nextAgent
+        ? {
+            action: 'switch_agent',
+            closing: createAgentClosing(activeAgent, nextAgent, coverage),
+            nextAgent,
+            opening: createAgentOpeningQuestion(nextAgent, interview, coverage),
+          }
+        : { action: 'finish_interview', closing: '技术一面的信息已经足够，我会结束本场模拟并生成报告。' };
+    }
+  }
+
+  if (agentType === 'architecture') {
+    const enoughCoverage = countCovered(coverage, ['solution', 'tradeoff', 'metrics', 'risk', 'reflection']) >= 4;
+    if ((round >= 4 && enoughCoverage) || round >= 6) {
+      return nextAgent
+        ? {
+            action: 'switch_agent',
+            closing: createAgentClosing(activeAgent, nextAgent, coverage),
+            nextAgent,
+            opening: createAgentOpeningQuestion(nextAgent, interview, coverage),
+          }
+        : { action: 'finish_interview', closing: '架构面的信息已经足够，我会结束本场模拟并生成报告。' };
+    }
+  }
+
+  if (agentType === 'hr' && round >= 3) {
+    return {
+      action: 'finish_interview',
+      closing: 'HR 面我先了解到这里。这场模拟面试的信息已经足够，接下来可以生成综合报告。',
+    };
+  }
+
+  return {
+    action: 'ask_follow_up',
+    question: createFollowUpQuestion(lastAnswer, interview, messages, activeAgent),
+    askedQuestions,
+  };
+}
+
+function createFollowUpQuestion(answer, interview, messages = [], activeAgent = null) {
+  const text = String(answer || '');
+  const targetRole = interview?.target_role || '目标岗位';
+  const candidateRound = getAgentRound(messages, activeAgent) + 1;
+  const askedQuestions = messages
+    .filter((item) => item.sender_type === 'agent')
+    .map((item) => item.content || '');
+  const topic = pickMentionedTopic(text);
+  const hasMetric = /指标|数据|百分比|耗时|成本|收益|成功率|转化率|P95|PV|UV|QPS|ms|秒/.test(text);
+  const hasTradeoff = /取舍|权衡|边界|风险|限制|方案|设计|架构|模块/.test(text);
+  const hasCollaboration = /协作|推动|沟通|团队|评审|对齐|产品|业务方/.test(text);
+  const hasIncident = /线上|故障|异常|回滚|灰度|监控|报警|稳定性/.test(text);
+  const agentType = activeAgent?.agent_type || 'technical';
+
+  if (agentType === 'architecture') {
+    const architectureQuestions = [
+      [
+        `从架构角度看，如果${topic}要支撑多个业务线，你会如何拆分核心模块和扩展点？`,
+        `你会如何定义 schema、渲染器、组件协议和业务插件之间的边界？`,
+      ],
+      [
+        `如果历史页面已经接入旧协议，你会怎么做版本兼容、迁移和灰度？`,
+        `哪些能力应该沉淀到平台，哪些逻辑必须留在业务侧？你怎么判断？`,
+      ],
+      [
+        hasIncident
+          ? '你刚才提到线上风险，架构层面会设计哪些观测指标、降级策略和回滚开关？'
+          : '如果平台能力出问题会影响多个业务线，你会怎么设计监控、降级和止损链路？',
+        '这个系统最容易失控的复杂度在哪里？你会用什么治理机制长期控制？',
+      ],
+      [
+        `如果让你作为${targetRole} owner 推进半年路线图，你会优先做哪三件事？为什么？`,
+        '你如何衡量这个平台架构是否成功？除了性能指标，还会看哪些工程和业务指标？',
+      ],
+    ];
+    return pickUnusedQuestion(architectureQuestions[Math.min(candidateRound - 1, architectureQuestions.length - 1)], askedQuestions);
+  }
+
+  if (agentType === 'hr') {
+    const hrQuestions = [
+      [
+        `你为什么会考虑${targetRole}这个方向？它和你下一阶段的成长目标怎么匹配？`,
+        '你在选择团队时最看重什么？业务空间、技术深度、团队氛围还是成长节奏？',
+      ],
+      [
+        hasCollaboration
+          ? '你刚才提到协作，能讲一个你和业务方或同事目标不一致但最后推进成功的例子吗？'
+          : '如果你和产品、后端或测试对优先级判断不一致，你通常怎么处理？',
+        '过去一段经历里，什么样的管理方式最能激发你的状态？什么方式会明显消耗你？',
+      ],
+      [
+        '如果入职后发现项目历史包袱比预期重，你会怎么调整预期并建立短期成果？',
+        '你希望面试官通过这场面试记住你的哪三个关键词？',
+      ],
+    ];
+    return pickUnusedQuestion(hrQuestions[Math.min(candidateRound - 1, hrQuestions.length - 1)], askedQuestions);
+  }
+
+  const stageQuestions = [
+    [
+      `你刚才提到${topic}，先把项目背景讲实一点：当时业务目标是什么，你个人负责到哪一层？`,
+      `如果只看你负责的部分，${topic}里面最难解决的一个点是什么？为什么它不是常规开发能顺手解决的？`,
+      `这个项目在开始前有哪些约束，比如时间、人力、历史包袱或线上风险？你是怎么判断优先级的？`,
+    ],
+    [
+      hasTradeoff
+        ? `你提到了方案设计，我想继续追一下取舍：当时至少有哪些备选方案，为什么最后选了这一种？`
+        : `你刚才更多讲了做法，能不能补一下方案选择过程：你排除过哪些方案，它们的问题分别是什么？`,
+      `围绕${topic}，如果让你画一张模块关系图，核心链路会怎么拆？哪些部分必须隔离？`,
+      `这个方案有没有引入新的复杂度？比如维护成本、学习成本、兼容成本，你当时怎么控制？`,
+    ],
+    [
+      hasMetric
+        ? `你提到了指标，我追一下数据口径：这些数据从哪里采集，如何排除缓存、网络和样本差异的影响？`
+        : `这里我还缺少结果验证。上线前后你看了哪些指标，怎么证明优化真的有效？`,
+      `如果优化后技术指标变好了，但业务方感知不明显，你会怎么复盘这个结果？`,
+      `有没有一个具体数字能说明收益？比如耗时、错误率、人效、投诉量或交付周期的变化。`,
+    ],
+    [
+      hasIncident
+        ? `你提到了线上风险，那灰度和回滚方案具体怎么设计？什么情况下会触发回滚？`
+        : `如果这个改动上线后出现性能回退或兼容问题，你会怎么监控、止损和定位？`,
+      `这个项目有没有失败或反复的地方？如果重新做一遍，你会提前改变哪一个决策？`,
+      `站在${targetRole}的要求看，这个项目最能证明你能力的一点是什么？有没有可复用的方法论沉淀下来？`,
+    ],
+    [
+      hasCollaboration
+        ? `你提到了协作，我想听一个具体冲突：谁和谁的目标不一致，你怎么推动大家接受方案？`
+        : `这个方案落地时依赖哪些角色配合？如果业务团队不愿意改接入方式，你会怎么推动？`,
+      `后续有没有把这套能力推广到其他页面或团队？推广过程中遇到的最大阻力是什么？`,
+      `如果让你带一个同学继续维护这块，你会沉淀哪些规范、工具或检查机制？`,
+    ],
+  ];
+
+  const stageIndex = Math.min(candidateRound - 1, stageQuestions.length - 1);
+  return pickUnusedQuestion(stageQuestions[stageIndex], askedQuestions);
 }
 
 function reportToViewModel(reportData, user) {
@@ -492,7 +743,7 @@ function reportToViewModel(reportData, user) {
 }
 
 async function apiRequest(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
@@ -824,7 +1075,7 @@ function LoginPage({ onAuthenticated }) {
           </button>
 
           <p className="auth-notice">
-            当前已接入后端登录与 SQLite 数据库；密码使用加盐哈希保存，登录态通过 HttpOnly Cookie 维护。
+            当前已接入后端登录与 MySQL 数据库；密码使用加盐哈希保存，登录态通过 HttpOnly Cookie 维护。
           </p>
         </form>
       </section>
@@ -1570,7 +1821,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const remoteAudioRef = useRef(null);
   const savedRealtimeEventsRef = useRef(new Set());
 
-  const activeAgent = agents[0] || null;
+  const activeAgent = agents.find((agent) => agent.status === 'active') || agents.find((agent) => agent.status !== 'completed') || agents[0] || null;
   const currentAgentName = activeAgent?.agent_name || liveInterview.currentAgent;
   const currentQuestion =
     [...messages].reverse().find((message) => message.sender_type === 'agent')?.content ||
@@ -1580,6 +1831,20 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     const data = await apiRequest(`/api/interviews/${interviewId}/messages`);
     setMessages(data.messages || []);
     return data.messages || [];
+  };
+
+  const reloadAgents = async () => {
+    const data = await apiRequest(`/api/interviews/${interviewId}/agents`);
+    setAgents(data.agents || []);
+    return data.agents || [];
+  };
+
+  const updateAgentStatus = async (agent, status) => {
+    if (!agent?.id) return null;
+    return apiRequest(`/api/interviews/${interviewId}/agents/${agent.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
   };
 
   const stopRealtimeCall = () => {
@@ -1720,7 +1985,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
 
-      const response = await fetch(`/api/interviews/${interviewId}/realtime/sdp`, {
+      const response = await fetch(apiUrl(`/api/interviews/${interviewId}/realtime/sdp`), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/sdp' },
@@ -1822,16 +2087,65 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         method: 'POST',
         body: JSON.stringify({ message_id: answerData.message.id }),
       });
-      if (activeAgent) {
+      const nextAction = decideNextInterviewAction({
+        interview,
+        agents,
+        messages,
+        activeAgent,
+        lastAnswer: content,
+      });
+
+      if (nextAction.action === 'ask_follow_up' && activeAgent) {
         await apiRequest(`/api/interviews/${interviewId}/messages`, {
           method: 'POST',
           body: JSON.stringify({
             agent_id: activeAgent.id,
             sender_type: 'agent',
             message_type: 'follow_up',
-            content: createFollowUpQuestion(content, interview),
+            content: nextAction.question,
           }),
         });
+      }
+      if (nextAction.action === 'switch_agent' && activeAgent && nextAction.nextAgent) {
+        await apiRequest(`/api/interviews/${interviewId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            agent_id: activeAgent.id,
+            sender_type: 'agent',
+            message_type: 'system',
+            content: nextAction.closing,
+          }),
+        });
+        await updateAgentStatus(activeAgent, 'completed');
+        await updateAgentStatus(nextAction.nextAgent, 'active');
+        await apiRequest(`/api/interviews/${interviewId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            agent_id: nextAction.nextAgent.id,
+            sender_type: 'agent',
+            message_type: 'question',
+            content: nextAction.opening,
+          }),
+        });
+        await reloadAgents();
+      }
+      if (nextAction.action === 'finish_interview') {
+        if (activeAgent) {
+          await apiRequest(`/api/interviews/${interviewId}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+              agent_id: activeAgent.id,
+              sender_type: 'agent',
+              message_type: 'system',
+              content: nextAction.closing,
+            }),
+          });
+          await updateAgentStatus(activeAgent, 'completed');
+        }
+        await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
+        await apiRequest(`/api/interviews/${interviewId}/report`, { method: 'POST' });
+        onReportReady(interviewId);
+        return;
       }
       setAnswer('');
       await reloadMessages();

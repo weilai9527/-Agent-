@@ -1,23 +1,16 @@
 {
-  "name": "agent-interview-report-ui",
+  "name": "multi-agent-interview",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
   "scripts": {
-    "dev": "vite",
-    "dev:api": "node server/index.js",
-    "build": "vite build",
-    "start": "node server/index.js",
-    "preview": "vite preview --host 127.0.0.1"
-  },
-  "dependencies": {
-    "@vitejs/plugin-react": "^5.0.0",
-    "better-sqlite3": "^12.10.0",
-    "express": "^5.2.1",
-    "lucide-react": "^0.468.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "typescript": "^5.8.0",
-    "vite": "^7.0.0"
+    "dev:frontend": "npm run dev --workspace frontend",
+    "dev:backend": "npm run dev --workspace backend",
+    "build": "npm run build --workspace frontend",
+    "preview": "npm run preview --workspace frontend",
+    "start": "npm run start --workspace backend"
   }
 }

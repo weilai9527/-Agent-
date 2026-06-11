@@ -1,6 +1,7 @@
 node_modules/
 .DS_Store
 dist/
+frontend/dist/
 
 # Logs
 logs/
@@ -23,9 +24,12 @@ Thumbs.db
 # Build and cache output
 .vite/
 coverage/
+__pycache__/
+*.py[cod]
 
 # Local database files
 data/
+backend/data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

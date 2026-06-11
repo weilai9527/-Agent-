@@ -1,0 +1,1518 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import json
+import math
+import os
+import re
+import time
+from typing import Any
+from urllib.parse import urlparse
+from uuid import uuid4
+
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
+
+from .database import all_rows, db, get_database_path, one
+from .security import (
+    create_token,
+    hash_password,
+    hash_token,
+    is_valid_email,
+    normalize_email,
+    sanitize_user,
+    verify_password,
+)
+
+
+app = FastAPI(title="Multi Agent Interview API")
+
+allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get("FRONTEND_ORIGIN", "http://127.0.0.1:5173").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
+SESSION_COOKIE_NAME = "interview_session"
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
+RESET_MAX_AGE_SECONDS = 60 * 20
+LOGIN_WINDOW_SECONDS = 60 * 15
+MAX_LOGIN_ATTEMPTS = 8
+login_attempts: dict[str, dict[str, int | float]] = {}
+
+PROFILE_TEXT_FIELDS = [
+    ("nickname", "昵称", 60, True),
+    ("target_role", "目标岗位", 80, False),
+    ("experience_level", "经验水平", 40, False),
+    ("company_type", "目标公司类型", 80, False),
+    ("target_city", "目标城市", 80, False),
+    ("expected_salary", "期望薪资", 80, False),
+    ("years_of_experience", "工作年限", 40, False),
+    ("education_level", "学历背景", 60, False),
+    ("skills", "技能标签", 500, False),
+    ("project_keywords", "项目关键词", 500, False),
+    ("resume_text", "简历文本", 12000, False),
+    ("project_experience", "项目经历", 12000, False),
+    ("preferred_interview_type", "默认面试类型", 60, False),
+    ("preferred_difficulty", "默认难度", 40, False),
+    ("preferred_interviewer_style", "面试官风格", 60, False),
+]
+INTERVIEW_STATUSES = {"draft", "running", "completed"}
+AGENT_STATUSES = {"pending", "active", "completed"}
+MESSAGE_SENDER_TYPES = {"agent", "candidate", "system"}
+MESSAGE_TYPES = {"question", "answer", "follow_up", "system", "transcript"}
+INTERVIEW_TEXT_FIELDS = [
+    ("target_role", "目标岗位", 80),
+    ("experience_level", "经验等级", 40),
+    ("interview_type", "面试类型", 60),
+    ("company_context", "公司场景", 120),
+    ("focus_areas", "重点方向", 500),
+    ("difficulty", "难度", 40),
+    ("interviewer_style", "面试官风格", 60),
+]
+AGENT_TEXT_FIELDS = [
+    ("agent_name", "Agent 名称", 80),
+    ("agent_type", "Agent 类型", 40),
+    ("agent_role", "Agent 角色", 500),
+    ("strategy", "面试策略", 1000),
+]
+DEFAULT_AGENT_TEMPLATES = [
+    {
+        "agent_name": "技术一面 Agent",
+        "agent_type": "technical",
+        "agent_role": "负责考察候选人的核心技术基础、项目细节和编码思路。",
+        "strategy": "先围绕目标岗位确认技术栈，再根据重点方向逐步追问实现细节。",
+    },
+    {
+        "agent_name": "架构二面 Agent",
+        "agent_type": "architecture",
+        "agent_role": "负责考察系统设计、工程权衡、性能和稳定性意识。",
+        "strategy": "从业务场景切入，观察候选人如何拆解模块、设计数据流和处理边界。",
+    },
+    {
+        "agent_name": "HR Agent",
+        "agent_type": "hr",
+        "agent_role": "负责考察职业动机、沟通表达、团队协作和岗位匹配度。",
+        "strategy": "用行为面试问题理解候选人的经历、偏好和稳定性。",
+    },
+]
+
+
+def now_iso_after(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def error(status_code: int, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"error": message})
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException):
+    from fastapi.responses import JSONResponse
+
+    if isinstance(exc.detail, dict):
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+
+def json_body(body: dict | None) -> dict:
+    return body or {}
+
+
+def read_text_field(body: dict, field: str, label: str, max_length: int, required: bool = False) -> tuple[Any, str | None]:
+    value = str(body.get(field) or "").strip()
+    if required and not value:
+        return None, f"{label}不能为空。"
+    if not value:
+        return None, None
+    if len(value) > max_length:
+        return None, f"{label}不能超过 {max_length} 个字符。"
+    return value, None
+
+
+def read_url_field(body: dict, field: str, label: str, max_length: int, multiline: bool = False) -> tuple[Any, str | None]:
+    value = str(body.get(field) or "").strip()
+    if not value:
+        return None, None
+    if len(value) > max_length:
+        return None, f"{label}不能超过 {max_length} 个字符。"
+    urls = value.split() if multiline else [value]
+    for url in urls:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None, f"{label}只支持 http 或 https 链接。"
+    return value, None
+
+
+def parse_profile_input(body: dict, fallback_name: str) -> dict:
+    profile: dict[str, Any] = {}
+    for field, label, max_length, required in PROFILE_TEXT_FIELDS:
+        value, message = read_text_field(body, field, label, max_length, required)
+        if message:
+            raise error(400, message)
+        profile[field] = value
+
+    profile["nickname"] = profile["nickname"] or fallback_name
+    profile["avatar_url"], message = read_url_field(body, "avatar_url", "头像链接", 500)
+    if message:
+        raise error(400, message)
+    profile["portfolio_links"], message = read_url_field(body, "portfolio_links", "作品链接", 1000, multiline=True)
+    if message:
+        raise error(400, message)
+    return profile
+
+
+def parse_interview_input(body: dict, partial: bool = False) -> dict:
+    interview: dict[str, Any] = {}
+    for field, label, max_length in INTERVIEW_TEXT_FIELDS:
+        if partial and field not in body:
+            continue
+        value, message = read_text_field(body, field, label, max_length, field == "target_role")
+        if message:
+            raise error(400, message)
+        interview[field] = value
+    if partial and not interview:
+        raise error(400, "请至少提供一个要更新的字段。")
+    return interview
+
+
+def parse_order_index(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number <= 99 else None
+
+
+def parse_agent_input(body: dict, partial: bool = False) -> dict:
+    agent: dict[str, Any] = {}
+    for field, label, max_length in AGENT_TEXT_FIELDS:
+        if partial and field not in body:
+            continue
+        value, message = read_text_field(body, field, label, max_length, field != "strategy")
+        if message:
+            raise error(400, message)
+        agent[field] = value
+
+    if "order_index" in body:
+        order_index = parse_order_index(body.get("order_index"))
+        if order_index is None:
+            raise error(400, "Agent 顺序必须是 0 到 99 之间的整数。")
+        agent["order_index"] = order_index
+
+    if "status" in body:
+        status = str(body.get("status") or "").strip()
+        if status not in AGENT_STATUSES:
+            raise error(400, "Agent 状态不正确。")
+        agent["status"] = status
+
+    if partial and not agent:
+        raise error(400, "请至少提供一个要更新的字段。")
+    return agent
+
+
+def parse_message_input(body: dict) -> dict:
+    sender_type = str(body.get("sender_type") or "").strip()
+    message_type = str(body.get("message_type") or "").strip()
+    content, message = read_text_field(body, "content", "消息内容", 12000, True)
+    if sender_type not in MESSAGE_SENDER_TYPES:
+        raise error(400, "消息发送方类型不正确。")
+    if message_type not in MESSAGE_TYPES:
+        raise error(400, "消息类型不正确。")
+    if message:
+        raise error(400, message)
+    transcript_text, message = read_text_field(body, "transcript_text", "语音转写结果", 12000)
+    if message:
+        raise error(400, message)
+
+    agent_id = str(body.get("agent_id") or "").strip() or None
+    if sender_type == "agent" and not agent_id:
+        raise error(400, "Agent 消息必须关联 agent_id。")
+    if sender_type != "agent" and agent_id:
+        raise error(400, "只有 Agent 消息可以关联 agent_id。")
+    if sender_type == "candidate" and message_type not in {"answer", "transcript"}:
+        raise error(400, "候选人消息只能是 answer 或 transcript。")
+    if sender_type == "system" and message_type != "system":
+        raise error(400, "系统消息类型必须是 system。")
+    if sender_type == "agent" and message_type not in {"question", "follow_up", "system"}:
+        raise error(400, "Agent 消息只能是 question、follow_up 或 system。")
+
+    return {
+        "agent_id": agent_id,
+        "sender_type": sender_type,
+        "message_type": message_type,
+        "content": content,
+        "transcript_text": transcript_text,
+    }
+
+
+def login_attempt_key(request: Request, email: str) -> str:
+    host = request.client.host if request.client else "local"
+    return f"{host}:{email}"
+
+
+def is_login_limited(request: Request, email: str) -> bool:
+    key = login_attempt_key(request, email)
+    record = login_attempts.get(key)
+    if not record:
+        return False
+    if float(record["reset_at"]) <= time.time():
+        login_attempts.pop(key, None)
+        return False
+    return int(record["count"]) >= MAX_LOGIN_ATTEMPTS
+
+
+def record_failed_login(request: Request, email: str) -> None:
+    key = login_attempt_key(request, email)
+    now = time.time()
+    record = login_attempts.get(key)
+    if not record or float(record["reset_at"]) <= now:
+        login_attempts[key] = {"count": 1, "reset_at": now + LOGIN_WINDOW_SECONDS}
+    else:
+        record["count"] = int(record["count"]) + 1
+
+
+def clear_failed_logins(request: Request, email: str) -> None:
+    login_attempts.pop(login_attempt_key(request, email), None)
+
+
+def create_session(response: Response, user_id: str, user_agent: str | None) -> None:
+    token = create_token()
+    db.execute(
+        """
+        INSERT INTO sessions (id, user_id, token_hash, expires_at, user_agent)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (str(uuid4()), user_id, hash_token(token), now_iso_after(SESSION_MAX_AGE_SECONDS), user_agent),
+    )
+    db.commit()
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("COOKIE_SECURE") == "true",
+        path="/",
+        max_age=SESSION_MAX_AGE_SECONDS,
+    )
+
+
+def clear_session(response: Response) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("COOKIE_SECURE") == "true",
+        path="/",
+    )
+
+
+def find_user_by_session(request: Request) -> dict | None:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        return None
+    return one(
+        """
+        SELECT users.id, users.email, users.name, users.status, users.created_at, users.last_login_at
+        FROM sessions
+        JOIN users ON users.id = sessions.user_id
+        WHERE sessions.token_hash = ?
+          AND sessions.expires_at > CURRENT_TIMESTAMP
+          AND users.status = 'normal'
+        """,
+        (hash_token(token),),
+    )
+
+
+def require_auth(request: Request) -> dict:
+    user = find_user_by_session(request)
+    if not user:
+        raise error(401, "请先登录。")
+    return user
+
+
+def ensure_profile(user: dict) -> None:
+    if one("SELECT id FROM profiles WHERE user_id = ?", (user["id"],)):
+        return
+    db.execute("INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)", (str(uuid4()), user["id"], user["name"]))
+    db.commit()
+
+
+def find_profile_by_user_id(user_id: str) -> dict | None:
+    return one(
+        """
+        SELECT id, user_id, nickname, avatar_url, target_role, experience_level, company_type,
+               target_city, expected_salary, years_of_experience, education_level, skills,
+               project_keywords, resume_text, project_experience, portfolio_links,
+               preferred_interview_type, preferred_difficulty, preferred_interviewer_style,
+               created_at, updated_at
+        FROM profiles
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+
+
+def find_interview_by_user_id(interview_id: str, user_id: str) -> dict | None:
+    return one(
+        """
+        SELECT id, user_id, target_role, experience_level, interview_type, company_context,
+               focus_areas, difficulty, interviewer_style, status, created_at, updated_at,
+               started_at, completed_at
+        FROM interview_sessions
+        WHERE id = ? AND user_id = ?
+        """,
+        (interview_id, user_id),
+    )
+
+
+def normalize_status(status: Any) -> str | None:
+    value = str(status or "").strip()
+    return value if value in INTERVIEW_STATUSES else None
+
+
+def list_agents_by_interview_id(interview_id: str) -> list[dict]:
+    return all_rows(
+        """
+        SELECT id, interview_id, agent_name, agent_type, agent_role, strategy, order_index,
+               status, created_at, updated_at
+        FROM interview_agents
+        WHERE interview_id = ?
+        ORDER BY order_index ASC, created_at ASC
+        """,
+        (interview_id,),
+    )
+
+
+def find_agent_by_interview_id(agent_id: str, interview_id: str) -> dict | None:
+    return one(
+        """
+        SELECT id, interview_id, agent_name, agent_type, agent_role, strategy, order_index,
+               status, created_at, updated_at
+        FROM interview_agents
+        WHERE id = ? AND interview_id = ?
+        """,
+        (agent_id, interview_id),
+    )
+
+
+def create_default_agents(interview_id: str) -> None:
+    for index, agent in enumerate(DEFAULT_AGENT_TEMPLATES):
+        db.execute(
+            """
+            INSERT INTO interview_agents (
+              id, interview_id, agent_name, agent_type, agent_role, strategy, order_index, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                interview_id,
+                agent["agent_name"],
+                agent["agent_type"],
+                agent["agent_role"],
+                agent["strategy"],
+                index,
+                "pending",
+            ),
+        )
+
+
+def ensure_default_agents(interview_id: str) -> None:
+    existing = one("SELECT COUNT(*) AS count FROM interview_agents WHERE interview_id = ?", (interview_id,))
+    if not existing or existing["count"] == 0:
+        create_default_agents(interview_id)
+        db.commit()
+
+
+def next_agent_order_index(interview_id: str) -> int:
+    row = one("SELECT MAX(order_index) AS max_order_index FROM interview_agents WHERE interview_id = ?", (interview_id,))
+    value = row["max_order_index"] if row else None
+    return int(value) + 1 if isinstance(value, int) else 0
+
+
+def list_messages_by_interview_id(interview_id: str) -> list[dict]:
+    return all_rows(
+        """
+        SELECT messages.id, messages.interview_id, messages.agent_id,
+               agents.agent_name, agents.agent_type,
+               messages.sender_type, messages.message_type, messages.content,
+               messages.transcript_text, messages.order_index, messages.created_at
+        FROM interview_messages AS messages
+        LEFT JOIN interview_agents AS agents ON agents.id = messages.agent_id
+        WHERE messages.interview_id = ?
+        ORDER BY messages.order_index ASC, messages.created_at ASC
+        """,
+        (interview_id,),
+    )
+
+
+def find_message_by_interview_id(message_id: str, interview_id: str) -> dict | None:
+    return one(
+        """
+        SELECT messages.id, messages.interview_id, messages.agent_id,
+               agents.agent_name, agents.agent_type,
+               messages.sender_type, messages.message_type, messages.content,
+               messages.transcript_text, messages.order_index, messages.created_at
+        FROM interview_messages AS messages
+        LEFT JOIN interview_agents AS agents ON agents.id = messages.agent_id
+        WHERE messages.id = ? AND messages.interview_id = ?
+        """,
+        (message_id, interview_id),
+    )
+
+
+def next_message_order_index(interview_id: str) -> int:
+    row = one("SELECT MAX(order_index) AS max_order_index FROM interview_messages WHERE interview_id = ?", (interview_id,))
+    value = row["max_order_index"] if row else None
+    return int(value) + 1 if isinstance(value, int) else 0
+
+
+def clamp_score(score: float) -> int:
+    return max(1, min(100, round(score)))
+
+
+def clamp_stat_score(score: float) -> int:
+    return max(0, min(100, round(score)))
+
+
+def average(numbers: list[Any], fallback: float = 0) -> float:
+    valid = [float(number) for number in numbers if isinstance(number, (int, float)) and math.isfinite(number)]
+    return sum(valid) / len(valid) if valid else fallback
+
+
+def parse_json_object(value: Any, fallback: dict | None = None) -> dict:
+    if fallback is None:
+        fallback = {}
+    try:
+        parsed = json.loads(value or "")
+        return parsed if isinstance(parsed, dict) else fallback
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def generate_mock_evaluation(message: dict) -> dict:
+    content = str(message.get("content") or "")
+    length_score = 18 if len(content) >= 180 else 12 if len(content) >= 80 else 6
+    structure_score = 10 if re.search(r"第一|第二|首先|其次|最后|因为|所以|例如|比如", content) else 4
+    technical_score = 14 if re.search(r"架构|性能|数据库|缓存|并发|接口|边界|测试|部署|Agent|SQL|Node|React", content, re.I) else 6
+    base_score = clamp_score(58 + length_score + structure_score + technical_score)
+    expression_clarity = clamp_score(base_score + (4 if structure_score >= 10 else -4))
+    technical_depth = clamp_score(base_score + (5 if technical_score >= 14 else -6))
+    business_understanding = clamp_score(base_score + (5 if re.search(r"业务|用户|场景|指标|成本|收益|风险", content) else -5))
+    return {
+        "score": base_score,
+        "strengths": "\n".join(
+            [
+                "回答有一定展开，能够覆盖背景和做法。" if len(content) >= 80 else "回答能抓住问题方向，具备继续追问的基础。",
+                "能提到具体技术点，便于面试官继续深挖。" if technical_score >= 14 else "表达保持聚焦，没有明显跑题。",
+            ]
+        ),
+        "issues": "\n".join(
+            [
+                "可以进一步压缩表达，让重点更突出。" if len(content) >= 180 else "细节还不够充分，关键方案、权衡和结果需要补充。",
+                "结构已经初步清晰，但结论和量化结果还可以更靠前。" if structure_score >= 10 else "回答结构略散，建议按背景、行动、结果组织。",
+            ]
+        ),
+        "suggestions": "\n".join(
+            [
+                "补充一个具体场景，说明你负责的模块、遇到的限制和最终结果。",
+                "用 1-2 个量化指标呈现影响，例如耗时、成功率、性能或成本变化。",
+                "主动说明方案取舍，展示你对边界条件和风险的判断。",
+            ]
+        ),
+        "dimension_scores": {
+            "technical_depth": technical_depth,
+            "expression_clarity": expression_clarity,
+            "business_understanding": business_understanding,
+        },
+    }
+
+
+def find_evaluation_by_message_id(interview_id: str, message_id: str) -> dict | None:
+    return one(
+        """
+        SELECT evaluations.id, evaluations.interview_id, evaluations.message_id, evaluations.agent_id,
+               agents.agent_name, agents.agent_type,
+               evaluations.score, evaluations.strengths, evaluations.issues, evaluations.suggestions,
+               evaluations.dimension_scores, evaluations.created_at, evaluations.updated_at
+        FROM interview_evaluations AS evaluations
+        LEFT JOIN interview_agents AS agents ON agents.id = evaluations.agent_id
+        WHERE evaluations.interview_id = ? AND evaluations.message_id = ?
+        """,
+        (interview_id, message_id),
+    )
+
+
+def find_evaluation_by_id(interview_id: str, evaluation_id: str) -> dict | None:
+    return one(
+        """
+        SELECT evaluations.id, evaluations.interview_id, evaluations.message_id, evaluations.agent_id,
+               agents.agent_name, agents.agent_type,
+               evaluations.score, evaluations.strengths, evaluations.issues, evaluations.suggestions,
+               evaluations.dimension_scores, evaluations.created_at, evaluations.updated_at
+        FROM interview_evaluations AS evaluations
+        LEFT JOIN interview_agents AS agents ON agents.id = evaluations.agent_id
+        WHERE evaluations.interview_id = ? AND evaluations.id = ?
+        """,
+        (interview_id, evaluation_id),
+    )
+
+
+def list_evaluations_by_interview_id(interview_id: str) -> list[dict]:
+    return all_rows(
+        """
+        SELECT evaluations.id, evaluations.interview_id, evaluations.message_id, evaluations.agent_id,
+               agents.agent_name, agents.agent_type,
+               evaluations.score, evaluations.strengths, evaluations.issues, evaluations.suggestions,
+               evaluations.dimension_scores, evaluations.created_at, evaluations.updated_at,
+               messages.content AS message_content, messages.order_index AS message_order_index
+        FROM interview_evaluations AS evaluations
+        LEFT JOIN interview_agents AS agents ON agents.id = evaluations.agent_id
+        JOIN interview_messages AS messages ON messages.id = evaluations.message_id
+        WHERE evaluations.interview_id = ?
+        ORDER BY messages.order_index ASC, evaluations.created_at ASC
+        """,
+        (interview_id,),
+    )
+
+
+def grade_from_score(score: int) -> str:
+    if score >= 90:
+        return "A"
+    if score >= 80:
+        return "B"
+    if score >= 70:
+        return "C"
+    if score >= 60:
+        return "D"
+    return "E"
+
+
+def pass_recommendation_from_score(score: int) -> str:
+    if score >= 85:
+        return "strong_pass"
+    if score >= 75:
+        return "pass"
+    if score >= 60:
+        return "borderline"
+    return "no_pass"
+
+
+def build_ability_radar(evaluations: list[dict]) -> dict:
+    radar = {}
+    for dimension in ["technical_depth", "expression_clarity", "business_understanding"]:
+        radar[dimension] = clamp_score(average([parse_json_object(e.get("dimension_scores")).get(dimension) for e in evaluations], 70))
+    return radar
+
+
+def build_agent_feedback(agents: list[dict], evaluations: list[dict]) -> list[dict]:
+    feedback = []
+    for agent in agents:
+        related = [evaluation for evaluation in evaluations if evaluation.get("agent_id") == agent["id"]]
+        score = clamp_score(average([evaluation["score"] for evaluation in related], 72))
+        feedback.append(
+            {
+                "agent_id": agent["id"],
+                "agent_name": agent["agent_name"],
+                "agent_type": agent["agent_type"],
+                "score": score,
+                "comment": (
+                    f"已完成 {len(related)} 条回答复盘，整体表现{'稳定' if score >= 80 else '仍需加强'}。"
+                    if related
+                    else "暂无关联单轮评价，后续可结合该 Agent 的追问补充更细的判断。"
+                ),
+            }
+        )
+    return feedback
+
+
+def build_timeline_review(messages: list[dict], evaluations: list[dict]) -> list[dict]:
+    evaluation_by_message_id = {evaluation["message_id"]: evaluation for evaluation in evaluations}
+    timeline = []
+    for message in messages:
+        content = message.get("content") or ""
+        timeline.append(
+            {
+                "message_id": message["id"],
+                "order_index": message["order_index"],
+                "sender_type": message["sender_type"],
+                "message_type": message["message_type"],
+                "agent_name": message.get("agent_name"),
+                "content_preview": f"{content[:80]}..." if len(content) > 80 else content,
+                "score": evaluation_by_message_id.get(message["id"], {}).get("score"),
+            }
+        )
+    return timeline
+
+
+def generate_mock_report(interview: dict, agents: list[dict], messages: list[dict], evaluations: list[dict]) -> dict:
+    total_score = clamp_score(average([evaluation["score"] for evaluation in evaluations], 72 if messages else 60))
+    candidate_answers = len([message for message in messages if message["sender_type"] == "candidate"])
+    agent_questions = len([message for message in messages if message["sender_type"] == "agent"])
+    return {
+        "total_score": total_score,
+        "grade": grade_from_score(total_score),
+        "pass_recommendation": pass_recommendation_from_score(total_score),
+        "ability_radar": build_ability_radar(evaluations),
+        "agent_feedback": build_agent_feedback(agents, evaluations),
+        "timeline_review": build_timeline_review(messages, evaluations),
+        "summary": f"本次模拟面向{interview['target_role']}，共记录 {len(messages)} 条消息，其中候选人回答 {candidate_answers} 条，Agent 提问或追问 {agent_questions} 条。综合当前单轮评价，整体等级为 {grade_from_score(total_score)}。",
+        "suggestions": "\n".join(
+            [
+                "继续补充回答中的项目背景、关键决策和量化结果。",
+                "针对低分维度安排专项训练，优先复盘被追问但回答不充分的问题。",
+                "下一次模拟可以提高难度或增加架构追问，检验方案权衡能力。",
+            ]
+        ),
+    }
+
+
+def create_initial_question(interview: dict, agent: dict | None) -> str:
+    role = interview.get("target_role") or "目标岗位"
+    focus = interview.get("focus_areas") or "项目经历"
+    agent_name = agent.get("agent_name") if agent else "面试官"
+    return f"{agent_name}：请结合你的{focus}，介绍一个最能体现你胜任{role}的项目。"
+
+
+def build_realtime_session_config(interview: dict, agents: list[dict], messages: list[dict]) -> dict:
+    current_agent = agents[0] if agents else None
+    latest_questions = [message for message in messages if message["sender_type"] == "agent"]
+    latest_question = latest_questions[-1]["content"] if latest_questions else create_initial_question(interview, current_agent)
+    recent_messages = messages[-8:]
+    recent_context = "\n".join(
+        [
+            f"{'候选人' if message['sender_type'] == 'candidate' else message.get('agent_name') or '面试官'}：{message.get('content') or ''}"
+            for message in recent_messages
+        ]
+    ) or "暂无历史对话。"
+    asked_questions = "\n".join([f"- {message['content']}" for message in latest_questions[-5:]]) or "- 暂无"
+    return {
+        "type": "realtime",
+        "model": os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-2"),
+        "instructions": "\n".join(
+            [
+                "你是一名中文 AI 电话面试官，正在进行一场真实语音模拟面试。",
+                "请使用自然、简洁、专业的中文口语交流，每次只问一个问题。",
+                "候选人回答后，先做一句短反馈，再围绕项目细节、方案取舍、量化结果或风险边界继续追问。",
+                "不要重复已经问过的问题；如果候选人回答泛泛而谈，要换一个角度追问具体案例、数据口径、失败复盘或协作冲突。",
+                "连续追问要按层次推进：背景职责 -> 方案取舍 -> 指标验证 -> 线上风险 -> 团队落地。",
+                "不要一次性给出长篇评价；把节奏控制成电话面试。",
+                f"目标岗位：{interview.get('target_role') or '未填写'}",
+                f"面试类型：{interview.get('interview_type') or '综合模拟'}",
+                f"难度：{interview.get('difficulty') or '标准'}",
+                f"面试官风格：{interview.get('interviewer_style') or '专业追问'}",
+                f"当前面试官：{current_agent.get('agent_name') if current_agent else '技术面试 Agent'}",
+                f"当前问题：{latest_question}",
+                f"最近对话：\n{recent_context}",
+                f"已问过的问题，避免复述：\n{asked_questions}",
+                "如果刚接通，请从当前问题开始，不要重复介绍系统功能。",
+            ]
+        ),
+        "audio": {
+            "input": {
+                "transcription": {
+                    "model": os.environ.get("OPENAI_TRANSCRIPTION_MODEL", "gpt-realtime-whisper"),
+                    "language": "zh",
+                },
+                "turn_detection": {"type": "server_vad"},
+            },
+            "output": {"voice": os.environ.get("OPENAI_REALTIME_VOICE", "marin")},
+        },
+    }
+
+
+def find_report_by_interview_id(interview_id: str, user_id: str) -> dict | None:
+    return one(
+        """
+        SELECT reports.id, reports.user_id, reports.interview_id,
+               interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
+               reports.total_score, reports.grade, reports.pass_recommendation,
+               reports.ability_radar, reports.agent_feedback, reports.timeline_review,
+               reports.summary, reports.suggestions, reports.created_at, reports.updated_at
+        FROM interview_reports AS reports
+        JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
+        WHERE reports.interview_id = ? AND reports.user_id = ?
+        """,
+        (interview_id, user_id),
+    )
+
+
+def find_report_by_id(report_id: str, user_id: str) -> dict | None:
+    return one(
+        """
+        SELECT reports.id, reports.user_id, reports.interview_id,
+               interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
+               reports.total_score, reports.grade, reports.pass_recommendation,
+               reports.ability_radar, reports.agent_feedback, reports.timeline_review,
+               reports.summary, reports.suggestions, reports.created_at, reports.updated_at
+        FROM interview_reports AS reports
+        JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
+        WHERE reports.id = ? AND reports.user_id = ?
+        """,
+        (report_id, user_id),
+    )
+
+
+def list_reports_by_user_id(user_id: str) -> list[dict]:
+    return all_rows(
+        """
+        SELECT reports.id, reports.user_id, reports.interview_id,
+               interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
+               reports.total_score, reports.grade, reports.pass_recommendation,
+               reports.summary, reports.created_at, reports.updated_at
+        FROM interview_reports AS reports
+        JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
+        WHERE reports.user_id = ?
+        ORDER BY reports.updated_at DESC, reports.created_at DESC
+        """,
+        (user_id,),
+    )
+
+
+def list_full_reports_by_user_id(user_id: str) -> list[dict]:
+    return all_rows(
+        """
+        SELECT reports.id, reports.user_id, reports.interview_id,
+               interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
+               reports.total_score, reports.ability_radar, reports.created_at, reports.updated_at
+        FROM interview_reports AS reports
+        JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
+        WHERE reports.user_id = ?
+        ORDER BY reports.updated_at ASC, reports.created_at ASC
+        """,
+        (user_id,),
+    )
+
+
+def compute_dimension_trend(values: list[int]) -> str:
+    if len(values) < 2:
+        return "stable"
+    delta = values[-1] - values[0]
+    if delta >= 5:
+        return "up"
+    if delta <= -5:
+        return "down"
+    return "stable"
+
+
+def find_user_skill_stats(user_id: str) -> dict | None:
+    return one(
+        """
+        SELECT id, user_id, total_interviews, completed_interviews, average_total_score,
+               technical_depth_avg, expression_clarity_avg, business_understanding_avg,
+               dimension_trends, weak_points, recent_training_focus, updated_at
+        FROM user_skill_stats
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+
+
+def refresh_user_skill_stats(user_id: str) -> dict:
+    interview_counts = one(
+        """
+        SELECT
+          COUNT(*) AS total_interviews,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_interviews
+        FROM interview_sessions
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ) or {"total_interviews": 0, "completed_interviews": 0}
+    reports = list_full_reports_by_user_id(user_id)
+    dimensions = ["technical_depth", "expression_clarity", "business_understanding"]
+    dimension_values: dict[str, list[int]] = {dimension: [] for dimension in dimensions}
+    for report in reports:
+        radar = parse_json_object(report.get("ability_radar"))
+        for dimension in dimensions:
+            value = radar.get(dimension)
+            if isinstance(value, (int, float)):
+                dimension_values[dimension].append(round(value))
+
+    dimension_averages = {dimension: clamp_stat_score(average(values, 0)) for dimension, values in dimension_values.items()}
+    dimension_trends = {dimension: compute_dimension_trend(values) for dimension, values in dimension_values.items()}
+    weak_points = sorted(
+        [{"dimension": dimension, "score": score} for dimension, score in dimension_averages.items() if score > 0],
+        key=lambda item: item["score"],
+    )[:2]
+    recent_focus = reports[-1]["target_role"] if reports else None
+    average_total_score = clamp_stat_score(average([report["total_score"] for report in reports], 0))
+    existing = one("SELECT id FROM user_skill_stats WHERE user_id = ?", (user_id,))
+    stats_id = existing["id"] if existing else str(uuid4())
+
+    if existing:
+        db.execute(
+            """
+            UPDATE user_skill_stats
+            SET total_interviews = ?, completed_interviews = ?, average_total_score = ?,
+                technical_depth_avg = ?, expression_clarity_avg = ?, business_understanding_avg = ?,
+                dimension_trends = ?, weak_points = ?, recent_training_focus = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (
+                interview_counts.get("total_interviews") or 0,
+                interview_counts.get("completed_interviews") or 0,
+                average_total_score,
+                dimension_averages["technical_depth"],
+                dimension_averages["expression_clarity"],
+                dimension_averages["business_understanding"],
+                json.dumps(dimension_trends, ensure_ascii=False),
+                json.dumps(weak_points, ensure_ascii=False),
+                recent_focus,
+                user_id,
+            ),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO user_skill_stats (
+              id, user_id, total_interviews, completed_interviews, average_total_score,
+              technical_depth_avg, expression_clarity_avg, business_understanding_avg,
+              dimension_trends, weak_points, recent_training_focus
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                stats_id,
+                user_id,
+                interview_counts.get("total_interviews") or 0,
+                interview_counts.get("completed_interviews") or 0,
+                average_total_score,
+                dimension_averages["technical_depth"],
+                dimension_averages["expression_clarity"],
+                dimension_averages["business_understanding"],
+                json.dumps(dimension_trends, ensure_ascii=False),
+                json.dumps(weak_points, ensure_ascii=False),
+                recent_focus,
+            ),
+        )
+    db.commit()
+    return find_user_skill_stats(user_id)
+
+
+def build_user_dimension_stats(stats: dict) -> list[dict]:
+    trends = parse_json_object(stats.get("dimension_trends"))
+    return [
+        {
+            "key": "technical_depth",
+            "label": "技术深度",
+            "average_score": stats["technical_depth_avg"],
+            "trend": trends.get("technical_depth", "stable"),
+        },
+        {
+            "key": "expression_clarity",
+            "label": "表达清晰度",
+            "average_score": stats["expression_clarity_avg"],
+            "trend": trends.get("expression_clarity", "stable"),
+        },
+        {
+            "key": "business_understanding",
+            "label": "业务理解",
+            "average_score": stats["business_understanding_avg"],
+            "trend": trends.get("business_understanding", "stable"),
+        },
+    ]
+
+
+@app.get("/api/health")
+def health():
+    return {"ok": True, "databasePath": get_database_path()}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    return {"user": sanitize_user(find_user_by_session(request))}
+
+
+@app.post("/api/auth/register", status_code=201)
+async def auth_register(request: Request, response: Response, body: dict | None = None):
+    body = json_body(body)
+    email = normalize_email(body.get("email"))
+    password = str(body.get("password") or "")
+    name = str(body.get("name") or "").strip() or (email.split("@")[0] if "@" in email else "新用户")
+    if not is_valid_email(email):
+        raise error(400, "请输入有效邮箱。")
+    if len(password) < 8:
+        raise error(400, "密码至少需要 8 位。")
+    if len(name) > 60:
+        raise error(400, "昵称不能超过 60 个字符。")
+    if one("SELECT id FROM users WHERE email = ?", (email,)):
+        raise error(409, "这个邮箱已经注册。")
+
+    user_id = str(uuid4())
+    with db:
+        db.execute("INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)", (user_id, email, hash_password(password), name))
+        db.execute("INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)", (str(uuid4()), user_id, name))
+    create_session(response, user_id, request.headers.get("user-agent"))
+    user = one("SELECT id, email, name, status, created_at, last_login_at FROM users WHERE id = ?", (user_id,))
+    return {"user": sanitize_user(user)}
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request, response: Response, body: dict | None = None):
+    body = json_body(body)
+    email = normalize_email(body.get("email"))
+    password = str(body.get("password") or "")
+    if not is_valid_email(email) or not password:
+        raise error(400, "请输入邮箱和密码。")
+    if is_login_limited(request, email):
+        raise error(429, "登录尝试过于频繁，请稍后再试。")
+
+    user = one("SELECT id, email, password_hash, name, status, created_at, last_login_at FROM users WHERE email = ?", (email,))
+    if not user or user["status"] != "normal" or not verify_password(password, user["password_hash"]):
+        record_failed_login(request, email)
+        raise error(401, "邮箱或密码不正确。")
+
+    clear_failed_logins(request, email)
+    db.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (user["id"],))
+    db.commit()
+    create_session(response, user["id"], request.headers.get("user-agent"))
+    current_user = one("SELECT id, email, name, status, created_at, last_login_at FROM users WHERE id = ?", (user["id"],))
+    return {"user": sanitize_user(current_user)}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token:
+        db.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(token),))
+        db.commit()
+    clear_session(response)
+    return {"ok": True}
+
+
+@app.post("/api/auth/password-reset/request")
+def password_reset_request(body: dict | None = None):
+    body = json_body(body)
+    email = normalize_email(body.get("email"))
+    user = one("SELECT id FROM users WHERE email = ? AND status = ?", (email, "normal")) if is_valid_email(email) else None
+    dev_reset_token = None
+    if user:
+        token = create_token()
+        db.execute(
+            "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)",
+            (str(uuid4()), user["id"], hash_token(token), now_iso_after(RESET_MAX_AGE_SECONDS)),
+        )
+        db.commit()
+        if os.environ.get("APP_ENV") != "production":
+            dev_reset_token = token
+    return {"ok": True, "message": "如果邮箱存在，我们会发送密码重置链接。", "devResetToken": dev_reset_token}
+
+
+@app.get("/api/profile")
+def get_profile(user: dict = Depends(require_auth)):
+    ensure_profile(user)
+    return {"profile": find_profile_by_user_id(user["id"])}
+
+
+@app.put("/api/profile")
+def update_profile(body: dict | None = None, user: dict = Depends(require_auth)):
+    profile = parse_profile_input(json_body(body), user["name"])
+    ensure_profile(user)
+    db.execute(
+        """
+        UPDATE profiles
+        SET nickname = ?, avatar_url = ?, target_role = ?, experience_level = ?, company_type = ?,
+            target_city = ?, expected_salary = ?, years_of_experience = ?, education_level = ?,
+            skills = ?, project_keywords = ?, resume_text = ?, project_experience = ?,
+            portfolio_links = ?, preferred_interview_type = ?, preferred_difficulty = ?,
+            preferred_interviewer_style = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ?
+        """,
+        (
+            profile["nickname"],
+            profile["avatar_url"],
+            profile["target_role"],
+            profile["experience_level"],
+            profile["company_type"],
+            profile["target_city"],
+            profile["expected_salary"],
+            profile["years_of_experience"],
+            profile["education_level"],
+            profile["skills"],
+            profile["project_keywords"],
+            profile["resume_text"],
+            profile["project_experience"],
+            profile["portfolio_links"],
+            profile["preferred_interview_type"],
+            profile["preferred_difficulty"],
+            profile["preferred_interviewer_style"],
+            user["id"],
+        ),
+    )
+    db.execute("UPDATE users SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (profile["nickname"], user["id"]))
+    db.commit()
+    return {"profile": find_profile_by_user_id(user["id"])}
+
+
+@app.post("/api/interviews", status_code=201)
+def create_interview(body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = parse_interview_input(json_body(body))
+    interview_id = str(uuid4())
+    with db:
+        db.execute(
+            """
+            INSERT INTO interview_sessions (
+              id, user_id, target_role, experience_level, interview_type, company_context,
+              focus_areas, difficulty, interviewer_style, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                interview_id,
+                user["id"],
+                interview["target_role"],
+                interview["experience_level"],
+                interview["interview_type"],
+                interview["company_context"],
+                interview["focus_areas"],
+                interview["difficulty"],
+                interview["interviewer_style"],
+                "draft",
+            ),
+        )
+        create_default_agents(interview_id)
+    return {"interview": find_interview_by_user_id(interview_id, user["id"]), "agents": list_agents_by_interview_id(interview_id)}
+
+
+@app.get("/api/interviews")
+def list_interviews(request: Request, user: dict = Depends(require_auth)):
+    raw_status = request.query_params.get("status")
+    status = normalize_status(raw_status) if raw_status else None
+    if raw_status and not status:
+        raise error(400, "面试状态不正确。")
+    if status:
+        interviews = all_rows(
+            """
+            SELECT id, user_id, target_role, experience_level, interview_type, company_context,
+                   focus_areas, difficulty, interviewer_style, status, created_at, updated_at,
+                   started_at, completed_at
+            FROM interview_sessions
+            WHERE user_id = ? AND status = ?
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (user["id"], status),
+        )
+    else:
+        interviews = all_rows(
+            """
+            SELECT id, user_id, target_role, experience_level, interview_type, company_context,
+                   focus_areas, difficulty, interviewer_style, status, created_at, updated_at,
+                   started_at, completed_at
+            FROM interview_sessions
+            WHERE user_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (user["id"],),
+        )
+    return {"interviews": interviews}
+
+
+@app.get("/api/interviews/{interview_id}")
+def get_interview(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    return {"interview": interview}
+
+
+@app.patch("/api/interviews/{interview_id}")
+def update_interview(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能继续修改。")
+    parsed = parse_interview_input(json_body(body), partial=True)
+    next_interview = {**interview, **parsed}
+    db.execute(
+        """
+        UPDATE interview_sessions
+        SET target_role = ?, experience_level = ?, interview_type = ?, company_context = ?,
+            focus_areas = ?, difficulty = ?, interviewer_style = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ?
+        """,
+        (
+            next_interview["target_role"],
+            next_interview["experience_level"],
+            next_interview["interview_type"],
+            next_interview["company_context"],
+            next_interview["focus_areas"],
+            next_interview["difficulty"],
+            next_interview["interviewer_style"],
+            interview["id"],
+            user["id"],
+        ),
+    )
+    db.commit()
+    return {"interview": find_interview_by_user_id(interview["id"], user["id"])}
+
+
+@app.post("/api/interviews/{interview_id}/start")
+def start_interview(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能重新开始。")
+    if interview["status"] == "draft":
+        db.execute(
+            """
+            UPDATE interview_sessions
+            SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ?
+            """,
+            (interview["id"], user["id"]),
+        )
+        db.commit()
+    return {"interview": find_interview_by_user_id(interview["id"], user["id"])}
+
+
+@app.post("/api/interviews/{interview_id}/finish")
+def finish_interview(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        return {"interview": interview}
+    db.execute(
+        """
+        UPDATE interview_sessions
+        SET status = 'completed', started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+            completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ?
+        """,
+        (interview["id"], user["id"]),
+    )
+    db.commit()
+    return {"interview": find_interview_by_user_id(interview["id"], user["id"])}
+
+
+@app.get("/api/interviews/{interview_id}/agents")
+def list_agents(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    ensure_default_agents(interview["id"])
+    return {"agents": list_agents_by_interview_id(interview["id"])}
+
+
+@app.post("/api/interviews/{interview_id}/agents", status_code=201)
+def create_agent(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能新增 Agent。")
+    agent = parse_agent_input(json_body(body))
+    agent_id = str(uuid4())
+    order_index = agent["order_index"] if isinstance(agent.get("order_index"), int) else next_agent_order_index(interview["id"])
+    db.execute(
+        """
+        INSERT INTO interview_agents (
+          id, interview_id, agent_name, agent_type, agent_role, strategy, order_index, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            agent_id,
+            interview["id"],
+            agent["agent_name"],
+            agent["agent_type"],
+            agent["agent_role"],
+            agent.get("strategy"),
+            order_index,
+            agent.get("status") or "pending",
+        ),
+    )
+    db.commit()
+    return {"agent": find_agent_by_interview_id(agent_id, interview["id"])}
+
+
+@app.patch("/api/interviews/{interview_id}/agents/{agent_id}")
+def update_agent(interview_id: str, agent_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能修改 Agent。")
+    existing = find_agent_by_interview_id(agent_id, interview["id"])
+    if not existing:
+        raise error(404, "Agent 不存在。")
+    parsed = parse_agent_input(json_body(body), partial=True)
+    next_agent = {**existing, **parsed}
+    db.execute(
+        """
+        UPDATE interview_agents
+        SET agent_name = ?, agent_type = ?, agent_role = ?, strategy = ?, order_index = ?,
+            status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND interview_id = ?
+        """,
+        (
+            next_agent["agent_name"],
+            next_agent["agent_type"],
+            next_agent["agent_role"],
+            next_agent.get("strategy"),
+            next_agent["order_index"],
+            next_agent["status"],
+            existing["id"],
+            interview["id"],
+        ),
+    )
+    db.commit()
+    return {"agent": find_agent_by_interview_id(existing["id"], interview["id"])}
+
+
+@app.get("/api/interviews/{interview_id}/messages")
+def list_messages(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    return {"messages": list_messages_by_interview_id(interview["id"])}
+
+
+@app.post("/api/interviews/{interview_id}/messages", status_code=201)
+def create_message(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能继续写入消息。")
+    message = parse_message_input(json_body(body))
+    if message["agent_id"] and not find_agent_by_interview_id(message["agent_id"], interview["id"]):
+        raise error(400, "Agent 不属于当前面试。")
+    message_id = str(uuid4())
+    db.execute(
+        """
+        INSERT INTO interview_messages (
+          id, interview_id, agent_id, sender_type, message_type, content, transcript_text, order_index
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            message_id,
+            interview["id"],
+            message["agent_id"],
+            message["sender_type"],
+            message["message_type"],
+            message["content"],
+            message["transcript_text"],
+            next_message_order_index(interview["id"]),
+        ),
+    )
+    db.execute("UPDATE interview_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?", (interview["id"], user["id"]))
+    db.commit()
+    return {"message": find_message_by_interview_id(message_id, interview["id"])}
+
+
+@app.post("/api/interviews/{interview_id}/realtime/sdp", response_class=PlainTextResponse)
+async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能开启语音通话。")
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY")
+    if not api_key or api_key == "your-api-key-here":
+        raise error(500, "服务端未配置 OPENAI_API_KEY，无法开启实时语音。")
+    sdp = (await request.body()).decode("utf-8").strip()
+    if not sdp:
+        raise error(400, "缺少 WebRTC SDP offer。")
+
+    agents = list_agents_by_interview_id(interview["id"])
+    messages = list_messages_by_interview_id(interview["id"])
+    files = {
+        "sdp": (None, sdp),
+        "session": (None, json.dumps(build_realtime_session_config(interview, agents, messages), ensure_ascii=False)),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/realtime/calls",
+                headers={"Authorization": f"Bearer {api_key}", "OpenAI-Safety-Identifier": hash_token(user["id"])},
+                files=files,
+            )
+    except httpx.HTTPError as exc:
+        raise error(502, f"无法连接 OpenAI Realtime API：{exc}")
+
+    if response.status_code >= 400:
+        message = "创建实时语音会话失败。"
+        try:
+            message = response.json().get("error", {}).get("message") or message
+        except ValueError:
+            message = response.text or message
+        raise error(response.status_code, message)
+    return PlainTextResponse(response.text, media_type="application/sdp")
+
+
+@app.post("/api/interviews/{interview_id}/evaluations", status_code=201)
+def create_evaluation(
+    interview_id: str,
+    response: Response,
+    body: dict | None = None,
+    user: dict = Depends(require_auth),
+):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    message_id = str(json_body(body).get("message_id") or "").strip()
+    if not message_id:
+        raise error(400, "请提供要评价的 message_id。")
+    message = find_message_by_interview_id(message_id, interview["id"])
+    if not message:
+        raise error(404, "消息不存在。")
+    if message["sender_type"] != "candidate" or message["message_type"] not in {"answer", "transcript"}:
+        raise error(400, "只能评价候选人的回答消息。")
+    existing = find_evaluation_by_message_id(interview["id"], message["id"])
+    if existing:
+        if response:
+            response.status_code = 200
+        return {"evaluation": existing}
+    evaluation_id = str(uuid4())
+    evaluation = generate_mock_evaluation(message)
+    db.execute(
+        """
+        INSERT INTO interview_evaluations (
+          id, interview_id, message_id, agent_id, score, strengths, issues, suggestions, dimension_scores
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            evaluation_id,
+            interview["id"],
+            message["id"],
+            message["agent_id"],
+            evaluation["score"],
+            evaluation["strengths"],
+            evaluation["issues"],
+            evaluation["suggestions"],
+            json.dumps(evaluation["dimension_scores"], ensure_ascii=False),
+        ),
+    )
+    db.execute("UPDATE interview_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?", (interview["id"], user["id"]))
+    db.commit()
+    return {"evaluation": find_evaluation_by_id(interview["id"], evaluation_id)}
+
+
+@app.get("/api/interviews/{interview_id}/evaluations")
+def list_evaluations(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    return {"evaluations": list_evaluations_by_interview_id(interview["id"])}
+
+
+@app.post("/api/interviews/{interview_id}/report", status_code=201)
+def create_report(interview_id: str, response: Response, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] != "completed":
+        raise error(409, "请先结束面试，再生成报告。")
+    agents = list_agents_by_interview_id(interview["id"])
+    messages = list_messages_by_interview_id(interview["id"])
+    evaluations = list_evaluations_by_interview_id(interview["id"])
+    report = generate_mock_report(interview, agents, messages, evaluations)
+    existing = find_report_by_interview_id(interview["id"], user["id"])
+    report_id = existing["id"] if existing else str(uuid4())
+
+    if existing:
+        response.status_code = 200
+        db.execute(
+            """
+            UPDATE interview_reports
+            SET total_score = ?, grade = ?, pass_recommendation = ?, ability_radar = ?,
+                agent_feedback = ?, timeline_review = ?, summary = ?, suggestions = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                report["total_score"],
+                report["grade"],
+                report["pass_recommendation"],
+                json.dumps(report["ability_radar"], ensure_ascii=False),
+                json.dumps(report["agent_feedback"], ensure_ascii=False),
+                json.dumps(report["timeline_review"], ensure_ascii=False),
+                report["summary"],
+                report["suggestions"],
+                report_id,
+                user["id"],
+            ),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO interview_reports (
+              id, user_id, interview_id, total_score, grade, pass_recommendation,
+              ability_radar, agent_feedback, timeline_review, summary, suggestions
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_id,
+                user["id"],
+                interview["id"],
+                report["total_score"],
+                report["grade"],
+                report["pass_recommendation"],
+                json.dumps(report["ability_radar"], ensure_ascii=False),
+                json.dumps(report["agent_feedback"], ensure_ascii=False),
+                json.dumps(report["timeline_review"], ensure_ascii=False),
+                report["summary"],
+                report["suggestions"],
+            ),
+        )
+    db.commit()
+    refresh_user_skill_stats(user["id"])
+    return {"report": find_report_by_id(report_id, user["id"])}
+
+
+@app.get("/api/interviews/{interview_id}/report")
+def get_interview_report(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    report = find_report_by_interview_id(interview["id"], user["id"])
+    if not report:
+        raise error(404, "报告不存在。")
+    return {"report": report}
+
+
+@app.get("/api/reports")
+def list_reports(user: dict = Depends(require_auth)):
+    return {"reports": list_reports_by_user_id(user["id"])}
+
+
+@app.get("/api/reports/{report_id}")
+def get_report(report_id: str, user: dict = Depends(require_auth)):
+    report = find_report_by_id(report_id, user["id"])
+    if not report:
+        raise error(404, "报告不存在。")
+    return {"report": report}
+
+
+@app.get("/api/stats/me")
+def get_stats(user: dict = Depends(require_auth)):
+    return {"stats": refresh_user_skill_stats(user["id"])}
+
+
+@app.get("/api/stats/me/dimensions")
+def get_dimensions(user: dict = Depends(require_auth)):
+    stats = refresh_user_skill_stats(user["id"])
+    return {"dimensions": build_user_dimension_stats(stats)}

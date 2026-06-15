@@ -792,6 +792,10 @@ function canStreamAudioWithMediaSource() {
   );
 }
 
+function getSpeechRecognitionConstructor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition;
+}
+
 function waitForMediaSourceOpen(mediaSource) {
   return new Promise((resolve, reject) => {
     if (mediaSource.readyState === 'open') {
@@ -1913,6 +1917,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const remoteAudioRef = useRef(null);
   const qwenAudioRef = useRef(null);
   const qwenStreamRef = useRef(null);
+  const qwenRecognitionRef = useRef(null);
+  const qwenRecognitionActiveRef = useRef(false);
+  const qwenRecognitionSubmittedRef = useRef(false);
   const savedRealtimeEventsRef = useRef(new Set());
 
   const activeAgent = agents.find((agent) => agent.status === 'active') || agents.find((agent) => agent.status !== 'completed') || agents[0] || null;
@@ -1979,6 +1986,18 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setQwenMessage('千问语音播放已停止');
   };
 
+  const stopQwenRecognition = (message = '千问语音听写已停止') => {
+    qwenRecognitionActiveRef.current = false;
+    if (qwenRecognitionRef.current) {
+      qwenRecognitionRef.current.stop();
+    }
+    qwenRecognitionRef.current = null;
+    if (qwenStatus === 'listening') {
+      setQwenStatus('idle');
+      setQwenMessage(message);
+    }
+  };
+
   const playQwenSpeech = async (text) => {
     const content = String(text || '').trim();
     if (!content || !interviewId) return;
@@ -2029,7 +2048,13 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     audio.addEventListener('error', () => failQwenPlayback());
 
     try {
-      const response = await apiAudioResponse(`/api/interviews/${interviewId}/qwen/tts`, { text: content }, controller.signal);
+      let response;
+      try {
+        response = await apiAudioResponse(`/api/interviews/${interviewId}/qwen/realtime-tts`, { text: content }, controller.signal);
+      } catch (realtimeError) {
+        setQwenMessage('千问实时播报失败，正在降级普通合成');
+        response = await apiAudioResponse(`/api/interviews/${interviewId}/qwen/tts`, { text: content }, controller.signal);
+      }
 
       if (!response.body || !canStreamAudioWithMediaSource()) {
         const blob = await response.blob();
@@ -2037,7 +2062,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         streamState.objectUrl = URL.createObjectURL(blob);
         audio.src = streamState.objectUrl;
         setQwenStatus('speaking');
-        setQwenMessage('正在播放千问语音追问');
+        setQwenMessage('正在播放千问实时语音追问');
         await audio.play();
         return;
       }
@@ -2071,7 +2096,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
             await appendAudioChunk(sourceBuffer, value);
             if (!playbackStarted && isCurrentStream()) {
               setQwenStatus('speaking');
-              setQwenMessage('正在流式播放千问语音追问');
+              setQwenMessage('正在流式播放千问实时语音追问');
               await audio.play();
               playbackStarted = true;
               resolvePlaybackStart();
@@ -2266,6 +2291,84 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
   };
 
+  const startQwenVoiceConversation = () => {
+    if (!interviewId || submitting) return;
+
+    if (qwenStatus === 'listening') {
+      stopQwenRecognition('已停止聆听候选人回答');
+      return;
+    }
+
+    const SpeechRecognition = getSpeechRecognitionConstructor();
+    if (!SpeechRecognition) {
+      setQwenStatus('error');
+      setQwenMessage('当前浏览器不支持语音识别，请使用 Chrome 或先输入文本回答');
+      return;
+    }
+
+    stopRealtimeCall();
+    stopQwenSpeech();
+    qwenRecognitionActiveRef.current = true;
+    qwenRecognitionSubmittedRef.current = false;
+    setVoiceProvider('qwen');
+    setQwenStatus('listening');
+    setQwenMessage('正在聆听候选人回答，说完后会自动生成追问');
+    setError('');
+
+    const recognition = new SpeechRecognition();
+    qwenRecognitionRef.current = recognition;
+    recognition.lang = 'zh-CN';
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      let finalText = '';
+      let interimText = '';
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result[0]?.transcript || '';
+        if (result.isFinal) {
+          finalText += transcript;
+        } else {
+          interimText += transcript;
+        }
+      }
+
+      const visibleText = (finalText || interimText).trim();
+      if (visibleText) {
+        setAnswer(visibleText);
+      }
+
+      if (finalText.trim() && !qwenRecognitionSubmittedRef.current) {
+        qwenRecognitionSubmittedRef.current = true;
+        qwenRecognitionActiveRef.current = false;
+        recognition.stop();
+        setQwenStatus('connecting');
+        setQwenMessage('已识别候选人回答，正在生成追问');
+        handleSubmitAnswer(finalText.trim());
+      }
+    };
+
+    recognition.onerror = (event) => {
+      qwenRecognitionActiveRef.current = false;
+      qwenRecognitionRef.current = null;
+      setQwenStatus('error');
+      setQwenMessage(event.error === 'not-allowed' ? '麦克风权限被拒绝，请允许浏览器录音' : '语音识别失败，请重试或输入文本回答');
+    };
+
+    recognition.onend = () => {
+      qwenRecognitionRef.current = null;
+      if (qwenRecognitionActiveRef.current && !qwenRecognitionSubmittedRef.current) {
+        qwenRecognitionActiveRef.current = false;
+        setQwenStatus('idle');
+        setQwenMessage('没有识别到完整回答，请再说一次或输入文本回答');
+      }
+    };
+
+    recognition.start();
+  };
+
   useEffect(() => {
     let mounted = true;
 
@@ -2291,13 +2394,24 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
         let nextMessages = messageData.messages || [];
         if (nextMessages.length === 0 && agentData.agents?.[0]) {
+          let openingQuestion = createInitialQuestion(interviewData.interview, agentData.agents[0]);
+          try {
+            const opening = await apiRequest(`/api/interviews/${interviewId}/opening-question`, {
+              method: 'POST',
+            });
+            if (opening.question) {
+              openingQuestion = opening.question;
+            }
+          } catch (openingError) {
+            setQwenMessage('AI 首问生成失败，已使用本地首问兜底');
+          }
           const created = await apiRequest(`/api/interviews/${interviewId}/messages`, {
             method: 'POST',
             body: JSON.stringify({
               agent_id: agentData.agents[0].id,
               sender_type: 'agent',
               message_type: 'question',
-              content: createInitialQuestion(interviewData.interview, agentData.agents[0]),
+              content: openingQuestion,
             }),
           });
           nextMessages = [created.message];
@@ -2320,21 +2434,23 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
   useEffect(() => () => {
     stopRealtimeCall();
+    stopQwenRecognition();
     stopQwenSpeech();
   }, []);
 
   useEffect(() => {
     if (voiceProvider === 'openai') {
+      stopQwenRecognition();
       stopQwenSpeech();
       setVoiceMessage('点击麦克风开始真实语音通话');
     } else {
       stopRealtimeCall();
-      setQwenMessage('提交文本回答后自动播放千问语音追问');
+      setQwenMessage('点击麦克风说出回答，或提交文本回答');
     }
   }, [voiceProvider]);
 
-  const handleSubmitAnswer = async () => {
-    const content = answer.trim();
+  const handleSubmitAnswer = async (submittedAnswer = null) => {
+    const content = typeof submittedAnswer === 'string' ? submittedAnswer.trim() : answer.trim();
     if (!content || !interviewId || submitting) return;
 
     setSubmitting(true);
@@ -2362,13 +2478,25 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       });
 
       if (nextAction.action === 'ask_follow_up' && activeAgent) {
+        let followUpQuestion = nextAction.question;
+        try {
+          const followUp = await apiRequest(`/api/interviews/${interviewId}/follow-up`, {
+            method: 'POST',
+            body: JSON.stringify({ last_answer: content }),
+          });
+          if (followUp.question) {
+            followUpQuestion = followUp.question;
+          }
+        } catch (followUpError) {
+          setQwenMessage('Kimi 追问生成失败，已使用本地追问兜底');
+        }
         const followUpData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
           method: 'POST',
           body: JSON.stringify({
             agent_id: activeAgent.id,
             sender_type: 'agent',
             message_type: 'follow_up',
-            content: nextAction.question,
+            content: followUpQuestion,
           }),
         });
         await playQwenSpeech(followUpData.message.content);
@@ -2427,6 +2555,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const handleFinish = async () => {
     if (!interviewId || finishing) return;
     stopRealtimeCall();
+    stopQwenRecognition();
     stopQwenSpeech();
     setFinishing(true);
     setError('');
@@ -2504,7 +2633,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               onClick={() => setVoiceProvider('qwen')}
               type="button"
             >
-              千问语音合成
+              千问实时对话
             </button>
           </div>
 
@@ -2513,15 +2642,20 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               className={`control-button ${
                 voiceProvider === 'openai'
                   ? voiceStatus === 'connected' ? 'primary' : ''
-                  : qwenStatus === 'speaking' ? 'primary' : ''
+                  : qwenStatus === 'listening' ? 'primary' : ''
               }`}
-              onClick={voiceProvider === 'openai' ? startRealtimeCall : () => playQwenSpeech(currentQuestion)}
-              disabled={voiceProvider === 'openai' ? voiceStatus === 'connecting' : qwenStatus === 'connecting'}
-              title={voiceProvider === 'openai' ? voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音' : '播放当前问题'}
+              onClick={voiceProvider === 'openai' ? startRealtimeCall : startQwenVoiceConversation}
+              disabled={voiceProvider === 'openai' ? voiceStatus === 'connecting' : qwenStatus === 'connecting' || submitting}
+              title={voiceProvider === 'openai' ? voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音' : qwenStatus === 'listening' ? '停止聆听' : '开始聆听候选人回答'}
             >
               <Mic size={20} />
             </button>
-            <button className="control-button" disabled title="AI 语音回复会自动播放">
+            <button
+              className={`control-button ${voiceProvider === 'qwen' && qwenStatus === 'speaking' ? 'primary' : ''}`}
+              disabled={voiceProvider === 'openai' || qwenStatus === 'connecting'}
+              onClick={() => playQwenSpeech(currentQuestion)}
+              title={voiceProvider === 'qwen' ? '播放当前问题' : 'AI 语音回复会自动播放'}
+            >
               <Volume2 size={20} />
             </button>
             <button className="control-button danger" onClick={handleFinish} disabled={finishing}>
@@ -2535,7 +2669,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
             </div>
           ) : (
             <div className={`voice-status ${qwenStatus}`}>
-              <span>{qwenStatus === 'speaking' ? '千问语音播放中' : qwenStatus === 'connecting' ? '正在合成千问语音' : qwenStatus === 'error' ? '千问语音失败' : '千问语音待播放'}</span>
+              <span>{qwenStatus === 'listening' ? '正在聆听回答' : qwenStatus === 'speaking' ? '千问实时播报中' : qwenStatus === 'connecting' ? '正在处理千问对话' : qwenStatus === 'error' ? '千问对话失败' : '千问实时对话待接入'}</span>
               <small>{qwenMessage}</small>
             </div>
           )}

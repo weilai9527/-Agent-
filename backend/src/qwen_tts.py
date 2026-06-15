@@ -26,15 +26,10 @@ def _load_dashscope():
     if not api_key or api_key == "your-dashscope-api-key":
         raise QwenTtsError("服务端未配置 DASHSCOPE_API_KEY，无法使用千问语音合成。")
 
-    # 设置SSL证书路径
-    import ssl
-    ssl_cert_file = os.environ.get("SSL_CERT_FILE")
+    ssl_cert_file = os.environ.get("SSL_CERT_FILE") or os.environ.get("WEBSOCKET_CLIENT_CA_BUNDLE")
     if ssl_cert_file:
-        # 设置websocket-client库的SSL证书路径
         os.environ["WEBSOCKET_CLIENT_CA_BUNDLE"] = ssl_cert_file
-    
-    # 设置websocket-client库禁用SSL验证（临时方案）
-    os.environ["WEBSOCKET_CLIENT_DISABLE_SSL"] = "1"
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", ssl_cert_file)
     
     dashscope.api_key = api_key
     region = os.environ.get("DASHSCOPE_TTS_REGION", "beijing").strip().lower()

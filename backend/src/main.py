@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
+import random
 import re
 import time
 from typing import Any
@@ -16,6 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from .database import all_rows, db, get_database_path, one
+from .kimi_followup import KimiFollowupError, analyze_resume, generate_kimi_followup, generate_opening_question
+from .qwen_realtime_tts import QwenRealtimeTtsError, get_qwen_realtime_tts_media_type, stream_qwen_realtime_tts
 from .qwen_tts import QwenTtsError, get_qwen_tts_media_type, stream_qwen_tts
 from .security import (
     create_token,
@@ -365,6 +369,146 @@ def find_profile_by_user_id(user_id: str) -> dict | None:
         """,
         (user_id,),
     )
+
+
+def resume_source_text(profile: dict | None) -> str:
+    if not profile:
+        return ""
+    fields = [
+        "target_role",
+        "experience_level",
+        "years_of_experience",
+        "education_level",
+        "skills",
+        "project_keywords",
+        "resume_text",
+        "project_experience",
+    ]
+    return "\n".join(str(profile.get(field) or "").strip() for field in fields if str(profile.get(field) or "").strip())
+
+
+def resume_source_hash(profile: dict | None) -> str:
+    return hashlib.sha256(resume_source_text(profile).encode("utf-8")).hexdigest()
+
+
+def find_resume_analysis_by_user_id(user_id: str) -> dict | None:
+    return one(
+        """
+        SELECT id, user_id, source_hash, analysis_json, provider, status, error_message,
+               created_at, updated_at
+        FROM resume_analyses
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+
+
+def upsert_resume_analysis(user_id: str, source_hash: str, analysis: dict, provider: str, error_message: str | None = None) -> dict | None:
+    existing = find_resume_analysis_by_user_id(user_id)
+    payload = json.dumps(analysis, ensure_ascii=False)
+    if existing:
+        db.execute(
+            """
+            UPDATE resume_analyses
+            SET source_hash = ?, analysis_json = ?, provider = ?, status = ?, error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (source_hash, payload, provider, "analyzed", error_message, user_id),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO resume_analyses (
+              id, user_id, source_hash, analysis_json, provider, status, error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid4()), user_id, source_hash, payload, provider, "analyzed", error_message),
+        )
+    db.commit()
+    return find_resume_analysis_by_user_id(user_id)
+
+
+def serialize_resume_analysis(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    analysis = parse_json_object(row.get("analysis_json"), {})
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "source_hash": row.get("source_hash"),
+        "analysis": analysis,
+        "provider": row.get("provider"),
+        "status": row.get("status"),
+        "error_message": row.get("error_message"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def ensure_resume_analysis_for_user(user: dict, force: bool = False) -> dict:
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    source = resume_source_text(profile)
+    if not source:
+        raise error(400, "请先在个人资料中填写简历文本、项目经历或技能标签。")
+    current_hash = resume_source_hash(profile)
+    existing = find_resume_analysis_by_user_id(user["id"])
+    if existing and existing.get("source_hash") == current_hash and not force:
+        serialized = serialize_resume_analysis(existing)
+        if serialized:
+            return serialized
+
+    result = analyze_resume(profile or {})
+    row = upsert_resume_analysis(
+        user["id"],
+        current_hash,
+        result["analysis"],
+        result.get("provider") or "local",
+        result.get("error"),
+    )
+    serialized = serialize_resume_analysis(row)
+    if not serialized:
+        raise error(500, "简历分析结果保存失败。")
+    serialized["fallback"] = bool(result.get("fallback"))
+    return serialized
+
+
+def select_resume_point(analysis: dict, interview: dict, messages: list[dict]) -> dict:
+    asked_text = "\n".join(str(message.get("content") or "") for message in messages if message.get("sender_type") == "agent")
+    candidates: list[dict[str, Any]] = []
+    target_role = str(interview.get("target_role") or "").lower()
+
+    for project in analysis.get("projects", []) if isinstance(analysis.get("projects"), list) else []:
+        if not isinstance(project, dict):
+            continue
+        name = str(project.get("name") or "").strip()
+        if not name:
+            continue
+        if name in asked_text:
+            weight = 2
+        else:
+            joined = " ".join([name, " ".join(project.get("highlights", []) if isinstance(project.get("highlights"), list) else [])]).lower()
+            weight = 7 if target_role and target_role in joined else 5
+        candidates.append({"type": "project", "value": name, "project": project, "weight": weight})
+
+    for skill in analysis.get("core_skills", []) if isinstance(analysis.get("core_skills"), list) else []:
+        value = str(skill).strip()
+        if value:
+            candidates.append({"type": "skill", "value": value, "weight": 4 if value in asked_text else 6})
+
+    for risk in analysis.get("risk_points", []) if isinstance(analysis.get("risk_points"), list) else []:
+        value = str(risk).strip()
+        if value:
+            candidates.append({"type": "risk", "value": value, "weight": 2 if value in asked_text else 3})
+
+    if not candidates:
+        return {"type": "project", "value": "项目经历", "weight": 1}
+
+    weights = [max(1, int(candidate.get("weight") or 1)) for candidate in candidates]
+    selected = random.SystemRandom().choices(candidates, weights=weights, k=1)[0]
+    return {key: value for key, value in selected.items() if key != "weight"}
 
 
 def find_interview_by_user_id(interview_id: str, user_id: str) -> dict | None:
@@ -1061,6 +1205,26 @@ def update_profile(body: dict | None = None, user: dict = Depends(require_auth))
     return {"profile": find_profile_by_user_id(user["id"])}
 
 
+@app.get("/api/profile/resume-analysis")
+def get_resume_analysis(user: dict = Depends(require_auth)):
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    current_hash = resume_source_hash(profile)
+    row = find_resume_analysis_by_user_id(user["id"])
+    serialized = serialize_resume_analysis(row)
+    return {
+        "resume_analysis": serialized,
+        "current_source_hash": current_hash,
+        "stale": bool(serialized and serialized.get("source_hash") != current_hash),
+    }
+
+
+@app.post("/api/profile/resume-analysis")
+def create_resume_analysis(body: dict | None = None, user: dict = Depends(require_auth)):
+    force = bool(json_body(body).get("force"))
+    return {"resume_analysis": ensure_resume_analysis_for_user(user, force=force)}
+
+
 @app.post("/api/interviews", status_code=201)
 def create_interview(body: dict | None = None, user: dict = Depends(require_auth)):
     interview = parse_interview_input(json_body(body))
@@ -1183,6 +1347,42 @@ def start_interview(interview_id: str, user: dict = Depends(require_auth)):
         )
         db.commit()
     return {"interview": find_interview_by_user_id(interview["id"], user["id"])}
+
+
+@app.post("/api/interviews/{interview_id}/opening-question")
+def create_opening_question(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能继续生成首问。")
+    messages = list_messages_by_interview_id(interview["id"])
+    if messages and not bool(json_body(body).get("force")):
+        raise error(409, "当前面试已有消息，不能重复生成首问。")
+
+    ensure_default_agents(interview["id"])
+    agents = list_agents_by_interview_id(interview["id"])
+    active_agent = next((agent for agent in agents if agent["status"] == "active"), None)
+    if not active_agent:
+        active_agent = next((agent for agent in agents if agent["status"] != "completed"), agents[0] if agents else None)
+
+    resume_analysis_row = ensure_resume_analysis_for_user(user)
+    analysis = resume_analysis_row.get("analysis") or {}
+    selected_resume_point = select_resume_point(analysis, interview, messages)
+    result = generate_opening_question(
+        interview=interview,
+        active_agent=active_agent,
+        resume_analysis=analysis,
+        selected_resume_point=selected_resume_point,
+    )
+    return {
+        "question": result["question"],
+        "provider": result.get("provider"),
+        "fallback": bool(result.get("fallback")),
+        "error": result.get("error"),
+        "selected_resume_point": selected_resume_point,
+        "resume_analysis": resume_analysis_row,
+    }
 
 
 @app.post("/api/interviews/{interview_id}/finish")
@@ -1322,6 +1522,41 @@ def create_message(interview_id: str, body: dict | None = None, user: dict = Dep
     return {"message": find_message_by_interview_id(message_id, interview["id"])}
 
 
+@app.post("/api/interviews/{interview_id}/follow-up")
+def generate_follow_up(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能继续生成追问。")
+    last_answer, message = read_text_field(json_body(body), "last_answer", "候选人回答", 20000, True)
+    if message:
+        raise error(400, message)
+
+    ensure_default_agents(interview["id"])
+    agents = list_agents_by_interview_id(interview["id"])
+    active_agent = next((agent for agent in agents if agent["status"] == "active"), None)
+    if not active_agent:
+        active_agent = next((agent for agent in agents if agent["status"] != "completed"), agents[0] if agents else None)
+    messages = list_messages_by_interview_id(interview["id"])
+    resume_analysis = None
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    if resume_source_text(profile):
+        resume_analysis = ensure_resume_analysis_for_user(user).get("analysis")
+    try:
+        follow_up = generate_kimi_followup(
+            interview=interview,
+            active_agent=active_agent,
+            messages=messages,
+            last_answer=last_answer,
+            resume_analysis=resume_analysis,
+        )
+    except KimiFollowupError as exc:
+        raise error(502, str(exc))
+    return follow_up
+
+
 @app.post("/api/interviews/{interview_id}/realtime/sdp", response_class=PlainTextResponse)
 async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends(require_auth)):
     interview = find_interview_by_user_id(interview_id, user["id"])
@@ -1375,6 +1610,21 @@ def qwen_tts(interview_id: str, body: dict | None = None, user: dict = Depends(r
     except QwenTtsError as exc:
         raise error(500, str(exc))
     return StreamingResponse(audio_stream, media_type=get_qwen_tts_media_type())
+
+
+@app.post("/api/interviews/{interview_id}/qwen/realtime-tts")
+def qwen_realtime_tts(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    text, message = read_text_field(json_body(body), "text", "实时语音合成文本", 20000, True)
+    if message:
+        raise error(400, message)
+    try:
+        audio_stream = stream_qwen_realtime_tts(text)
+    except QwenRealtimeTtsError as exc:
+        raise error(500, str(exc))
+    return StreamingResponse(audio_stream, media_type=get_qwen_realtime_tts_media_type())
 
 
 @app.post("/api/interviews/{interview_id}/evaluations", status_code=201)

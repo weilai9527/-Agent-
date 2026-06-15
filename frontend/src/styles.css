@@ -1396,6 +1396,10 @@ button {
   color: #237804;
 }
 
+.voice-status.listening span {
+  color: #08979c;
+}
+
 .voice-status.error span {
   color: #a8071a;
 }

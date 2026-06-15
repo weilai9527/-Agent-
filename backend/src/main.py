@@ -13,9 +13,10 @@ from uuid import uuid4
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from .database import all_rows, db, get_database_path, one
+from .qwen_tts import QwenTtsError, get_qwen_tts_media_type, stream_qwen_tts
 from .security import (
     create_token,
     hash_password,
@@ -1359,6 +1360,21 @@ async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends
             message = response.text or message
         raise error(response.status_code, message)
     return PlainTextResponse(response.text, media_type="application/sdp")
+
+
+@app.post("/api/interviews/{interview_id}/qwen/tts")
+def qwen_tts(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    text, message = read_text_field(json_body(body), "text", "语音合成文本", 20000, True)
+    if message:
+        raise error(400, message)
+    try:
+        audio_stream = stream_qwen_tts(text)
+    except QwenTtsError as exc:
+        raise error(500, str(exc))
+    return StreamingResponse(audio_stream, media_type=get_qwen_tts_media_type())
 
 
 @app.post("/api/interviews/{interview_id}/evaluations", status_code=201)

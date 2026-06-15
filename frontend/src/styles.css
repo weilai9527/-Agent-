@@ -1304,6 +1304,35 @@ button {
   line-height: 1.75;
 }
 
+.voice-mode-toggle {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  justify-self: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.voice-mode-toggle button {
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  color: #4b5563;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.voice-mode-toggle button.active {
+  color: #ffffff;
+  background: #1677ff;
+}
+
 .call-controls {
   position: relative;
   z-index: 1;
@@ -1361,6 +1390,10 @@ button {
 
 .voice-status.connecting span {
   color: #0958d9;
+}
+
+.voice-status.speaking span {
+  color: #237804;
 }
 
 .voice-status.error span {

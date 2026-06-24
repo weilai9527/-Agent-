@@ -30,14 +30,16 @@ def _load_dashscope():
     if ssl_cert_file:
         os.environ["WEBSOCKET_CLIENT_CA_BUNDLE"] = ssl_cert_file
         os.environ.setdefault("REQUESTS_CA_BUNDLE", ssl_cert_file)
-    
+
     dashscope.api_key = api_key
     region = os.environ.get("DASHSCOPE_TTS_REGION", "beijing").strip().lower()
+    workspace_id = os.environ.get("DASHSCOPE_WORKSPACE_ID", "").strip()
     if region in {"singapore", "ap-southeast-1"}:
-        workspace_id = os.environ.get("DASHSCOPE_WORKSPACE_ID", "").strip()
         if not workspace_id:
             raise QwenTtsError("使用新加坡地域时需要配置 DASHSCOPE_WORKSPACE_ID。")
         dashscope.base_websocket_api_url = f"wss://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/inference"
+    elif workspace_id:
+        dashscope.base_websocket_api_url = f"wss://{workspace_id}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
     else:
         dashscope.base_websocket_api_url = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
 
@@ -107,12 +109,15 @@ def stream_qwen_tts(text: str) -> Iterator[bytes]:
     thread = threading.Thread(target=synthesize, daemon=True)
     thread.start()
 
-    while True:
-        item = audio_chunks.get()
-        if item is done:
-            break
-        yield item  # type: ignore[misc]
+    def audio_iterator() -> Iterator[bytes]:
+        while True:
+            item = audio_chunks.get()
+            if item is done:
+                break
+            yield item  # type: ignore[misc]
 
-    thread.join(timeout=1)
-    if errors:
-        raise QwenTtsError(errors[-1])
+        thread.join(timeout=1)
+        if errors:
+            raise QwenTtsError(errors[-1])
+
+    return audio_iterator()

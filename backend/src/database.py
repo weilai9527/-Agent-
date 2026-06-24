@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 
 from . import env  # noqa: F401
 
@@ -121,24 +122,30 @@ class MySQLDatabase:
 class SQLiteDatabase:
     def __init__(self, path: Path):
         self.path = path
-        self._conn = None
+        self._local = threading.local()
+        self._schema_lock = threading.RLock()
 
     def connect(self):
-        if self._conn:
-            return self._conn
+        conn = getattr(self._local, "conn", None)
+        if conn:
+            return conn
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        return self._conn
+        conn = sqlite3.connect(self.path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        self._local.conn = conn
+        return conn
 
     def execute(self, sql: str, params: tuple = ()):
         return self.connect().execute(sql, params)
 
     def executescript(self, sql: str) -> None:
-        self.connect().executescript(sql)
+        with self._schema_lock:
+            self.connect().executescript(sql)
 
     def commit(self) -> None:
         self.connect().commit()

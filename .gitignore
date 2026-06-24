@@ -3,6 +3,9 @@ node_modules/
 dist/
 frontend/dist/
 
+# Local upload archives
+*.zip
+
 # Logs
 logs/
 *.log
@@ -26,6 +29,9 @@ Thumbs.db
 coverage/
 __pycache__/
 *.py[cod]
+
+# Local scratch duplicates
+/src/CandidateRoomPrototype.jsx
 
 # Local database files
 data/

@@ -1304,33 +1304,160 @@ button {
   line-height: 1.75;
 }
 
-.voice-mode-toggle {
+.voice-mode-dropdown {
   position: relative;
-  z-index: 1;
+  z-index: 100;
   display: inline-flex;
   justify-self: center;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid #d9e2ef;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.82);
 }
 
-.voice-mode-toggle button {
-  height: 32px;
-  padding: 0 12px;
+.dropdown-trigger {
+  height: 42px;
+  min-width: 180px;
+  padding: 0 16px;
+  border: 1px solid rgba(22, 119, 255, 0.2);
+  border-radius: 12px;
+  color: #374151;
+  background: rgba(255, 255, 255, 0.96);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  box-shadow:
+    0 4px 20px rgba(15, 23, 42, 0.08),
+    0 1px 3px rgba(15, 23, 42, 0.04);
+  backdrop-filter: blur(12px);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dropdown-trigger:hover {
+  box-shadow:
+    0 8px 26px rgba(15, 23, 42, 0.1),
+    0 2px 8px rgba(15, 23, 42, 0.06);
+  border-color: rgba(22, 119, 255, 0.3);
+  background: rgba(255, 255, 255, 0.98);
+  transform: translateY(-1px);
+}
+
+.dropdown-trigger:active {
+  transform: translateY(0);
+}
+
+.dropdown-trigger svg {
+  color: #6b7280;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dropdown-trigger svg.rotated {
+  transform: rotate(180deg);
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  min-width: 100%;
+  max-width: 280px;
+  max-height: 100px;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow:
+    0 12px 40px rgba(15, 23, 42, 0.12),
+    0 4px 14px rgba(15, 23, 42, 0.08);
+  padding: 8px;
+  margin: 0;
+  list-style: none;
+  animation: dropdownFadeIn 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(22, 119, 255, 0.3) transparent;
+}
+
+.dropdown-menu::-webkit-scrollbar {
+  width: 6px;
+}
+
+.dropdown-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dropdown-menu::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: rgba(22, 119, 255, 0.3);
+}
+
+.dropdown-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(22, 119, 255, 0.5);
+}
+
+@keyframes dropdownFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.dropdown-item {
+  width: 100%;
+  height: 40px;
+  padding: 0 16px;
   border: 0;
-  border-radius: 6px;
-  color: #4b5563;
+  border-radius: 10px;
+  color: #6b7280;
   background: transparent;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
 }
 
-.voice-mode-toggle button.active {
+.dropdown-item::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(22, 119, 255, 0.08) 0%, rgba(9, 109, 217, 0.04) 100%);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.dropdown-item:hover {
+  color: #1f2937;
+}
+
+.dropdown-item:hover::before {
+  opacity: 1;
+}
+
+.dropdown-item.active {
   color: #ffffff;
-  background: #1677ff;
+  background: linear-gradient(135deg, #1677ff 0%, #096dd9 100%);
+}
+
+.dropdown-item.active::before {
+  display: none;
+}
+
+.dropdown-item.active:hover {
+  background: linear-gradient(135deg, #1890ff 0%, #1677ff 100%);
+  box-shadow:
+    0 8px 26px rgba(22, 119, 255, 0.45),
+    0 3px 10px rgba(22, 119, 255, 0.3);
+  transform: translateY(-3px);
 }
 
 .call-controls {
@@ -1404,6 +1531,33 @@ button {
   color: #a8071a;
 }
 
+.omni-signal-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+.omni-signal-row span {
+  padding: 3px 7px;
+  border: 1px solid #d9e2ef;
+  border-radius: 999px;
+  color: #6b7280;
+  background: #f8fafc;
+  font-size: 11px;
+}
+
+.omni-signal-row span.ok {
+  border-color: #95de64;
+  color: #237804;
+  background: #f6ffed;
+}
+
+.omni-audio-player {
+  width: min(100%, 360px);
+  height: 34px;
+}
+
 .call-sidebar {
   display: grid;
   gap: 12px;
@@ -1457,7 +1611,7 @@ button {
 
 .phone-grid {
   display: grid;
-  grid-template-columns: 0.86fr 1.14fr;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
   gap: 16px;
   margin-bottom: 28px;
 }

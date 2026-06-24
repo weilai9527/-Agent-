@@ -410,6 +410,13 @@ function apiUrl(path) {
   return `${apiBaseUrl}${path}`;
 }
 
+function apiWsUrl(path) {
+  if (apiBaseUrl.startsWith('https://')) return `${apiBaseUrl.replace(/^https:/, 'wss:')}${path}`;
+  if (apiBaseUrl.startsWith('http://')) return `${apiBaseUrl.replace(/^http:/, 'ws:')}${path}`;
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}${path}`;
+}
+
 function parseJsonValue(value, fallback) {
   if (!value) return fallback;
   if (typeof value !== 'string') return value;
@@ -761,6 +768,7 @@ async function apiRequest(path, options = {}) {
 }
 
 const QWEN_TTS_MIME_TYPE = 'audio/mpeg';
+const OMNI_PCM_SAMPLE_RATE = Number(import.meta.env.VITE_QWEN_OMNI_PCM_SAMPLE_RATE || 24000);
 
 async function apiAudioResponse(path, body, signal) {
   const response = await fetch(apiUrl(path), {
@@ -783,13 +791,104 @@ function getMediaSourceConstructor() {
   return window.MediaSource || window.ManagedMediaSource;
 }
 
-function canStreamAudioWithMediaSource() {
+function normalizeQwenAudioMimeType(value) {
+  const mediaType = String(value || QWEN_TTS_MIME_TYPE).split(';')[0].trim().toLowerCase();
+  if (mediaType === 'audio/mpeg' || mediaType === 'audio/mp3') return 'audio/mpeg';
+  if (mediaType === 'audio/ogg') return 'audio/ogg; codecs=opus';
+  if (mediaType === 'audio/wav' || mediaType === 'audio/wave') return 'audio/wav';
+  if (mediaType === 'audio/pcm') return 'audio/pcm';
+  return QWEN_TTS_MIME_TYPE;
+}
+
+function canStreamAudioWithMediaSource(mediaType = QWEN_TTS_MIME_TYPE) {
   const MediaSourceConstructor = getMediaSourceConstructor();
   return Boolean(
     MediaSourceConstructor &&
       MediaSourceConstructor.isTypeSupported &&
-      MediaSourceConstructor.isTypeSupported(QWEN_TTS_MIME_TYPE)
+      MediaSourceConstructor.isTypeSupported(mediaType)
   );
+}
+
+function concatArrayBuffers(chunks) {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const bytes = new Uint8Array(totalLength);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    const view = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer || chunk);
+    bytes.set(view, offset);
+    offset += view.byteLength;
+  });
+  return bytes;
+}
+
+function textHeader(bytes, length = 4) {
+  return String.fromCharCode(...bytes.slice(0, length));
+}
+
+function buildWavBlobFromPcm16(pcmBytes, sampleRate = OMNI_PCM_SAMPLE_RATE) {
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const writeText = (offset, text) => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(offset + index, text.charCodeAt(index));
+    }
+  };
+
+  writeText(0, 'RIFF');
+  view.setUint32(4, 36 + pcmBytes.byteLength, true);
+  writeText(8, 'WAVE');
+  writeText(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, 'data');
+  view.setUint32(40, pcmBytes.byteLength, true);
+  return new Blob([header, pcmBytes], { type: 'audio/wav' });
+}
+
+function buildOmniAudioBlob(chunks) {
+  const bytes = concatArrayBuffers(chunks);
+  const header = textHeader(bytes);
+  if (header === 'RIFF') return new Blob([bytes], { type: 'audio/wav' });
+  if (header === 'OggS') return new Blob([bytes], { type: 'audio/ogg' });
+  if (header === 'ID3' || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) {
+    return new Blob([bytes], { type: 'audio/mpeg' });
+  }
+  return buildWavBlobFromPcm16(bytes);
+}
+
+function toUint8Array(chunk) {
+  if (chunk instanceof Uint8Array) return chunk;
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  if (chunk?.buffer instanceof ArrayBuffer) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset || 0, chunk.byteLength || chunk.buffer.byteLength);
+  }
+  return new Uint8Array(chunk || []);
+}
+
+function isEncodedAudioBytes(bytes) {
+  const header = textHeader(bytes);
+  return header === 'RIFF' || header === 'OggS' || header === 'ID3' || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+}
+
+function createPcm16AudioBuffer(audioContext, chunk, sampleRate = OMNI_PCM_SAMPLE_RATE) {
+  const bytes = toUint8Array(chunk);
+  const alignedLength = bytes.byteLength - (bytes.byteLength % 2);
+  const sampleCount = alignedLength / 2;
+  const audioBuffer = audioContext.createBuffer(1, sampleCount, sampleRate);
+  const output = audioBuffer.getChannelData(0);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, alignedLength);
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const sample = view.getInt16(index * 2, true);
+    output[index] = Math.max(-1, Math.min(1, sample / 32768));
+  }
+
+  return audioBuffer;
 }
 
 function getSpeechRecognitionConstructor() {
@@ -1906,15 +2005,53 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const [finishing, setFinishing] = useState(false);
   const [error, setError] = useState('');
   const [voiceProvider, setVoiceProvider] = useState('openai');
+  const [showVoiceDropdown, setShowVoiceDropdown] = useState(false);
+  const voiceProviderLabels = {
+    openai: 'OpenAI 实时通话',
+    qwen: '千问实时对话',
+    omni: 'Qwen-Omni API 录音',
+    'omni-webrtc': 'Qwen 官方 WebRTC',
+  };
   const [voiceStatus, setVoiceStatus] = useState('idle');
   const [voiceMessage, setVoiceMessage] = useState('点击麦克风开始真实语音通话');
   const [qwenStatus, setQwenStatus] = useState('idle');
   const [qwenMessage, setQwenMessage] = useState('提交文本回答后自动播放千问语音追问');
+  const [omniStatus, setOmniStatus] = useState('idle');
+  const [omniMessage, setOmniMessage] = useState('连接 Qwen-Omni API、网关或官方 WebRTC 后开始通话');
+  const [omniAudioUrl, setOmniAudioUrl] = useState('');
+  const [omniSignals, setOmniSignals] = useState({ text: false, audioField: false, playableAudio: false });
 
   const peerConnectionRef = useRef(null);
   const dataChannelRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
+  const omniSocketRef = useRef(null);
+  const omniRecorderRef = useRef(null);
+  const omniStreamRef = useRef(null);
+  const omniAudioChunksRef = useRef([]);
+  const omniAudioUrlRef = useRef('');
+  const omniAudioElementRef = useRef(null);
+  const omniAudioContextRef = useRef(null);
+  const omniPlaybackTimeRef = useRef(0);
+  const omniPlaybackSourcesRef = useRef([]);
+  const omniPlaybackTimerRef = useRef(null);
+  const omniPlaybackQueuedRef = useRef(false);
+  const omniRecognitionRef = useRef(null);
+  const omniRecognitionActiveRef = useRef(false);
+  const omniTranscriptRef = useRef('');
+  const omniInterimTranscriptRef = useRef('');
+  const omniTranscriptSavedRef = useRef(false);
+  const omniWebrtcPeerRef = useRef(null);
+  const omniWebrtcStreamRef = useRef(null);
+  const omniWebrtcSessionIdRef = useRef('');
+  const omniWebrtcDataChannelRef = useRef(null);
+  const omniWebrtcRemoteAudioRef = useRef(null);
+  const omniWebrtcAudioSenderRef = useRef(null);
+  const omniWebrtcAudioTrackRef = useRef(null);
+  const omniWebrtcSessionUpdateRef = useRef(null);
+  const omniWebrtcSessionUpdatedRef = useRef(false);
+  const omniWebrtcCandidateTranscriptRef = useRef('');
+  const omniWebrtcAgentTranscriptRef = useRef('');
   const qwenAudioRef = useRef(null);
   const qwenStreamRef = useRef(null);
   const qwenRecognitionRef = useRef(null);
@@ -1929,6 +2066,11 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     createInitialQuestion(interview, activeAgent);
 
   const reloadMessages = async () => {
+    console.info('reloadMessages', {
+      interviewId,
+      currentMessageCount: messages.length,
+      activeAgentId: activeAgent?.id || null,
+    });
     const data = await apiRequest(`/api/interviews/${interviewId}/messages`);
     setMessages(data.messages || []);
     return data.messages || [];
@@ -1963,6 +2105,748 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     remoteAudioRef.current = null;
     setVoiceStatus('idle');
     setVoiceMessage('语音通话已断开，可再次点击麦克风重连');
+  };
+
+  const stopOmniPlayback = ({ closeContext = false } = {}) => {
+    if (omniPlaybackTimerRef.current) {
+      window.clearTimeout(omniPlaybackTimerRef.current);
+      omniPlaybackTimerRef.current = null;
+    }
+    omniPlaybackSourcesRef.current.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        // Source may have already finished.
+      }
+      source.disconnect();
+    });
+    omniPlaybackSourcesRef.current = [];
+    omniPlaybackTimeRef.current = 0;
+    omniPlaybackQueuedRef.current = false;
+    if (omniAudioElementRef.current) {
+      omniAudioElementRef.current.pause();
+      omniAudioElementRef.current.currentTime = 0;
+    }
+    if (closeContext && omniAudioContextRef.current) {
+      omniAudioContextRef.current.close().catch(() => {});
+      omniAudioContextRef.current = null;
+    }
+  };
+
+  const ensureOmniAudioContext = async () => {
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextConstructor) return null;
+
+    if (!omniAudioContextRef.current || omniAudioContextRef.current.state === 'closed') {
+      omniAudioContextRef.current = new AudioContextConstructor();
+      omniPlaybackTimeRef.current = 0;
+    }
+
+    if (omniAudioContextRef.current.state === 'suspended') {
+      await omniAudioContextRef.current.resume();
+    }
+
+    return omniAudioContextRef.current;
+  };
+
+  const queueOmniPcmPlayback = async (chunk) => {
+    const bytes = toUint8Array(chunk);
+    if (!bytes.byteLength || isEncodedAudioBytes(bytes)) return false;
+
+    const audioContext = await ensureOmniAudioContext();
+    if (!audioContext) return false;
+
+    const audioBuffer = createPcm16AudioBuffer(audioContext, bytes);
+    if (!audioBuffer.duration) return false;
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.destination);
+    const startAt = Math.max(audioContext.currentTime + 0.04, omniPlaybackTimeRef.current || 0);
+    source.start(startAt);
+    omniPlaybackTimeRef.current = startAt + audioBuffer.duration;
+    omniPlaybackQueuedRef.current = true;
+    omniPlaybackSourcesRef.current.push(source);
+    source.addEventListener('ended', () => {
+      omniPlaybackSourcesRef.current = omniPlaybackSourcesRef.current.filter((item) => item !== source);
+      source.disconnect();
+    });
+    setOmniStatus('speaking');
+    setOmniMessage('正在流式播放 Qwen-Omni 返回的音频');
+    return true;
+  };
+
+  const scheduleOmniPlaybackComplete = () => {
+    if (omniPlaybackTimerRef.current) {
+      window.clearTimeout(omniPlaybackTimerRef.current);
+    }
+
+    const audioContext = omniAudioContextRef.current;
+    if (!omniPlaybackQueuedRef.current) {
+      setOmniStatus('connected');
+      setOmniMessage('Omni 音频已生成，请点击下方播放器播放');
+      return;
+    }
+
+    const remainingMs = audioContext
+      ? Math.max(350, (omniPlaybackTimeRef.current - audioContext.currentTime) * 1000 + 250)
+      : 350;
+
+    omniPlaybackTimerRef.current = window.setTimeout(() => {
+      omniPlaybackTimerRef.current = null;
+      setOmniStatus('connected');
+      setOmniMessage('Omni 本轮播放完成，可继续说话');
+    }, remainingMs);
+  };
+
+  const playOmniAudioChunks = () => {
+    if (!omniAudioChunksRef.current.length) return;
+    const blob = buildOmniAudioBlob(omniAudioChunksRef.current);
+    omniAudioChunksRef.current = [];
+    if (omniAudioUrlRef.current) {
+      URL.revokeObjectURL(omniAudioUrlRef.current);
+    }
+    const objectUrl = URL.createObjectURL(blob);
+    omniAudioUrlRef.current = objectUrl;
+    setOmniAudioUrl(objectUrl);
+    setOmniSignals((current) => ({ ...current, playableAudio: true }));
+  };
+
+  const waitForPeerIceGathering = (connection) => {
+    if (connection.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+      const timeoutId = window.setTimeout(resolve, 3000);
+      connection.addEventListener('icegatheringstatechange', () => {
+        if (connection.iceGatheringState === 'complete') {
+          window.clearTimeout(timeoutId);
+          resolve();
+        }
+      });
+    });
+  };
+
+  const stopOmniRecognition = () => {
+    omniRecognitionActiveRef.current = false;
+    if (omniRecognitionRef.current) {
+      try {
+        omniRecognitionRef.current.stop();
+      } catch {
+        // Recognition can already be stopped by the browser.
+      }
+    }
+    omniRecognitionRef.current = null;
+  };
+
+  const saveOmniCandidateTranscript = () => {
+    const transcript = (omniTranscriptRef.current || omniInterimTranscriptRef.current || '').trim();
+    if (!transcript || omniTranscriptSavedRef.current) return;
+    omniTranscriptSavedRef.current = true;
+    saveRealtimeMessage({
+      senderType: 'candidate',
+      messageType: 'transcript',
+      content: transcript,
+    })
+      .then(() => setAnswer(''))
+      .catch((requestError) => setError(requestError.message));
+  };
+
+  const startOmniRecognition = () => {
+    const SpeechRecognition = getSpeechRecognitionConstructor();
+    omniTranscriptRef.current = '';
+    omniInterimTranscriptRef.current = '';
+    omniTranscriptSavedRef.current = false;
+    if (!SpeechRecognition) return;
+
+    stopOmniRecognition();
+    omniRecognitionActiveRef.current = true;
+
+    const recognition = new SpeechRecognition();
+    omniRecognitionRef.current = recognition;
+    recognition.lang = 'zh-CN';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      let finalText = '';
+      let interimText = '';
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result[0]?.transcript || '';
+        if (result.isFinal) {
+          finalText += transcript;
+        } else {
+          interimText += transcript;
+        }
+      }
+
+      if (finalText.trim()) {
+        omniTranscriptRef.current = `${omniTranscriptRef.current} ${finalText}`.trim();
+      }
+      omniInterimTranscriptRef.current = interimText.trim();
+
+      const visibleText = (omniTranscriptRef.current || omniInterimTranscriptRef.current).trim();
+      if (visibleText) {
+        setAnswer(visibleText);
+      }
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error !== 'no-speech') {
+        setOmniMessage(event.error === 'not-allowed' ? '麦克风语音识别权限被拒绝，仍会提交录音给 Omni' : '本地语音转写失败，仍会提交录音给 Omni');
+      }
+    };
+
+    recognition.onend = () => {
+      if (omniRecognitionRef.current === recognition) {
+        omniRecognitionRef.current = null;
+      }
+      if (omniRecognitionActiveRef.current && omniRecorderRef.current?.state === 'recording') {
+        try {
+          recognition.start();
+          omniRecognitionRef.current = recognition;
+        } catch {
+          // Chrome may throttle immediate restarts; keep the audio submission path alive.
+        }
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      omniRecognitionActiveRef.current = false;
+      omniRecognitionRef.current = null;
+    }
+  };
+
+  const stopOmniRealtimeCall = (message = '千问 Omni 自部署通话已断开') => {
+    omniRecorderRef.current?.stop();
+    stopOmniRecognition();
+    omniStreamRef.current?.getTracks().forEach((track) => track.stop());
+    omniSocketRef.current?.close();
+    stopOmniPlayback({ closeContext: true });
+    omniRecorderRef.current = null;
+    omniStreamRef.current = null;
+    omniSocketRef.current = null;
+    omniAudioChunksRef.current = [];
+    if (omniAudioUrlRef.current) {
+      URL.revokeObjectURL(omniAudioUrlRef.current);
+    }
+    omniAudioUrlRef.current = '';
+    setOmniAudioUrl('');
+    setOmniSignals({ text: false, audioField: false, playableAudio: false });
+    setOmniStatus('idle');
+    setOmniMessage(message);
+  };
+
+  const stopOmniWebrtcCall = (message = 'Qwen-Omni WebRTC 已断开', { resetAudio = false } = {}) => {
+    stopOmniRecognition();
+    omniWebrtcDataChannelRef.current?.close();
+    omniWebrtcStreamRef.current?.getTracks().forEach((track) => track.stop());
+    if (omniWebrtcRemoteAudioRef.current) {
+      omniWebrtcRemoteAudioRef.current.pause();
+      omniWebrtcRemoteAudioRef.current.srcObject = null;
+      omniWebrtcRemoteAudioRef.current.remove();
+    }
+    omniWebrtcPeerRef.current?.close();
+    omniWebrtcStreamRef.current = null;
+    omniWebrtcPeerRef.current = null;
+    omniWebrtcDataChannelRef.current = null;
+    omniWebrtcRemoteAudioRef.current = null;
+    omniWebrtcAudioSenderRef.current = null;
+    omniWebrtcAudioTrackRef.current = null;
+    omniWebrtcSessionUpdateRef.current = null;
+    omniWebrtcSessionUpdatedRef.current = false;
+    omniWebrtcCandidateTranscriptRef.current = '';
+    omniWebrtcAgentTranscriptRef.current = '';
+    omniWebrtcSessionIdRef.current = '';
+    if (resetAudio) {
+      stopOmniPlayback({ closeContext: true });
+      omniAudioChunksRef.current = [];
+      if (omniAudioUrlRef.current) {
+        URL.revokeObjectURL(omniAudioUrlRef.current);
+      }
+      omniAudioUrlRef.current = '';
+      setOmniAudioUrl('');
+      setOmniSignals({ text: false, audioField: false, playableAudio: false });
+    }
+    setOmniStatus('idle');
+    setOmniMessage(message);
+  };
+
+  const finishOmniRecording = () => {
+    if (!omniRecorderRef.current || omniRecorderRef.current.state === 'inactive') return;
+    omniRecorderRef.current.stop();
+    stopOmniRecognition();
+    window.setTimeout(saveOmniCandidateTranscript, 250);
+    omniStreamRef.current?.getTracks().forEach((track) => track.stop());
+    omniRecorderRef.current = null;
+    omniStreamRef.current = null;
+    setOmniStatus('connecting');
+    setOmniMessage('录音已停止，正在提交给 Qwen-Omni');
+  };
+
+  const handleOmniPayload = (payload) => {
+    if (payload.type === 'error') {
+      setOmniStatus('error');
+      setOmniMessage(payload.message || '千问 Omni 实时网关返回错误');
+      setError(payload.message || '千问 Omni 实时网关返回错误');
+      return;
+    }
+    if (payload.type === 'status') {
+      setOmniMessage(payload.message || '千问 Omni 实时网关已连接');
+      return;
+    }
+    if (payload.type === 'text') {
+      if (payload.text || payload.content) {
+        setOmniSignals((current) => ({ ...current, text: true }));
+      }
+      return;
+    }
+    if (payload.type === 'transcript') {
+      const content = payload.text || payload.content || '';
+      if (content) {
+        setOmniSignals((current) => ({ ...current, text: true }));
+        saveRealtimeMessage({
+          senderType: payload.role === 'candidate' ? 'candidate' : 'agent',
+          messageType: payload.role === 'candidate' ? 'transcript' : 'follow_up',
+          content,
+        }).catch((requestError) => setError(requestError.message));
+      }
+      return;
+    }
+    if (payload.type === 'audio_delta' && payload.data) {
+      setOmniSignals((current) => ({ ...current, audioField: true }));
+      const cleanData = String(payload.data).startsWith('data:') ? String(payload.data).split(',', 2)[1] : payload.data;
+      const binary = atob(cleanData);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      const audioBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      omniAudioChunksRef.current.push(audioBuffer);
+      queueOmniPcmPlayback(audioBuffer).catch(() => {
+        setOmniMessage('已收到 Qwen-Omni 音频，可点击播放器回放');
+      });
+      setOmniStatus('speaking');
+      setOmniMessage('正在接收并播放 Qwen-Omni 音频');
+      return;
+    }
+    if (payload.type === 'audio_done') {
+      playOmniAudioChunks();
+      scheduleOmniPlaybackComplete();
+    }
+  };
+
+  const handleOmniRealtimeMessage = (event) => {
+    if (event.data instanceof Blob) {
+      event.data.arrayBuffer().then((buffer) => {
+        omniAudioChunksRef.current.push(buffer);
+        queueOmniPcmPlayback(buffer).catch(() => {
+          setOmniMessage('已收到自部署 Qwen-Omni 音频，可点击播放器回放');
+        });
+      });
+      return;
+    }
+
+    if (event.data instanceof ArrayBuffer) {
+      omniAudioChunksRef.current.push(event.data);
+      queueOmniPcmPlayback(event.data).catch(() => {
+        setOmniMessage('已收到自部署 Qwen-Omni 音频，可点击播放器回放');
+      });
+      return;
+    }
+
+    try {
+      handleOmniPayload(JSON.parse(event.data));
+    } catch {
+      setOmniMessage('收到一条无法解析的千问 Omni 事件');
+    }
+  };
+
+  const startOmniRealtimeCall = async () => {
+    if (!interviewId || omniStatus === 'connecting') return;
+
+    if (omniStatus === 'listening') {
+      finishOmniRecording();
+      return;
+    }
+
+    if (omniStatus === 'speaking') {
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      setOmniStatus('error');
+      setOmniMessage('当前浏览器不支持 MediaRecorder 录音，无法测试 Omni 语音模式');
+      return;
+    }
+
+    stopRealtimeCall();
+    stopQwenRecognition();
+    stopQwenSpeech();
+    stopOmniPlayback();
+    if (omniAudioUrlRef.current) {
+      URL.revokeObjectURL(omniAudioUrlRef.current);
+    }
+    omniAudioUrlRef.current = '';
+    setOmniAudioUrl('');
+    setOmniSignals({ text: false, audioField: false, playableAudio: false });
+    setVoiceProvider('omni');
+    setOmniStatus('connecting');
+    setOmniMessage('正在连接 Qwen-Omni API/网关');
+    setError('');
+
+    try {
+      await ensureOmniAudioContext();
+      let socket = omniSocketRef.current;
+      if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        socket = new WebSocket(apiWsUrl(`/ws/interviews/${interviewId}/qwen/omni-realtime`));
+        socket.binaryType = 'arraybuffer';
+        omniSocketRef.current = socket;
+
+        await new Promise((resolve, reject) => {
+          socket.addEventListener('open', resolve, { once: true });
+          socket.addEventListener('error', () => reject(new Error('无法连接千问 Omni 实时网关')), { once: true });
+        });
+
+        socket.addEventListener('message', handleOmniRealtimeMessage);
+        socket.addEventListener('close', () => {
+          if (omniSocketRef.current === socket) {
+            omniSocketRef.current = null;
+            omniRecorderRef.current?.stop();
+            omniStreamRef.current?.getTracks().forEach((track) => track.stop());
+            omniRecorderRef.current = null;
+            omniStreamRef.current = null;
+            setOmniStatus('idle');
+            setOmniMessage('千问 Omni 实时网关连接已关闭');
+          }
+        });
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      omniStreamRef.current = stream;
+      const preferredType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+      const recorder = new MediaRecorder(stream, { mimeType: preferredType });
+      omniRecorderRef.current = recorder;
+      startOmniRecognition();
+
+      socket.send(JSON.stringify({
+        type: 'start',
+        mimeType: preferredType,
+        sampleRate: 48000,
+        currentQuestion,
+        activeAgent: currentAgentName,
+      }));
+
+      recorder.addEventListener('dataavailable', async (event) => {
+        if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+          socket.send(await event.data.arrayBuffer());
+        }
+      });
+      recorder.addEventListener('stop', () => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'stop' }));
+        }
+      });
+      recorder.start(250);
+      setOmniStatus('listening');
+      setOmniMessage('Qwen-Omni 通话已接通，正在发送麦克风音频');
+    } catch (requestError) {
+      stopOmniRealtimeCall('千问 Omni 自部署通话启动失败');
+      setOmniStatus('error');
+      setOmniMessage(requestError.message);
+      setError(requestError.message);
+    }
+  };
+
+  const normalizeSdp = (sdp) => {
+    const normalized = String(sdp || '').trim().replace(/\r?\n/g, '\r\n');
+    return normalized.endsWith('\r\n') ? normalized : `${normalized}\r\n`;
+  };
+
+  const extractResponseDoneText = (event) => {
+    const directText = event.transcript || event.text || event.output_text;
+    if (directText) return String(directText);
+
+    const outputItems = event.response?.output || event.output || [];
+    const textParts = [];
+    outputItems.forEach((item) => {
+      (item.content || []).forEach((part) => {
+        const value = part.transcript || part.text || part.output_text;
+        if (value) textParts.push(String(value));
+      });
+    });
+    return textParts.join('').trim();
+  };
+
+  const sendOmniWebrtcSessionUpdate = (channel) => {
+    if (omniWebrtcSessionUpdatedRef.current || !channel || channel.readyState !== 'open') return;
+    const sessionUpdate = omniWebrtcSessionUpdateRef.current;
+    if (!sessionUpdate) return;
+
+    channel.send(JSON.stringify(sessionUpdate));
+    omniWebrtcSessionUpdatedRef.current = true;
+    window.setTimeout(() => {
+      if (channel.readyState !== 'open') return;
+      channel.send(JSON.stringify({
+        event_id: `event_${Date.now()}`,
+        type: 'response.create',
+        response: {
+          modalities: ['text', 'audio'],
+          instructions: `请用一句自然的中文电话面试开场白开始，并提出当前问题：${currentQuestion}`,
+        },
+      }));
+    }, 100);
+    if (omniWebrtcAudioTrackRef.current) {
+      omniWebrtcAudioTrackRef.current.enabled = true;
+    }
+    setOmniStatus('connected');
+    setOmniMessage('Qwen-Omni WebRTC 已接通，请直接说话');
+  };
+
+  const handleOmniWebrtcEvent = (event, channel) => {
+    if (event.type === 'session.created') {
+      sendOmniWebrtcSessionUpdate(channel);
+      return;
+    }
+
+    if (event.type === 'session.updated') {
+      setOmniStatus('connected');
+      setOmniMessage('Qwen-Omni 会话配置已生效，请直接说话');
+      return;
+    }
+
+    if (event.type === 'input_audio_buffer.speech_started') {
+      setOmniStatus('listening');
+      setOmniMessage('Qwen-Omni 正在聆听候选人回答');
+      return;
+    }
+
+    if (event.type === 'input_audio_buffer.speech_stopped' || event.type === 'input_audio_buffer.committed') {
+      setOmniStatus('connected');
+      setOmniMessage('候选人回答已提交，正在生成追问');
+      return;
+    }
+
+    if (event.type === 'conversation.item.input_audio_transcription.delta') {
+      const delta = event.delta || event.text || '';
+      if (delta) {
+        omniWebrtcCandidateTranscriptRef.current = `${omniWebrtcCandidateTranscriptRef.current}${delta}`;
+        setAnswer(omniWebrtcCandidateTranscriptRef.current.trim());
+        setOmniSignals((current) => ({ ...current, text: true }));
+      }
+      return;
+    }
+
+    if (event.type === 'conversation.item.input_audio_transcription.completed') {
+      const content = String(event.transcript || event.text || omniWebrtcCandidateTranscriptRef.current || '').trim();
+      omniWebrtcCandidateTranscriptRef.current = '';
+      if (content) {
+        setAnswer(content);
+        setOmniSignals((current) => ({ ...current, text: true }));
+        saveRealtimeMessage({
+          senderType: 'candidate',
+          messageType: 'transcript',
+          content,
+        }).catch((requestError) => setError(requestError.message));
+      }
+      return;
+    }
+
+    if (
+      event.type === 'response.audio_transcript.delta' ||
+      event.type === 'response.text.delta' ||
+      event.type === 'response.output_text.delta'
+    ) {
+      const delta = event.delta || event.text || event.transcript || '';
+      if (delta) {
+        omniWebrtcAgentTranscriptRef.current = `${omniWebrtcAgentTranscriptRef.current}${delta}`;
+        setOmniSignals((current) => ({ ...current, text: true }));
+      }
+      return;
+    }
+
+    if (
+      event.type === 'response.audio_transcript.done' ||
+      event.type === 'response.text.done' ||
+      event.type === 'response.output_text.done'
+    ) {
+      const content = String(event.transcript || event.text || omniWebrtcAgentTranscriptRef.current || '').trim();
+      omniWebrtcAgentTranscriptRef.current = '';
+      if (content) {
+        setOmniSignals((current) => ({ ...current, text: true }));
+        saveRealtimeMessage({
+          senderType: 'agent',
+          messageType: 'follow_up',
+          content,
+        }).catch((requestError) => setError(requestError.message));
+      }
+      setOmniStatus('connected');
+      setOmniMessage('Qwen-Omni 已完成本轮追问，可继续回答');
+      return;
+    }
+
+    if (event.type === 'response.created') {
+      setOmniStatus('speaking');
+      setOmniMessage('Qwen-Omni 正在生成面试官回复');
+      return;
+    }
+
+    if (event.type === 'response.done') {
+      const content = extractResponseDoneText(event);
+      if (content) {
+        saveRealtimeMessage({
+          senderType: 'agent',
+          messageType: 'follow_up',
+          content,
+        }).catch((requestError) => setError(requestError.message));
+      }
+      setOmniStatus('connected');
+      setOmniMessage('Qwen-Omni 本轮回复完成，可继续说话');
+      return;
+    }
+
+    if (event.type === 'error') {
+      const message = event.error?.message || event.message || 'Qwen-Omni WebRTC 会话发生错误';
+      setOmniStatus('error');
+      setOmniMessage(message);
+      setError(message);
+    }
+  };
+
+  const handleOmniWebrtcDataChannelMessage = (event, channel) => {
+    try {
+      const payload = JSON.parse(event.data);
+      handleOmniWebrtcEvent(payload, channel);
+    } catch {
+      setOmniMessage('收到一条无法解析的 Qwen-Omni WebRTC 事件');
+    }
+  };
+
+  const startOmniWebrtcCall = async () => {
+    if (!interviewId || omniStatus === 'connecting') return;
+
+    if (omniStatus === 'connected' || omniStatus === 'listening' || omniStatus === 'speaking') {
+      stopOmniWebrtcCall('Qwen-Omni WebRTC 已断开', { resetAudio: true });
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+      setOmniStatus('error');
+      setOmniMessage('当前浏览器不支持 WebRTC 麦克风采集');
+      return;
+    }
+
+    stopRealtimeCall();
+    stopQwenRecognition();
+    stopQwenSpeech();
+    stopOmniRealtimeCall('已切换到 Qwen 官方 WebRTC');
+    stopOmniPlayback();
+    if (omniAudioUrlRef.current) {
+      URL.revokeObjectURL(omniAudioUrlRef.current);
+    }
+    omniAudioUrlRef.current = '';
+    setOmniAudioUrl('');
+    setOmniSignals({ text: false, audioField: false, playableAudio: false });
+    setVoiceProvider('omni-webrtc');
+    setOmniStatus('connecting');
+    setOmniMessage('正在建立 Qwen-Omni WebRTC 直连会话');
+    setError('');
+
+    try {
+      const peerConnection = new RTCPeerConnection({ iceServers: [] });
+      omniWebrtcPeerRef.current = peerConnection;
+      omniWebrtcSessionIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+      peerConnection.onconnectionstatechange = () => {
+        if (peerConnection.connectionState === 'connected') {
+          setOmniStatus('connected');
+          setOmniMessage('Qwen-Omni WebRTC 已连接，请直接说话');
+          return;
+        }
+        if (peerConnection.connectionState === 'failed') {
+          stopOmniWebrtcCall('Qwen-Omni WebRTC 连接失败', { resetAudio: true });
+          setOmniStatus('error');
+          setError('Qwen-Omni WebRTC 连接失败。');
+        }
+        if (peerConnection.connectionState === 'disconnected') {
+          setOmniMessage('Qwen-Omni WebRTC 连接暂时中断，正在等待恢复');
+        }
+      };
+
+      peerConnection.ontrack = async (event) => {
+        const remoteStream = event.streams[0];
+        if (!remoteStream) return;
+        const remoteAudio = document.createElement('audio');
+        remoteAudio.autoplay = true;
+        remoteAudio.playsInline = true;
+        remoteAudio.srcObject = remoteStream;
+        remoteAudio.style.display = 'none';
+        document.body.appendChild(remoteAudio);
+        omniWebrtcRemoteAudioRef.current = remoteAudio;
+        setOmniSignals((current) => ({ ...current, audioField: true }));
+        try {
+          await remoteAudio.play();
+          setOmniSignals((current) => ({ ...current, playableAudio: true }));
+        } catch {
+          setOmniMessage('已收到 Qwen-Omni 远端音频轨道，请检查浏览器自动播放权限');
+        }
+      };
+
+      const attachDataChannel = (channel) => {
+        omniWebrtcDataChannelRef.current = channel;
+        channel.addEventListener('open', () => {
+          window.setTimeout(() => sendOmniWebrtcSessionUpdate(channel), 1200);
+        });
+        channel.addEventListener('message', (event) => handleOmniWebrtcDataChannelMessage(event, channel));
+        channel.addEventListener('close', () => {
+          if (omniWebrtcDataChannelRef.current === channel) {
+            omniWebrtcDataChannelRef.current = null;
+          }
+        });
+      };
+
+      attachDataChannel(peerConnection.createDataChannel('oai-events'));
+      peerConnection.ondatachannel = (event) => attachDataChannel(event.channel);
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      omniWebrtcStreamRef.current = stream;
+      stream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, stream));
+      omniWebrtcAudioSenderRef.current = peerConnection.getSenders().find((sender) => sender.track?.kind === 'audio') || null;
+      omniWebrtcAudioTrackRef.current = omniWebrtcAudioSenderRef.current?.track || stream.getAudioTracks()[0] || null;
+      if (omniWebrtcAudioTrackRef.current) {
+        omniWebrtcAudioTrackRef.current.enabled = false;
+      }
+
+      const offer = await peerConnection.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false,
+      });
+      await peerConnection.setLocalDescription(offer);
+      await waitForPeerIceGathering(peerConnection);
+
+      const data = await apiRequest(`/api/interviews/${interviewId}/qwen/omni-realtime/sdp`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sdp: peerConnection.localDescription.sdp,
+          type: peerConnection.localDescription.type,
+          currentQuestion,
+          activeAgent: currentAgentName,
+        }),
+      });
+
+      omniWebrtcSessionUpdateRef.current = data.session_update;
+      await peerConnection.setRemoteDescription({
+        type: data.answer?.type || 'answer',
+        sdp: normalizeSdp(data.answer?.sdp),
+      });
+      window.setTimeout(() => sendOmniWebrtcSessionUpdate(omniWebrtcDataChannelRef.current), 500);
+      setOmniMessage(`Qwen-Omni WebRTC SDP 已交换，等待 ${data.model || '实时模型'} 会话创建`);
+    } catch (requestError) {
+      stopOmniWebrtcCall('Qwen-Omni WebRTC 启动失败', { resetAudio: true });
+      setOmniStatus('error');
+      setOmniMessage(requestError.message);
+      setError(requestError.message);
+    }
   };
 
   const stopQwenSpeech = () => {
@@ -2048,15 +2932,10 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     audio.addEventListener('error', () => failQwenPlayback());
 
     try {
-      let response;
-      try {
-        response = await apiAudioResponse(`/api/interviews/${interviewId}/qwen/realtime-tts`, { text: content }, controller.signal);
-      } catch (realtimeError) {
-        setQwenMessage('千问实时播报失败，正在降级普通合成');
-        response = await apiAudioResponse(`/api/interviews/${interviewId}/qwen/tts`, { text: content }, controller.signal);
-      }
+      const response = await apiAudioResponse(`/api/interviews/${interviewId}/qwen/speech`, { text: content, provider: 'auto' }, controller.signal);
+      const qwenAudioMimeType = normalizeQwenAudioMimeType(response.headers.get('content-type'));
 
-      if (!response.body || !canStreamAudioWithMediaSource()) {
+      if (!response.body || !canStreamAudioWithMediaSource(qwenAudioMimeType)) {
         const blob = await response.blob();
         if (!isCurrentStream()) return;
         streamState.objectUrl = URL.createObjectURL(blob);
@@ -2076,7 +2955,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       await waitForMediaSourceOpen(mediaSource);
       if (!isCurrentStream()) return;
 
-      const sourceBuffer = mediaSource.addSourceBuffer(QWEN_TTS_MIME_TYPE);
+      const sourceBuffer = mediaSource.addSourceBuffer(qwenAudioMimeType);
       const reader = response.body.getReader();
       let playbackStarted = false;
       let resolvePlaybackStart;
@@ -2262,12 +3141,16 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
+      const sdpOffer = peerConnection.localDescription?.sdp || offer.sdp;
+      if (!sdpOffer?.trim()) {
+        throw new Error('浏览器没有生成有效 SDP offer，请重新点击麦克风或检查浏览器 WebRTC 支持。');
+      }
 
       const response = await fetch(apiUrl(`/api/interviews/${interviewId}/realtime/sdp`), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/sdp' },
-        body: offer.sdp,
+        body: sdpOffer,
       });
       const responseBody = await response.text();
 
@@ -2286,8 +3169,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     } catch (requestError) {
       stopRealtimeCall();
       setVoiceStatus('error');
-      setError(requestError.message);
-      setVoiceMessage('语音通话连接失败，请检查麦克风权限和 OPENAI_API_KEY');
+      const fallbackMessage = requestError.name === 'NotAllowedError'
+        ? '麦克风权限被拒绝，请允许浏览器录音后重试'
+        : '语音通话连接失败，请检查麦克风权限和 OPENAI_API_KEY';
+      const detailMessage = requestError.message || fallbackMessage;
+      setError(detailMessage);
+      setVoiceMessage(detailMessage);
     }
   };
 
@@ -2434,20 +3321,47 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
   useEffect(() => () => {
     stopRealtimeCall();
+    stopOmniRealtimeCall();
+    stopOmniWebrtcCall();
     stopQwenRecognition();
     stopQwenSpeech();
   }, []);
 
   useEffect(() => {
     if (voiceProvider === 'openai') {
+      stopOmniRealtimeCall('已切换到 OpenAI 实时通话');
+      stopOmniWebrtcCall('已切换到 OpenAI 实时通话');
       stopQwenRecognition();
       stopQwenSpeech();
       setVoiceMessage('点击麦克风开始真实语音通话');
-    } else {
+    } else if (voiceProvider === 'qwen') {
+      stopOmniRealtimeCall('已切换到千问 CosyVoice 对话');
+      stopOmniWebrtcCall('已切换到千问 CosyVoice 对话');
       stopRealtimeCall();
       setQwenMessage('点击麦克风说出回答，或提交文本回答');
+    } else if (voiceProvider === 'omni') {
+      stopOmniWebrtcCall('已切换到 Qwen-Omni API 录音');
+      stopRealtimeCall();
+      stopQwenRecognition();
+      stopQwenSpeech();
+      setOmniMessage('连接 Qwen-Omni API/网关后开始录音提交');
+    } else {
+      stopOmniRealtimeCall('已切换到 Qwen 官方 WebRTC');
+      stopRealtimeCall();
+      stopQwenRecognition();
+      stopQwenSpeech();
+      setOmniMessage('点击麦克风开始 Qwen 官方 WebRTC 通话');
     }
   }, [voiceProvider]);
+
+  const playQwenSpeechInBackground = (content) => {
+    if (voiceProvider !== 'qwen' || !content) return;
+    void playQwenSpeech(content).catch((speechError) => {
+      setQwenStatus('error');
+      setQwenMessage('千问语音合成失败，请检查 DASHSCOPE_API_KEY');
+      setError(speechError.message || '千问语音合成失败');
+    });
+  };
 
   const handleSubmitAnswer = async (submittedAnswer = null) => {
     const content = typeof submittedAnswer === 'string' ? submittedAnswer.trim() : answer.trim();
@@ -2499,7 +3413,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
             content: followUpQuestion,
           }),
         });
-        await playQwenSpeech(followUpData.message.content);
+        if (voiceProvider === 'qwen') {
+          playQwenSpeechInBackground(followUpData.message.content);
+        }
       }
       if (nextAction.action === 'switch_agent' && activeAgent && nextAction.nextAgent) {
         await apiRequest(`/api/interviews/${interviewId}/messages`, {
@@ -2523,7 +3439,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           }),
         });
         await reloadAgents();
-        await playQwenSpeech(openingData.message.content);
+        if (voiceProvider === 'qwen') {
+          playQwenSpeechInBackground(openingData.message.content);
+        }
       }
       if (nextAction.action === 'finish_interview') {
         if (activeAgent) {
@@ -2555,6 +3473,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const handleFinish = async () => {
     if (!interviewId || finishing) return;
     stopRealtimeCall();
+    stopOmniRealtimeCall();
+    stopOmniWebrtcCall();
     stopQwenRecognition();
     stopQwenSpeech();
     setFinishing(true);
@@ -2620,21 +3540,37 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
             <p>{currentQuestion}</p>
           </div>
 
-          <div className="voice-mode-toggle" aria-label="语音模式">
+          <div className="voice-mode-dropdown" aria-label="语音模式">
             <button
-              className={voiceProvider === 'openai' ? 'active' : ''}
-              onClick={() => setVoiceProvider('openai')}
+              className="dropdown-trigger"
+              onClick={() => setShowVoiceDropdown(!showVoiceDropdown)}
               type="button"
+              aria-haspopup="true"
+              aria-expanded={showVoiceDropdown}
             >
-              OpenAI 实时通话
+              <span>{voiceProviderLabels[voiceProvider]}</span>
+              <ChevronDown size={16} className={showVoiceDropdown ? 'rotated' : ''} />
             </button>
-            <button
-              className={voiceProvider === 'qwen' ? 'active' : ''}
-              onClick={() => setVoiceProvider('qwen')}
-              type="button"
-            >
-              千问实时对话
-            </button>
+            {showVoiceDropdown && (
+              <div className="dropdown-menu" role="menu">
+                <button
+                  className={`dropdown-item ${voiceProvider === 'openai' ? 'active' : ''}`}
+                  onClick={() => { setVoiceProvider('openai'); setShowVoiceDropdown(false); }}
+                  type="button"
+                  role="menuitem"
+                >
+                  OpenAI 实时通话
+                </button>
+                <button
+                  className={`dropdown-item ${voiceProvider === 'qwen' ? 'active' : ''}`}
+                  onClick={() => { setVoiceProvider('qwen'); setShowVoiceDropdown(false); }}
+                  type="button"
+                  role="menuitem"
+                >
+                  千问实时对话
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="call-controls" aria-label="电话面试控制">
@@ -2642,19 +3578,21 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               className={`control-button ${
                 voiceProvider === 'openai'
                   ? voiceStatus === 'connected' ? 'primary' : ''
-                  : qwenStatus === 'listening' ? 'primary' : ''
+                  : voiceProvider === 'qwen'
+                    ? qwenStatus === 'listening' ? 'primary' : ''
+                    : omniStatus === 'listening' || omniStatus === 'connected' || omniStatus === 'speaking' ? 'primary' : ''
               }`}
-              onClick={voiceProvider === 'openai' ? startRealtimeCall : startQwenVoiceConversation}
-              disabled={voiceProvider === 'openai' ? voiceStatus === 'connecting' : qwenStatus === 'connecting' || submitting}
-              title={voiceProvider === 'openai' ? voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音' : qwenStatus === 'listening' ? '停止聆听' : '开始聆听候选人回答'}
+              onClick={voiceProvider === 'openai' ? startRealtimeCall : voiceProvider === 'qwen' ? startQwenVoiceConversation : voiceProvider === 'omni-webrtc' ? startOmniWebrtcCall : startOmniRealtimeCall}
+              disabled={voiceProvider === 'openai' ? voiceStatus === 'connecting' : voiceProvider === 'qwen' ? qwenStatus === 'connecting' || submitting : omniStatus === 'connecting'}
+              title={voiceProvider === 'openai' ? voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音' : voiceProvider === 'qwen' ? qwenStatus === 'listening' ? '停止聆听' : '开始聆听候选人回答' : voiceProvider === 'omni-webrtc' ? omniStatus === 'connected' || omniStatus === 'listening' || omniStatus === 'speaking' ? '断开 Qwen 官方 WebRTC 通话' : '开始 Qwen 官方 WebRTC 通话' : omniStatus === 'listening' ? '停止录音并提交 Qwen-Omni' : '开始 Qwen-Omni 录音'}
             >
               <Mic size={20} />
             </button>
             <button
               className={`control-button ${voiceProvider === 'qwen' && qwenStatus === 'speaking' ? 'primary' : ''}`}
-              disabled={voiceProvider === 'openai' || qwenStatus === 'connecting'}
+              disabled={voiceProvider !== 'qwen' || qwenStatus === 'connecting'}
               onClick={() => playQwenSpeech(currentQuestion)}
-              title={voiceProvider === 'qwen' ? '播放当前问题' : 'AI 语音回复会自动播放'}
+              title={voiceProvider === 'qwen' ? '播放当前问题' : '当前模式会自动处理语音回复'}
             >
               <Volume2 size={20} />
             </button>
@@ -2667,10 +3605,30 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               <span>{voiceStatus === 'connected' ? '实时语音已接通' : voiceStatus === 'connecting' ? '正在连接实时语音' : voiceStatus === 'error' ? '实时语音连接失败' : '实时语音待接入'}</span>
               <small>{voiceMessage}</small>
             </div>
-          ) : (
+          ) : voiceProvider === 'qwen' ? (
             <div className={`voice-status ${qwenStatus}`}>
               <span>{qwenStatus === 'listening' ? '正在聆听回答' : qwenStatus === 'speaking' ? '千问实时播报中' : qwenStatus === 'connecting' ? '正在处理千问对话' : qwenStatus === 'error' ? '千问对话失败' : '千问实时对话待接入'}</span>
               <small>{qwenMessage}</small>
+            </div>
+          ) : (
+            <div className={`voice-status ${omniStatus}`}>
+              <span>{voiceProvider === 'omni-webrtc' ? omniStatus === 'listening' ? 'Qwen WebRTC 正在聆听' : omniStatus === 'speaking' ? 'Qwen WebRTC 正在回复' : omniStatus === 'connecting' ? 'Qwen WebRTC 正在连接' : omniStatus === 'error' ? 'Qwen WebRTC 连接失败' : omniStatus === 'connected' ? 'Qwen WebRTC 已接通' : 'Qwen WebRTC 待接入' : omniStatus === 'listening' ? 'Omni 正在接收麦克风' : omniStatus === 'speaking' ? 'Omni 正在回复' : omniStatus === 'connecting' ? 'Omni 正在处理' : omniStatus === 'error' ? 'Omni 连接失败' : omniStatus === 'connected' ? 'Omni 本轮完成' : 'Omni API 待接入'}</span>
+              <small>{omniMessage}</small>
+              <div className="omni-signal-row" aria-label={voiceProvider === 'omni-webrtc' ? 'Qwen WebRTC 信号' : 'Omni 实验探针'}>
+                <span className={omniSignals.text ? 'ok' : ''}>{voiceProvider === 'omni-webrtc' ? '字幕事件' : '文本'}</span>
+                <span className={omniSignals.audioField ? 'ok' : ''}>{voiceProvider === 'omni-webrtc' ? '音频轨道' : '音频字段'}</span>
+                <span className={omniSignals.playableAudio ? 'ok' : ''}>{voiceProvider === 'omni-webrtc' ? '远端播放' : '可播放音频'}</span>
+              </div>
+              {omniAudioUrl && (
+                <audio
+                  ref={omniAudioElementRef}
+                  className="omni-audio-player"
+                  src={omniAudioUrl}
+                  controls
+                  onPlay={() => setOmniMessage('正在回放 Qwen-Omni 音频')}
+                  onEnded={() => setOmniMessage('Omni 音频回放完成，可继续说话')}
+                />
+              )}
             </div>
           )}
         </div>
@@ -2697,10 +3655,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       </div>
 
       <section className="phone-grid">
-        <Card title="面试官接入队列" icon={<Radio size={18} />}>
-          <AgentRoster agents={agents} currentAgent={currentAgentName} />
-        </Card>
-
         <Card title="实时语音转写" icon={<MessageSquareText size={18} />}>
           <div className="transcript-list">
             {messages.map((item) => (
@@ -2717,6 +3671,10 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               <Send size={15} />
             </button>
           </div>
+        </Card>
+
+        <Card title="面试官接入队列" icon={<Radio size={18} />}>
+          <AgentRoster agents={agents} currentAgent={currentAgentName} />
         </Card>
 
         <Card title="追问路线" icon={<CircleDot size={18} />} className="question-route-panel">
@@ -3194,4 +4152,7 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+const rootElement = document.getElementById('root');
+const appRoot = rootElement.__appRoot || createRoot(rootElement);
+rootElement.__appRoot = appRoot;
+appRoot.render(<App />);

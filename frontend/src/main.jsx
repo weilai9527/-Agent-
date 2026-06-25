@@ -405,6 +405,11 @@ const recommendationLabels = {
 };
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const OPENAI_REALTIME_AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
 
 function apiUrl(path) {
   return `${apiBaseUrl}${path}`;
@@ -2025,6 +2030,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const dataChannelRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
+  const openaiOpeningPlaybackRef = useRef(false);
+  const openaiOpeningMicRestoreTimerRef = useRef(null);
   const omniSocketRef = useRef(null);
   const omniRecorderRef = useRef(null);
   const omniStreamRef = useRef(null);
@@ -2090,7 +2097,41 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     });
   };
 
+  const setRealtimeMicrophoneEnabled = (enabled) => {
+    localStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
+    });
+  };
+
+  const restoreRealtimeMicrophoneAfterOpening = (delayMs = 800) => {
+    if (!openaiOpeningPlaybackRef.current) return;
+
+    if (openaiOpeningMicRestoreTimerRef.current) {
+      window.clearTimeout(openaiOpeningMicRestoreTimerRef.current);
+    }
+
+    openaiOpeningMicRestoreTimerRef.current = window.setTimeout(() => {
+      if (!openaiOpeningPlaybackRef.current) return;
+      openaiOpeningPlaybackRef.current = false;
+      openaiOpeningMicRestoreTimerRef.current = null;
+      setRealtimeMicrophoneEnabled(true);
+      setVoiceMessage('首问已播放，请开始回答');
+    }, delayMs);
+  };
+
+  const buildOpenaiOpeningInstructions = () => [
+    '你正在接通一场中文电话面试。',
+    '请只朗读下面的当前问题，不要额外开场、不要解释规则、不要自我介绍、不要补充其他问题。',
+    `当前问题：${currentQuestion}`,
+    '读完后立刻停止，等待候选人回答。',
+  ].join('\n');
+
   const stopRealtimeCall = () => {
+    if (openaiOpeningMicRestoreTimerRef.current) {
+      window.clearTimeout(openaiOpeningMicRestoreTimerRef.current);
+    }
+    openaiOpeningPlaybackRef.current = false;
+    openaiOpeningMicRestoreTimerRef.current = null;
     dataChannelRef.current?.close();
     peerConnectionRef.current?.close();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -3051,6 +3092,13 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   };
 
   const handleRealtimeEvent = (event) => {
+    if (event.type === 'response.created') {
+      if (openaiOpeningPlaybackRef.current) {
+        setVoiceMessage('AI 面试官正在朗读当前问题');
+      }
+      return;
+    }
+
     if (event.type === 'input_audio_buffer.speech_started') {
       setVoiceMessage('正在聆听候选人回答');
       return;
@@ -3071,17 +3119,35 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
 
     if (event.type === 'response.audio_transcript.done' || event.type === 'response.text.done' || event.type === 'response.output_text.done') {
-      saveRealtimeMessage({
-        senderType: 'agent',
-        messageType: 'follow_up',
-        content: event.transcript || event.text,
-      }).catch((requestError) => setError(requestError.message));
-      setVoiceMessage('AI 面试官已完成本轮追问');
+      if (openaiOpeningPlaybackRef.current) {
+        setVoiceMessage('AI 面试官正在收尾，准备聆听回答');
+        restoreRealtimeMicrophoneAfterOpening(1200);
+      } else {
+        saveRealtimeMessage({
+          senderType: 'agent',
+          messageType: 'follow_up',
+          content: event.transcript || event.text,
+        }).catch((requestError) => setError(requestError.message));
+        setVoiceMessage('AI 面试官已完成本轮追问');
+      }
+      return;
+    }
+
+    if (event.type === 'response.done') {
+      restoreRealtimeMicrophoneAfterOpening(600);
       return;
     }
 
     if (event.type === 'error') {
-      setError(event.error?.message || '实时语音会话发生错误。');
+      const message = event.error?.message || event.message || '实时语音会话发生错误。';
+      openaiOpeningPlaybackRef.current = false;
+      if (openaiOpeningMicRestoreTimerRef.current) {
+        window.clearTimeout(openaiOpeningMicRestoreTimerRef.current);
+        openaiOpeningMicRestoreTimerRef.current = null;
+      }
+      setRealtimeMicrophoneEnabled(false);
+      setError(message);
+      setVoiceMessage(message);
       setVoiceStatus('error');
     }
   };
@@ -3110,24 +3176,35 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
       const remoteAudio = document.createElement('audio');
       remoteAudio.autoplay = true;
+      remoteAudio.playsInline = true;
+      remoteAudio.style.display = 'none';
       remoteAudioRef.current = remoteAudio;
       peerConnection.ontrack = (event) => {
         remoteAudio.srcObject = event.streams[0];
+        if (!remoteAudio.isConnected) {
+          document.body.appendChild(remoteAudio);
+        }
+        void remoteAudio.play().catch(() => {
+          setVoiceMessage('已收到 OpenAI 远端音频，请检查浏览器自动播放权限');
+        });
       };
 
-      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const localStream = await navigator.mediaDevices.getUserMedia({ audio: OPENAI_REALTIME_AUDIO_CONSTRAINTS });
       localStreamRef.current = localStream;
+      setRealtimeMicrophoneEnabled(false);
       localStream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, localStream));
 
       const dataChannel = peerConnection.createDataChannel('oai-events');
       dataChannelRef.current = dataChannel;
       dataChannel.addEventListener('open', () => {
+        openaiOpeningPlaybackRef.current = true;
+        setRealtimeMicrophoneEnabled(false);
         setVoiceStatus('connected');
         setVoiceMessage('语音通话已接通，AI 面试官正在开场');
         dataChannel.send(JSON.stringify({
           type: 'response.create',
           response: {
-            instructions: '请用一句自然的中文电话面试开场白开始，并提出当前问题。',
+            instructions: buildOpenaiOpeningInstructions(),
           },
         }));
       });

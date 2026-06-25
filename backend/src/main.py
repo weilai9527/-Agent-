@@ -77,6 +77,7 @@ INTERVIEW_STATUSES = {"draft", "running", "completed"}
 AGENT_STATUSES = {"pending", "active", "completed"}
 MESSAGE_SENDER_TYPES = {"agent", "candidate", "system"}
 MESSAGE_TYPES = {"question", "answer", "follow_up", "system", "transcript"}
+AGENT_QUESTION_MESSAGE_TYPES = {"question", "follow_up"}
 INTERVIEW_TEXT_FIELDS = [
     ("target_role", "目标岗位", 80),
     ("experience_level", "经验等级", 40),
@@ -853,12 +854,24 @@ def create_initial_question(interview: dict, agent: dict | None) -> str:
 
 def build_realtime_session_config(interview: dict, agents: list[dict], messages: list[dict]) -> dict:
     current_agent = next((agent for agent in agents if agent.get("status") == "active"), agents[0] if agents else None)
-    latest_questions = [message for message in messages if message["sender_type"] == "agent"]
+    latest_questions = [
+        message
+        for message in messages
+        if message["sender_type"] == "agent" and message.get("message_type") in AGENT_QUESTION_MESSAGE_TYPES
+    ]
     latest_question = latest_questions[-1]["content"] if latest_questions else create_initial_question(interview, current_agent)
     recent_messages = messages[-8:]
+
+    def speaker_label(message: dict) -> str:
+        if message["sender_type"] == "candidate":
+            return "候选人"
+        if message["sender_type"] == "system":
+            return "系统"
+        return message.get("agent_name") or "面试官"
+
     recent_context = "\n".join(
         [
-            f"{'候选人' if message['sender_type'] == 'candidate' else message.get('agent_name') or '面试官'}：{message.get('content') or ''}"
+            f"{speaker_label(message)}：{message.get('content') or ''}"
             for message in recent_messages
         ]
     ) or "暂无历史对话。"
@@ -867,7 +880,7 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
     recent_message_items = [
         {
             "sender_type": message["sender_type"],
-            "speaker": "候选人" if message["sender_type"] == "candidate" else message.get("agent_name") or "面试官",
+            "speaker": speaker_label(message),
             "content": message.get("content") or "",
         }
         for message in recent_messages

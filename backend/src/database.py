@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 
 from . import env  # noqa: F401
 
@@ -121,24 +122,30 @@ class MySQLDatabase:
 class SQLiteDatabase:
     def __init__(self, path: Path):
         self.path = path
-        self._conn = None
+        self._local = threading.local()
+        self._schema_lock = threading.RLock()
 
     def connect(self):
-        if self._conn:
-            return self._conn
+        conn = getattr(self._local, "conn", None)
+        if conn:
+            return conn
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        return self._conn
+        conn = sqlite3.connect(self.path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        self._local.conn = conn
+        return conn
 
     def execute(self, sql: str, params: tuple = ()):
         return self.connect().execute(sql, params)
 
     def executescript(self, sql: str) -> None:
-        self.connect().executescript(sql)
+        with self._schema_lock:
+            self.connect().executescript(sql)
 
     def commit(self) -> None:
         self.connect().commit()
@@ -294,6 +301,19 @@ def _init_sqlite_db() -> None:
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS resume_analyses (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL UNIQUE,
+          source_hash TEXT NOT NULL,
+          analysis_json TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'analyzed',
+          error_message TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS interview_agents (
           id TEXT PRIMARY KEY,
           interview_id TEXT NOT NULL,
@@ -379,6 +399,8 @@ def _init_sqlite_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_password_reset_token_hash ON password_reset_tokens(token_hash);
         CREATE INDEX IF NOT EXISTS idx_interview_sessions_user_id ON interview_sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_interview_sessions_status ON interview_sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_resume_analyses_user_id ON resume_analyses(user_id);
+        CREATE INDEX IF NOT EXISTS idx_resume_analyses_source_hash ON resume_analyses(source_hash);
         CREATE INDEX IF NOT EXISTS idx_interview_agents_interview_id ON interview_agents(interview_id);
         CREATE INDEX IF NOT EXISTS idx_interview_messages_interview_id ON interview_messages(interview_id);
         CREATE INDEX IF NOT EXISTS idx_interview_messages_agent_id ON interview_messages(agent_id);
@@ -481,6 +503,20 @@ def init_db() -> None:
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           started_at DATETIME NULL,
           completed_at DATETIME NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS resume_analyses (
+          id CHAR(36) PRIMARY KEY,
+          user_id CHAR(36) NOT NULL UNIQUE,
+          source_hash VARCHAR(128) NOT NULL,
+          analysis_json MEDIUMTEXT NOT NULL,
+          provider VARCHAR(80) NOT NULL,
+          status VARCHAR(40) NOT NULL DEFAULT 'analyzed',
+          error_message TEXT,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
@@ -598,6 +634,8 @@ def init_db() -> None:
     _ensure_index("password_reset_tokens", "idx_password_reset_token_hash", "token_hash")
     _ensure_index("interview_sessions", "idx_interview_sessions_user_id", "user_id")
     _ensure_index("interview_sessions", "idx_interview_sessions_status", "status")
+    _ensure_index("resume_analyses", "idx_resume_analyses_user_id", "user_id")
+    _ensure_index("resume_analyses", "idx_resume_analyses_source_hash", "source_hash")
     _ensure_index("interview_agents", "idx_interview_agents_interview_id", "interview_id")
     _ensure_index("interview_messages", "idx_interview_messages_interview_id", "interview_id")
     _ensure_index("interview_messages", "idx_interview_messages_agent_id", "agent_id")

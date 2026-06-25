@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import base64
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
+import random
 import re
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from .database import all_rows, db, get_database_path, one
+from .kimi_followup import KimiFollowupError, analyze_resume, generate_kimi_followup, generate_opening_question
+from .qwen_realtime_tts import QwenRealtimeTtsError, get_qwen_realtime_tts_media_type, stream_qwen_realtime_tts
+from .qwen_tts import QwenTtsError, get_qwen_tts_media_type, stream_qwen_tts
 from .security import (
     create_token,
     hash_password,
@@ -337,6 +344,22 @@ def find_user_by_session(request: Request) -> dict | None:
     )
 
 
+def find_user_by_session_token(token: str | None) -> dict | None:
+    if not token:
+        return None
+    return one(
+        """
+        SELECT users.id, users.email, users.name, users.status, users.created_at, users.last_login_at
+        FROM sessions
+        JOIN users ON users.id = sessions.user_id
+        WHERE sessions.token_hash = ?
+          AND sessions.expires_at > CURRENT_TIMESTAMP
+          AND users.status = 'normal'
+        """,
+        (hash_token(token),),
+    )
+
+
 def require_auth(request: Request) -> dict:
     user = find_user_by_session(request)
     if not user:
@@ -364,6 +387,146 @@ def find_profile_by_user_id(user_id: str) -> dict | None:
         """,
         (user_id,),
     )
+
+
+def resume_source_text(profile: dict | None) -> str:
+    if not profile:
+        return ""
+    fields = [
+        "target_role",
+        "experience_level",
+        "years_of_experience",
+        "education_level",
+        "skills",
+        "project_keywords",
+        "resume_text",
+        "project_experience",
+    ]
+    return "\n".join(str(profile.get(field) or "").strip() for field in fields if str(profile.get(field) or "").strip())
+
+
+def resume_source_hash(profile: dict | None) -> str:
+    return hashlib.sha256(resume_source_text(profile).encode("utf-8")).hexdigest()
+
+
+def find_resume_analysis_by_user_id(user_id: str) -> dict | None:
+    return one(
+        """
+        SELECT id, user_id, source_hash, analysis_json, provider, status, error_message,
+               created_at, updated_at
+        FROM resume_analyses
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+
+
+def upsert_resume_analysis(user_id: str, source_hash: str, analysis: dict, provider: str, error_message: str | None = None) -> dict | None:
+    existing = find_resume_analysis_by_user_id(user_id)
+    payload = json.dumps(analysis, ensure_ascii=False)
+    if existing:
+        db.execute(
+            """
+            UPDATE resume_analyses
+            SET source_hash = ?, analysis_json = ?, provider = ?, status = ?, error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (source_hash, payload, provider, "analyzed", error_message, user_id),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO resume_analyses (
+              id, user_id, source_hash, analysis_json, provider, status, error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid4()), user_id, source_hash, payload, provider, "analyzed", error_message),
+        )
+    db.commit()
+    return find_resume_analysis_by_user_id(user_id)
+
+
+def serialize_resume_analysis(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    analysis = parse_json_object(row.get("analysis_json"), {})
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "source_hash": row.get("source_hash"),
+        "analysis": analysis,
+        "provider": row.get("provider"),
+        "status": row.get("status"),
+        "error_message": row.get("error_message"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def ensure_resume_analysis_for_user(user: dict, force: bool = False) -> dict:
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    source = resume_source_text(profile)
+    if not source:
+        raise error(400, "请先在个人资料中填写简历文本、项目经历或技能标签。")
+    current_hash = resume_source_hash(profile)
+    existing = find_resume_analysis_by_user_id(user["id"])
+    if existing and existing.get("source_hash") == current_hash and not force:
+        serialized = serialize_resume_analysis(existing)
+        if serialized:
+            return serialized
+
+    result = analyze_resume(profile or {})
+    row = upsert_resume_analysis(
+        user["id"],
+        current_hash,
+        result["analysis"],
+        result.get("provider") or "local",
+        result.get("error"),
+    )
+    serialized = serialize_resume_analysis(row)
+    if not serialized:
+        raise error(500, "简历分析结果保存失败。")
+    serialized["fallback"] = bool(result.get("fallback"))
+    return serialized
+
+
+def select_resume_point(analysis: dict, interview: dict, messages: list[dict]) -> dict:
+    asked_text = "\n".join(str(message.get("content") or "") for message in messages if message.get("sender_type") == "agent")
+    candidates: list[dict[str, Any]] = []
+    target_role = str(interview.get("target_role") or "").lower()
+
+    for project in analysis.get("projects", []) if isinstance(analysis.get("projects"), list) else []:
+        if not isinstance(project, dict):
+            continue
+        name = str(project.get("name") or "").strip()
+        if not name:
+            continue
+        if name in asked_text:
+            weight = 2
+        else:
+            joined = " ".join([name, " ".join(project.get("highlights", []) if isinstance(project.get("highlights"), list) else [])]).lower()
+            weight = 7 if target_role and target_role in joined else 5
+        candidates.append({"type": "project", "value": name, "project": project, "weight": weight})
+
+    for skill in analysis.get("core_skills", []) if isinstance(analysis.get("core_skills"), list) else []:
+        value = str(skill).strip()
+        if value:
+            candidates.append({"type": "skill", "value": value, "weight": 4 if value in asked_text else 6})
+
+    for risk in analysis.get("risk_points", []) if isinstance(analysis.get("risk_points"), list) else []:
+        value = str(risk).strip()
+        if value:
+            candidates.append({"type": "risk", "value": value, "weight": 2 if value in asked_text else 3})
+
+    if not candidates:
+        return {"type": "project", "value": "项目经历", "weight": 1}
+
+    weights = [max(1, int(candidate.get("weight") or 1)) for candidate in candidates]
+    selected = random.SystemRandom().choices(candidates, weights=weights, k=1)[0]
+    return {key: value for key, value in selected.items() if key != "weight"}
 
 
 def find_interview_by_user_id(interview_id: str, user_id: str) -> dict | None:
@@ -689,7 +852,7 @@ def create_initial_question(interview: dict, agent: dict | None) -> str:
 
 
 def build_realtime_session_config(interview: dict, agents: list[dict], messages: list[dict]) -> dict:
-    current_agent = agents[0] if agents else None
+    current_agent = next((agent for agent in agents if agent.get("status") == "active"), agents[0] if agents else None)
     latest_questions = [message for message in messages if message["sender_type"] == "agent"]
     latest_question = latest_questions[-1]["content"] if latest_questions else create_initial_question(interview, current_agent)
     recent_messages = messages[-8:]
@@ -699,7 +862,16 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
             for message in recent_messages
         ]
     ) or "暂无历史对话。"
-    asked_questions = "\n".join([f"- {message['content']}" for message in latest_questions[-5:]]) or "- 暂无"
+    asked_question_items = [message["content"] for message in latest_questions[-5:]]
+    asked_questions = "\n".join([f"- {question}" for question in asked_question_items]) or "- 暂无"
+    recent_message_items = [
+        {
+            "sender_type": message["sender_type"],
+            "speaker": "候选人" if message["sender_type"] == "candidate" else message.get("agent_name") or "面试官",
+            "content": message.get("content") or "",
+        }
+        for message in recent_messages
+    ]
     return {
         "type": "realtime",
         "model": os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-2"),
@@ -722,17 +894,460 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
                 "如果刚接通，请从当前问题开始，不要重复介绍系统功能。",
             ]
         ),
-        "audio": {
-            "input": {
-                "transcription": {
-                    "model": os.environ.get("OPENAI_TRANSCRIPTION_MODEL", "gpt-realtime-whisper"),
-                    "language": "zh",
-                },
-                "turn_detection": {"type": "server_vad"},
-            },
-            "output": {"voice": os.environ.get("OPENAI_REALTIME_VOICE", "marin")},
+        "active_agent": current_agent.get("agent_name") if current_agent else "技术面试 Agent",
+        "current_question": latest_question,
+        "recent_messages": recent_message_items,
+        "asked_questions": asked_question_items,
+        "audio": {"output": {"voice": os.environ.get("OPENAI_REALTIME_VOICE", "marin")}},
+    }
+
+
+def build_openai_realtime_session_config(interview: dict, agents: list[dict], messages: list[dict]) -> dict:
+    session_config = build_realtime_session_config(interview, agents, messages)
+    return {
+        key: session_config[key]
+        for key in ("type", "model", "instructions", "audio")
+        if key in session_config
+    }
+
+
+def log_qwen_tts_metric(event: str, **payload: Any) -> None:
+    print(
+        "Qwen TTS:",
+        json.dumps({"event": event, **payload}, ensure_ascii=False),
+        flush=True,
+    )
+
+
+def stream_with_qwen_tts_metrics(
+    audio_stream: Iterator[bytes],
+    *,
+    request_id: str,
+    provider: str,
+    text_length: int,
+    fallback_from: str | None = None,
+) -> Iterator[bytes]:
+    started_at = time.perf_counter()
+    first_packet_ms: int | None = None
+    total_bytes = 0
+    chunk_count = 0
+    status = "completed"
+    error_message: str | None = None
+
+    log_qwen_tts_metric(
+        "start",
+        request_id=request_id,
+        provider=provider,
+        fallback_from=fallback_from,
+        text_length=text_length,
+    )
+
+    try:
+        for chunk in audio_stream:
+            if not chunk:
+                continue
+            chunk_count += 1
+            total_bytes += len(chunk)
+            if first_packet_ms is None:
+                first_packet_ms = round((time.perf_counter() - started_at) * 1000)
+                log_qwen_tts_metric(
+                    "first_packet",
+                    request_id=request_id,
+                    provider=provider,
+                    first_packet_ms=first_packet_ms,
+                    first_packet_bytes=len(chunk),
+                )
+            yield chunk
+    except Exception as exc:
+        status = "failed"
+        error_message = str(exc)
+        raise
+    finally:
+        log_qwen_tts_metric(
+            "finish",
+            request_id=request_id,
+            provider=provider,
+            fallback_from=fallback_from,
+            status=status,
+            first_packet_ms=first_packet_ms,
+            duration_ms=round((time.perf_counter() - started_at) * 1000),
+            chunk_count=chunk_count,
+            total_bytes=total_bytes,
+            text_length=text_length,
+            error=error_message,
+        )
+
+
+def build_qwen_tts_response(text: str, provider_preference: str = "auto") -> StreamingResponse:
+    normalized_preference = (provider_preference or "auto").strip().lower()
+    if normalized_preference not in {"auto", "realtime", "standard"}:
+        raise error(400, "语音合成 provider 只支持 auto、realtime 或 standard。")
+
+    request_id = str(uuid4())
+    fallback_from: str | None = None
+    fallback_error: str | None = None
+
+    if normalized_preference in {"auto", "realtime"}:
+        try:
+            audio_stream = stream_qwen_realtime_tts(text)
+            provider = "realtime"
+            media_type = get_qwen_realtime_tts_media_type()
+        except QwenRealtimeTtsError as exc:
+            fallback_from = "realtime"
+            fallback_error = str(exc)
+            log_qwen_tts_metric(
+                "fallback",
+                request_id=request_id,
+                from_provider="realtime",
+                to_provider="standard",
+                reason=fallback_error,
+            )
+        else:
+            return StreamingResponse(
+                stream_with_qwen_tts_metrics(
+                    audio_stream,
+                    request_id=request_id,
+                    provider=provider,
+                    text_length=len(text),
+                ),
+                media_type=media_type,
+                headers={"X-Qwen-TTS-Provider": provider, "X-Qwen-TTS-Request-Id": request_id},
+            )
+
+    try:
+        audio_stream = stream_qwen_tts(text)
+    except QwenTtsError as exc:
+        message = str(exc)
+        if fallback_error:
+            message = f"实时合成失败：{fallback_error}；普通合成失败：{message}"
+        raise error(500, message)
+
+    provider = "standard"
+    headers = {"X-Qwen-TTS-Provider": provider, "X-Qwen-TTS-Request-Id": request_id}
+    if fallback_from:
+        headers["X-Qwen-TTS-Fallback-From"] = fallback_from
+    return StreamingResponse(
+        stream_with_qwen_tts_metrics(
+            audio_stream,
+            request_id=request_id,
+            provider=provider,
+            fallback_from=fallback_from,
+            text_length=len(text),
+        ),
+        media_type=get_qwen_tts_media_type(),
+        headers=headers,
+    )
+
+
+def _qwen_omni_audio_format(mime_type: str) -> str:
+    normalized = (mime_type or "").lower()
+    if "wav" in normalized:
+        return "wav"
+    if "mpeg" in normalized or "mp3" in normalized:
+        return "mp3"
+    if "mp4" in normalized or "m4a" in normalized:
+        return "mp4"
+    if "ogg" in normalized or "opus" in normalized:
+        return "ogg"
+    if "webm" in normalized:
+        return "webm"
+    return os.environ.get("QWEN_OMNI_INPUT_AUDIO_FORMAT", "webm").strip() or "webm"
+
+
+def _build_qwen_omni_prompt(session_config: dict, start_payload: dict) -> str:
+    current_question = str(start_payload.get("currentQuestion") or session_config.get("current_question") or "").strip()
+    active_agent = str(start_payload.get("activeAgent") or session_config.get("active_agent") or "").strip()
+    asked_questions = session_config.get("asked_questions") or []
+    asked_questions_text = "\n".join([f"- {question}" for question in asked_questions[-5:]]) or "- 暂无"
+    return "\n".join(
+        [
+            "候选人刚刚用语音回答了当前问题。请先准确理解这段语音，再继续面试。",
+            "绝对不要复述当前问题，不要重新开场，不要介绍系统功能。",
+            "如果听清了：先给一句很短的自然反馈，再提出一个新的追问。",
+            "如果没有听清：只用一句话请候选人重复或补充。",
+            "输出要像真实电话面试：简洁、口语化、每次只问一个问题。",
+            f"当前面试官：{active_agent or '技术面试 Agent'}",
+            f"当前问题：{current_question or '请围绕候选人的项目经历继续追问。'}",
+            f"已问过的问题，避免重复：\n{asked_questions_text}",
+        ]
+    )
+
+
+def _build_qwen_omni_messages(session_config: dict, start_payload: dict, audio_data_url: str, input_format: str) -> list[dict]:
+    qwen_messages: list[dict] = [
+        {
+            "role": "system",
+            "content": "\n".join(
+                [
+                    str(session_config.get("instructions") or ""),
+                    "现在进入 Qwen-Omni 语音轮次：请根据最后一条用户音频推进面试，不要复述旧问题。",
+                ]
+            ),
+        }
+    ]
+
+    recent_messages = session_config.get("recent_messages") or []
+    for message in recent_messages[-6:]:
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        qwen_messages.append(
+            {
+                "role": "user" if message.get("sender_type") == "candidate" else "assistant",
+                "content": content[:1200],
+            }
+        )
+
+    qwen_messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {"data": audio_data_url, "format": input_format}},
+                {"type": "text", "text": _build_qwen_omni_prompt(session_config, start_payload)},
+            ],
+        }
+    )
+    return qwen_messages
+
+
+def _env_float_value(name: str, default: float) -> float:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise QwenRealtimeTtsError(f"{name} 必须是数字。") from exc
+
+
+def _env_int_value(name: str, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise QwenRealtimeTtsError(f"{name} 必须是整数。") from exc
+
+
+def _env_bool_value(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+def _append_query_param(url: str, key: str, value: str) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.setdefault(key, value)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _qwen_realtime_model() -> str:
+    return os.environ.get("QWEN_OMNI_REALTIME_MODEL", "qwen3.5-omni-plus-realtime")
+
+
+def _qwen_realtime_api_key() -> str:
+    return (
+        os.environ.get("QWEN_OMNI_REALTIME_API_KEY")
+        or os.environ.get("QWEN_OMNI_API_KEY")
+        or os.environ.get("DASHSCOPE_API_KEY")
+        or ""
+    ).strip()
+
+
+def _qwen_realtime_webrtc_url(model: str) -> str:
+    configured_url = os.environ.get("QWEN_OMNI_REALTIME_WEBRTC_URL", "").strip()
+    if configured_url:
+        return _append_query_param(configured_url.replace("{model}", model), "model", model)
+
+    configured_endpoint = os.environ.get("QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT", "").strip()
+    if not configured_endpoint:
+        raise QwenRealtimeTtsError(
+            "Qwen-Omni WebRTC 需要配置白名单 Endpoint：请设置 QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT "
+            "或完整的 QWEN_OMNI_REALTIME_WEBRTC_URL。普通 dashscope.aliyuncs.com 域名仅用于 WebSocket，"
+            "不能直接作为 WebRTC SDP 交换地址。"
+        )
+
+    endpoint = configured_endpoint
+    if not endpoint.startswith(("http://", "https://")):
+        endpoint = f"https://{endpoint}"
+    parsed = urlparse(endpoint)
+    path = parsed.path.rstrip("/") or "/api/v1/webrtc/realtime"
+    if path == "/":
+        path = "/api/v1/webrtc/realtime"
+    endpoint = urlunparse(parsed._replace(path=path))
+    return _append_query_param(endpoint, "model", model)
+
+
+def build_qwen_realtime_session_update(session_config: dict, start_payload: dict | None = None) -> dict:
+    payload = start_payload or {}
+    active_agent = str(payload.get("activeAgent") or session_config.get("active_agent") or "").strip()
+    current_question = str(payload.get("currentQuestion") or session_config.get("current_question") or "").strip()
+    instructions = "\n".join(
+        [
+            str(session_config.get("instructions") or ""),
+            "当前使用 Qwen-Omni-Realtime WebRTC 直连链路。",
+            "只有当前面试官 Agent 对候选人说话，后台分析 Agent 不要出声或自我介绍。",
+            "如果候选人已经回答，请基于回答继续追问；如果候选人刚接入，请直接提出当前问题。",
+            f"当前发声 Agent：{active_agent or session_config.get('active_agent') or '技术面试 Agent'}",
+            f"当前问题：{current_question or session_config.get('current_question') or '请围绕候选人的项目经历继续追问。'}",
+        ]
+    )
+    model = _qwen_realtime_model()
+    turn_detection_type = os.environ.get("QWEN_OMNI_REALTIME_TURN_DETECTION", "").strip()
+    if not turn_detection_type:
+        turn_detection_type = "semantic_vad" if "qwen3.5" in model else "server_vad"
+
+    session: dict[str, Any] = {
+        "modalities": ["text", "audio"],
+        "voice": os.environ.get("QWEN_OMNI_REALTIME_VOICE") or os.environ.get("QWEN_OMNI_VOICE", "Tina"),
+        "input_audio_format": "pcm",
+        "output_audio_format": "pcm",
+        "input_audio_transcription": {
+            "model": os.environ.get("QWEN_OMNI_REALTIME_TRANSCRIPTION_MODEL", "qwen3-asr-flash-realtime"),
+        },
+        "instructions": instructions,
+        "smooth_output": _env_bool_value("QWEN_OMNI_REALTIME_SMOOTH_OUTPUT", False),
+        "turn_detection": {
+            "type": turn_detection_type,
+            "threshold": _env_float_value("QWEN_OMNI_REALTIME_VAD_THRESHOLD", 0.5),
+            "prefix_padding_ms": _env_int_value("QWEN_OMNI_REALTIME_PREFIX_PADDING_MS", 500),
+            "silence_duration_ms": _env_int_value("QWEN_OMNI_REALTIME_SILENCE_DURATION_MS", 800),
         },
     }
+
+    if _env_bool_value("QWEN_OMNI_REALTIME_ENABLE_SEARCH", False):
+        session["enable_search"] = True
+        session["search_options"] = {"enable_source": _env_bool_value("QWEN_OMNI_REALTIME_SEARCH_SOURCE", True)}
+
+    return {
+        "event_id": f"event_{uuid4().hex}",
+        "type": "session.update",
+        "session": session,
+    }
+
+
+async def _stream_qwen_omni_http_response(websocket: WebSocket, audio_bytes: bytes, mime_type: str, session_config: dict, start_payload: dict) -> None:
+    api_key = os.environ.get("QWEN_OMNI_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
+    if not api_key or api_key in {"your-dashscope-api-key", "your-api-key-here"}:
+        await websocket.send_json({"type": "error", "message": "请先配置 DASHSCOPE_API_KEY 或 QWEN_OMNI_API_KEY。"})
+        return
+    if not audio_bytes:
+        await websocket.send_json({"type": "error", "message": "没有收到可提交给 Qwen-Omni 的录音。"})
+        return
+
+    base_url = os.environ.get("QWEN_OMNI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+    model = os.environ.get("QWEN_OMNI_MODEL", "qwen3.5-omni-plus")
+    voice = os.environ.get("QWEN_OMNI_VOICE", "Tina")
+    audio_format = os.environ.get("QWEN_OMNI_OUTPUT_AUDIO_FORMAT", "wav")
+    input_format = os.environ.get("QWEN_OMNI_INPUT_AUDIO_FORMAT", "").strip() or _qwen_omni_audio_format(mime_type)
+    audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
+    audio_data_url = f"data:audio/{input_format};base64,{audio_base64}"
+
+    stream_response = os.environ.get("QWEN_OMNI_STREAM", "false").lower() == "true"
+    request_body = {
+        "model": model,
+        "messages": _build_qwen_omni_messages(session_config, start_payload, audio_data_url, input_format),
+        "modalities": ["text", "audio"],
+        "audio": {"voice": voice, "format": audio_format},
+        "temperature": float(os.environ.get("QWEN_OMNI_TEMPERATURE", "0.7")),
+        "stream": stream_response,
+    }
+    if stream_response:
+        request_body["stream_options"] = {"include_usage": True}
+
+    await websocket.send_json({"type": "status", "message": f"正在调用 Qwen-Omni API：{model}"})
+    text_parts: list[str] = []
+    audio_chunk_count = 0
+    audio_byte_count = 0
+
+    async def send_audio_data(audio_data: str | None) -> None:
+        nonlocal audio_chunk_count, audio_byte_count
+        if not audio_data:
+            return
+        clean_data = str(audio_data)
+        if "," in clean_data and clean_data.lstrip().startswith("data:"):
+            clean_data = clean_data.split(",", 1)[1]
+        try:
+            audio_byte_count += len(base64.b64decode(clean_data, validate=False))
+        except Exception:
+            pass
+        audio_chunk_count += 1
+        await websocket.send_json({"type": "audio_delta", "data": clean_data})
+
+    try:
+        async with httpx.AsyncClient(timeout=float(os.environ.get("QWEN_OMNI_TIMEOUT", "120"))) as client:
+            if not stream_response:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=request_body,
+                )
+                if response.status_code >= 400:
+                    message = response.text or "Qwen-Omni API 调用失败。"
+                    await websocket.send_json({"type": "error", "message": message[:1200]})
+                    return
+                data = response.json()
+                choices = data.get("choices") or []
+                message = (choices[0].get("message") if choices else {}) or {}
+                content = message.get("content")
+                if content:
+                    text_parts.append(str(content))
+                    await websocket.send_json({"type": "text", "role": "agent", "text": str(content)})
+                audio = message.get("audio") or {}
+                transcript = audio.get("transcript")
+                if transcript and not content:
+                    text_parts.append(str(transcript))
+                    await websocket.send_json({"type": "text", "role": "agent", "text": str(transcript)})
+                await send_audio_data(audio.get("data"))
+            else:
+                async with client.stream(
+                    "POST",
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=request_body,
+                ) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        message = body.decode("utf-8", errors="ignore") or "Qwen-Omni API 调用失败。"
+                        await websocket.send_json({"type": "error", "message": message[:1200]})
+                        return
+
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line.removeprefix("data:").strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except ValueError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        content = delta.get("content")
+                        if content:
+                            text_parts.append(str(content))
+                            await websocket.send_json({"type": "text", "role": "agent", "text": str(content)})
+                        audio = delta.get("audio") or {}
+                        await send_audio_data(audio.get("data"))
+                        transcript = audio.get("transcript")
+                        if transcript:
+                            await websocket.send_json({"type": "text", "role": "agent", "text": str(transcript)})
+        if text_parts:
+            await websocket.send_json({"type": "transcript", "role": "agent", "text": "".join(text_parts)})
+        if audio_chunk_count:
+            await websocket.send_json({"type": "status", "message": f"已收到 Omni 音频：{audio_chunk_count} 段，约 {audio_byte_count} 字节。"})
+            await websocket.send_json({"type": "audio_done"})
+        else:
+            await websocket.send_json({"type": "status", "message": "Qwen-Omni 本轮没有返回音频。"})
+    except httpx.HTTPError as exc:
+        await websocket.send_json({"type": "error", "message": f"无法连接 Qwen-Omni API：{exc}"})
 
 
 def find_report_by_interview_id(interview_id: str, user_id: str) -> dict | None:
@@ -1060,6 +1675,26 @@ def update_profile(body: dict | None = None, user: dict = Depends(require_auth))
     return {"profile": find_profile_by_user_id(user["id"])}
 
 
+@app.get("/api/profile/resume-analysis")
+def get_resume_analysis(user: dict = Depends(require_auth)):
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    current_hash = resume_source_hash(profile)
+    row = find_resume_analysis_by_user_id(user["id"])
+    serialized = serialize_resume_analysis(row)
+    return {
+        "resume_analysis": serialized,
+        "current_source_hash": current_hash,
+        "stale": bool(serialized and serialized.get("source_hash") != current_hash),
+    }
+
+
+@app.post("/api/profile/resume-analysis")
+def create_resume_analysis(body: dict | None = None, user: dict = Depends(require_auth)):
+    force = bool(json_body(body).get("force"))
+    return {"resume_analysis": ensure_resume_analysis_for_user(user, force=force)}
+
+
 @app.post("/api/interviews", status_code=201)
 def create_interview(body: dict | None = None, user: dict = Depends(require_auth)):
     interview = parse_interview_input(json_body(body))
@@ -1184,6 +1819,42 @@ def start_interview(interview_id: str, user: dict = Depends(require_auth)):
     return {"interview": find_interview_by_user_id(interview["id"], user["id"])}
 
 
+@app.post("/api/interviews/{interview_id}/opening-question")
+def create_opening_question(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能继续生成首问。")
+    messages = list_messages_by_interview_id(interview["id"])
+    if messages and not bool(json_body(body).get("force")):
+        raise error(409, "当前面试已有消息，不能重复生成首问。")
+
+    ensure_default_agents(interview["id"])
+    agents = list_agents_by_interview_id(interview["id"])
+    active_agent = next((agent for agent in agents if agent["status"] == "active"), None)
+    if not active_agent:
+        active_agent = next((agent for agent in agents if agent["status"] != "completed"), agents[0] if agents else None)
+
+    resume_analysis_row = ensure_resume_analysis_for_user(user)
+    analysis = resume_analysis_row.get("analysis") or {}
+    selected_resume_point = select_resume_point(analysis, interview, messages)
+    result = generate_opening_question(
+        interview=interview,
+        active_agent=active_agent,
+        resume_analysis=analysis,
+        selected_resume_point=selected_resume_point,
+    )
+    return {
+        "question": result["question"],
+        "provider": result.get("provider"),
+        "fallback": bool(result.get("fallback")),
+        "error": result.get("error"),
+        "selected_resume_point": selected_resume_point,
+        "resume_analysis": resume_analysis_row,
+    }
+
+
 @app.post("/api/interviews/{interview_id}/finish")
 def finish_interview(interview_id: str, user: dict = Depends(require_auth)):
     interview = find_interview_by_user_id(interview_id, user["id"])
@@ -1283,6 +1954,33 @@ def update_agent(interview_id: str, agent_id: str, body: dict | None = None, use
 def list_messages(interview_id: str, user: dict = Depends(require_auth)):
     interview = find_interview_by_user_id(interview_id, user["id"])
     if not interview:
+        owner = one(
+            "SELECT id, user_id, status, created_at, updated_at FROM interview_sessions WHERE id = ?",
+            (interview_id,),
+        )
+        reason = "missing_interview"
+        if owner:
+            reason = "owner_matches_current_user" if owner.get("user_id") == user["id"] else "owner_belongs_to_other_user"
+        print(
+            "Messages 404 debug:",
+            json.dumps(
+                {
+                    "interview_id": interview_id,
+                    "current_user_id": user["id"],
+                    "owner": owner,
+                    "reason": reason,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        if owner and owner.get("user_id") == user["id"]:
+            print(
+                "Messages 404 recovered:",
+                json.dumps({"interview_id": interview_id, "current_user_id": user["id"]}, ensure_ascii=False),
+                flush=True,
+            )
+            return {"messages": list_messages_by_interview_id(owner["id"]), "recovered": True}
         raise error(404, "面试不存在。")
     return {"messages": list_messages_by_interview_id(interview["id"])}
 
@@ -1321,6 +2019,41 @@ def create_message(interview_id: str, body: dict | None = None, user: dict = Dep
     return {"message": find_message_by_interview_id(message_id, interview["id"])}
 
 
+@app.post("/api/interviews/{interview_id}/follow-up")
+def generate_follow_up(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能继续生成追问。")
+    last_answer, message = read_text_field(json_body(body), "last_answer", "候选人回答", 20000, True)
+    if message:
+        raise error(400, message)
+
+    ensure_default_agents(interview["id"])
+    agents = list_agents_by_interview_id(interview["id"])
+    active_agent = next((agent for agent in agents if agent["status"] == "active"), None)
+    if not active_agent:
+        active_agent = next((agent for agent in agents if agent["status"] != "completed"), agents[0] if agents else None)
+    messages = list_messages_by_interview_id(interview["id"])
+    resume_analysis = None
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    if resume_source_text(profile):
+        resume_analysis = ensure_resume_analysis_for_user(user).get("analysis")
+    try:
+        follow_up = generate_kimi_followup(
+            interview=interview,
+            active_agent=active_agent,
+            messages=messages,
+            last_answer=last_answer,
+            resume_analysis=resume_analysis,
+        )
+    except KimiFollowupError as exc:
+        raise error(502, str(exc))
+    return follow_up
+
+
 @app.post("/api/interviews/{interview_id}/realtime/sdp", response_class=PlainTextResponse)
 async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends(require_auth)):
     interview = find_interview_by_user_id(interview_id, user["id"])
@@ -1331,21 +2064,26 @@ async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends
     api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY")
     if not api_key or api_key == "your-api-key-here":
         raise error(500, "服务端未配置 OPENAI_API_KEY，无法开启实时语音。")
-    sdp = (await request.body()).decode("utf-8").strip()
-    if not sdp:
+    sdp = (await request.body()).decode("utf-8")
+    if not sdp.strip():
         raise error(400, "缺少 WebRTC SDP offer。")
+    print(
+        "Realtime SDP received:",
+        {"length": len(sdp), "first_line": sdp.splitlines()[0] if sdp.splitlines() else ""},
+        flush=True,
+    )
 
     agents = list_agents_by_interview_id(interview["id"])
     messages = list_messages_by_interview_id(interview["id"])
     files = {
         "sdp": (None, sdp),
-        "session": (None, json.dumps(build_realtime_session_config(interview, agents, messages), ensure_ascii=False)),
+        "session": (None, json.dumps(build_openai_realtime_session_config(interview, agents, messages), ensure_ascii=False)),
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 "https://api.openai.com/v1/realtime/calls",
-                headers={"Authorization": f"Bearer {api_key}", "OpenAI-Safety-Identifier": hash_token(user["id"])},
+                headers={"Authorization": f"Bearer {api_key}"},
                 files=files,
             )
     except httpx.HTTPError as exc:
@@ -1353,12 +2091,273 @@ async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends
 
     if response.status_code >= 400:
         message = "创建实时语音会话失败。"
+        response_body = response.text or ""
         try:
-            message = response.json().get("error", {}).get("message") or message
+            data = response.json()
+            message = data.get("error", {}).get("message") or data.get("message") or message
         except ValueError:
-            message = response.text or message
+            message = response_body or message
+        print(
+            "OpenAI Realtime calls failed:",
+            response.status_code,
+            response_body[:2000],
+            flush=True,
+        )
         raise error(response.status_code, message)
     return PlainTextResponse(response.text, media_type="application/sdp")
+
+
+@app.post("/api/interviews/{interview_id}/qwen/tts")
+def qwen_tts(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    text, message = read_text_field(json_body(body), "text", "语音合成文本", 20000, True)
+    if message:
+        raise error(400, message)
+    return build_qwen_tts_response(text, provider_preference="standard")
+
+
+@app.post("/api/interviews/{interview_id}/qwen/realtime-tts")
+def qwen_realtime_tts(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    text, message = read_text_field(json_body(body), "text", "实时语音合成文本", 20000, True)
+    if message:
+        raise error(400, message)
+    return build_qwen_tts_response(text, provider_preference="realtime")
+
+
+@app.post("/api/interviews/{interview_id}/qwen/speech")
+def qwen_speech(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    payload = json_body(body)
+    text, message = read_text_field(payload, "text", "语音合成文本", 20000, True)
+    if message:
+        raise error(400, message)
+    provider = str(payload.get("provider") or "auto")
+    return build_qwen_tts_response(text, provider_preference=provider)
+
+
+@app.post("/api/interviews/{interview_id}/qwen/omni-realtime/sdp")
+async def qwen_omni_realtime_sdp(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能开启 Qwen-Omni Realtime。")
+
+    payload = json_body(body)
+    sdp = str(payload.get("sdp") or "")
+    offer_type = str(payload.get("type") or "offer")
+    if not sdp.strip() or offer_type != "offer":
+        raise error(400, "请提供有效的 WebRTC offer。")
+
+    api_key = _qwen_realtime_api_key()
+    if not api_key or api_key in {"your-dashscope-api-key", "your-api-key-here"}:
+        raise error(500, "服务端未配置 DASHSCOPE_API_KEY 或 QWEN_OMNI_REALTIME_API_KEY，无法开启 Qwen-Omni Realtime。")
+
+    agents = list_agents_by_interview_id(interview["id"])
+    messages = list_messages_by_interview_id(interview["id"])
+    session_config = build_realtime_session_config(interview, agents, messages)
+    session_config["provider"] = "qwen-omni-realtime-webrtc"
+    session_config["interview_id"] = interview_id
+    start_payload = {
+        "currentQuestion": str(payload.get("currentQuestion") or ""),
+        "activeAgent": str(payload.get("activeAgent") or ""),
+    }
+
+    try:
+        model = _qwen_realtime_model()
+        upstream_url = _qwen_realtime_webrtc_url(model)
+        session_update = build_qwen_realtime_session_update(session_config, start_payload)
+    except QwenRealtimeTtsError as exc:
+        raise error(500, str(exc))
+
+    try:
+        async with httpx.AsyncClient(timeout=float(os.environ.get("QWEN_OMNI_REALTIME_WEBRTC_TIMEOUT", "30"))) as client:
+            response = await client.post(
+                upstream_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/sdp",
+                    "Accept": "application/sdp",
+                },
+                content=sdp,
+            )
+    except httpx.HTTPError as exc:
+        raise error(502, f"无法连接 Qwen-Omni Realtime WebRTC：{exc}")
+
+    if response.status_code >= 400:
+        response_body = response.text or ""
+        message = response_body or "创建 Qwen-Omni Realtime WebRTC 会话失败。"
+        try:
+            data = response.json()
+            message = data.get("error", {}).get("message") or data.get("message") or message
+        except ValueError:
+            pass
+        print("Qwen-Omni WebRTC SDP failed:", response.status_code, response_body[:2000], flush=True)
+        raise error(response.status_code, message[:1200])
+
+    answer_sdp = response.text.strip()
+    if not answer_sdp:
+        raise error(502, "Qwen-Omni Realtime 未返回有效 SDP answer。")
+
+    return {
+        "provider": "qwen-omni-realtime-webrtc",
+        "model": model,
+        "answer": {"type": "answer", "sdp": answer_sdp},
+        "session_update": session_update,
+    }
+
+
+@app.post("/api/interviews/{interview_id}/qwen/omni-webrtc/offer")
+async def qwen_omni_webrtc_offer(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+    return await qwen_omni_realtime_sdp(interview_id, body, user)
+
+
+@app.post("/api/interviews/{interview_id}/qwen/omni-webrtc/stop")
+async def qwen_omni_webrtc_stop(interview_id: str, _body: dict | None = None, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    return {
+        "events": [
+            {
+                "type": "status",
+                "message": "Qwen-Omni WebRTC 已改为浏览器直连链路，断开连接不再需要服务端提交音频。",
+            }
+        ]
+    }
+
+
+@app.websocket("/ws/interviews/{interview_id}/qwen/omni-realtime")
+async def qwen_omni_realtime_ws(websocket: WebSocket, interview_id: str):
+    await websocket.accept()
+
+    user = find_user_by_session_token(websocket.cookies.get(SESSION_COOKIE_NAME))
+    if not user:
+        await websocket.send_json({"type": "error", "message": "请先登录后再连接千问 Omni 实时通话。"})
+        await websocket.close(code=1008)
+        return
+
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        await websocket.send_json({"type": "error", "message": "面试不存在。"})
+        await websocket.close(code=1008)
+        return
+    if interview["status"] == "completed":
+        await websocket.send_json({"type": "error", "message": "已完成的面试不能开启千问 Omni 实时通话。"})
+        await websocket.close(code=1008)
+        return
+
+    agents = list_agents_by_interview_id(interview["id"])
+    messages = list_messages_by_interview_id(interview["id"])
+    session_config = build_realtime_session_config(interview, agents, messages)
+    session_config["provider"] = "qwen-omni-self-hosted"
+    session_config["interview_id"] = interview_id
+
+    upstream_url = os.environ.get("QWEN_OMNI_REALTIME_WS_URL", "").strip()
+    if not upstream_url:
+        await websocket.send_json({"type": "status", "message": "未配置自部署 WS 网关，改用 Qwen-Omni 官方 HTTP API 试验模式。"})
+        audio_chunks: list[bytes] = []
+        start_payload: dict = {}
+        mime_type = "audio/webm"
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                if message.get("bytes") is not None:
+                    audio_chunks.append(message["bytes"])
+                    continue
+                if message.get("text") is None:
+                    continue
+                try:
+                    event = json.loads(message["text"])
+                except ValueError:
+                    continue
+                event_type = event.get("type")
+                if event_type == "start":
+                    start_payload = event
+                    mime_type = str(event.get("mimeType") or mime_type)
+                    await websocket.send_json({"type": "status", "message": "正在录音，停止后提交给 Qwen-Omni API。"})
+                if event_type == "stop":
+                    await websocket.send_json({"type": "status", "message": "录音已收到，正在请求 Qwen-Omni。"})
+                    latest_interview = find_interview_by_user_id(interview_id, user["id"]) or interview
+                    latest_agents = list_agents_by_interview_id(interview["id"])
+                    latest_messages = list_messages_by_interview_id(interview["id"])
+                    round_session_config = build_realtime_session_config(latest_interview, latest_agents, latest_messages)
+                    round_session_config["provider"] = "qwen-omni-http"
+                    round_session_config["interview_id"] = interview_id
+                    await _stream_qwen_omni_http_response(websocket, b"".join(audio_chunks), mime_type, round_session_config, start_payload)
+                    audio_chunks = []
+                    await websocket.send_json({"type": "status", "message": "本轮完成，可再次点击麦克风录下一轮。"})
+        except WebSocketDisconnect:
+            return
+        except Exception as exc:
+            await websocket.send_json({"type": "error", "message": f"Qwen-Omni HTTP 试验模式失败：{exc}"})
+            await websocket.close(code=1011)
+        return
+
+    try:
+        import asyncio
+        import websockets
+    except ImportError:
+        await websocket.send_json({"type": "error", "message": "服务端缺少 websockets 依赖，无法桥接自部署 Qwen-Omni。"})
+        await websocket.close(code=1011)
+        return
+
+    headers = {}
+    upstream_key = os.environ.get("QWEN_OMNI_REALTIME_API_KEY", "").strip()
+    if upstream_key:
+        headers["Authorization"] = f"Bearer {upstream_key}"
+
+    try:
+        async with websockets.connect(
+            upstream_url,
+            additional_headers=headers or None,
+            max_size=int(os.environ.get("QWEN_OMNI_REALTIME_MAX_MESSAGE_SIZE", "16777216")),
+        ) as upstream:
+            await upstream.send(json.dumps({"type": "session.start", "session": session_config}, ensure_ascii=False))
+            await websocket.send_json({"type": "status", "message": "已连接自部署 Qwen-Omni 网关。"})
+
+            async def forward_browser_to_upstream() -> None:
+                while True:
+                    message = await websocket.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        break
+                    if message.get("bytes") is not None:
+                        await upstream.send(message["bytes"])
+                    elif message.get("text") is not None:
+                        await upstream.send(message["text"])
+
+            async def forward_upstream_to_browser() -> None:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            done, pending = await asyncio.wait(
+                {
+                    asyncio.create_task(forward_browser_to_upstream()),
+                    asyncio.create_task(forward_upstream_to_browser()),
+                },
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                task.result()
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        await websocket.send_json({"type": "error", "message": f"千问 Omni 实时网关连接失败：{exc}"})
+        await websocket.close(code=1011)
 
 
 @app.post("/api/interviews/{interview_id}/evaluations", status_code=201)

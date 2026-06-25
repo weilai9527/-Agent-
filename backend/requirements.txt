@@ -2,3 +2,6 @@ fastapi
 uvicorn[standard]
 httpx
 pymysql
+dashscope
+websocket-client
+websockets

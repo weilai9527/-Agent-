@@ -8,9 +8,14 @@
   ],
   "scripts": {
     "dev:frontend": "npm run dev --workspace frontend",
+    "dev:admin": "npm run dev --prefix admin",
     "dev:backend": "npm run dev --workspace backend",
+    "dev:admin-backend": "npm run dev --prefix admin_backend",
     "build": "npm run build --workspace frontend",
+    "build:admin": "npm run build --prefix admin",
     "preview": "npm run preview --workspace frontend",
-    "start": "npm run start --workspace backend"
+    "preview:admin": "npm run preview --prefix admin",
+    "start": "npm run start --workspace backend",
+    "start:admin-backend": "npm run start --prefix admin_backend"
   }
 }

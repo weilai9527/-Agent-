@@ -1,0 +1,9 @@
+{
+  "name": "@multi-agent-interview/admin-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "uvicorn src.main:app --host 127.0.0.1 --port 3002 --reload",
+    "start": "uvicorn src.main:app --host 127.0.0.1 --port 3002"
+  }
+}

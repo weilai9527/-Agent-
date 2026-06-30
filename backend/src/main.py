@@ -4,6 +4,7 @@ import base64
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 import hashlib
+import io
 import json
 import math
 import os
@@ -15,7 +16,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
@@ -73,10 +74,12 @@ PROFILE_TEXT_FIELDS = [
     ("preferred_difficulty", "默认难度", 40, False),
     ("preferred_interviewer_style", "面试官风格", 60, False),
 ]
+MAX_RESUME_FILE_BYTES = 10 * 1024 * 1024
 INTERVIEW_STATUSES = {"draft", "running", "completed"}
 AGENT_STATUSES = {"pending", "active", "completed"}
 MESSAGE_SENDER_TYPES = {"agent", "candidate", "system"}
 MESSAGE_TYPES = {"question", "answer", "follow_up", "system", "transcript"}
+AGENT_QUESTION_MESSAGE_TYPES = {"question", "follow_up"}
 INTERVIEW_TEXT_FIELDS = [
     ("target_role", "目标岗位", 80),
     ("experience_level", "经验等级", 40),
@@ -853,12 +856,24 @@ def create_initial_question(interview: dict, agent: dict | None) -> str:
 
 def build_realtime_session_config(interview: dict, agents: list[dict], messages: list[dict]) -> dict:
     current_agent = next((agent for agent in agents if agent.get("status") == "active"), agents[0] if agents else None)
-    latest_questions = [message for message in messages if message["sender_type"] == "agent"]
+    latest_questions = [
+        message
+        for message in messages
+        if message["sender_type"] == "agent" and message.get("message_type") in AGENT_QUESTION_MESSAGE_TYPES
+    ]
     latest_question = latest_questions[-1]["content"] if latest_questions else create_initial_question(interview, current_agent)
     recent_messages = messages[-8:]
+
+    def speaker_label(message: dict) -> str:
+        if message["sender_type"] == "candidate":
+            return "候选人"
+        if message["sender_type"] == "system":
+            return "系统"
+        return message.get("agent_name") or "面试官"
+
     recent_context = "\n".join(
         [
-            f"{'候选人' if message['sender_type'] == 'candidate' else message.get('agent_name') or '面试官'}：{message.get('content') or ''}"
+            f"{speaker_label(message)}：{message.get('content') or ''}"
             for message in recent_messages
         ]
     ) or "暂无历史对话。"
@@ -867,7 +882,7 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
     recent_message_items = [
         {
             "sender_type": message["sender_type"],
-            "speaker": "候选人" if message["sender_type"] == "candidate" else message.get("agent_name") or "面试官",
+            "speaker": speaker_label(message),
             "content": message.get("content") or "",
         }
         for message in recent_messages
@@ -1673,6 +1688,111 @@ def update_profile(body: dict | None = None, user: dict = Depends(require_auth))
     db.execute("UPDATE users SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (profile["nickname"], user["id"]))
     db.commit()
     return {"profile": find_profile_by_user_id(user["id"])}
+
+
+def extract_text_from_resume_file(filename: str, content: bytes) -> tuple[str, str | None]:
+    """Extract plain text from an uploaded resume file."""
+    extension = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+
+    if extension in ("txt", "md", "json"):
+        return content.decode("utf-8", errors="replace").strip(), None
+
+    if extension == "pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            return "", "PDF 解析功能未启用（缺少 pypdf），请复制文字粘贴到文本框。"
+
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            return text.strip(), None
+        except Exception as exc:
+            return "", f"PDF 解析失败：{exc}"
+
+    if extension == "docx":
+        try:
+            from docx import Document
+        except ImportError:
+            return "", "Word 文档解析功能未启用（缺少 python-docx），请复制文字粘贴到文本框。"
+
+        try:
+            doc = Document(io.BytesIO(content))
+            lines = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if cells:
+                        lines.append(" | ".join(cells))
+            text = "\n".join(lines)
+            return text.strip(), None
+        except Exception as exc:
+            return "", f"Word 文档解析失败：{exc}"
+
+    if extension == "doc":
+        return "", "暂不支持 .doc 旧格式，请另存为 .docx 后重新上传。"
+
+    if extension in ("png", "jpg", "jpeg"):
+        try:
+            import pytesseract
+            from PIL import Image
+        except ImportError:
+            return "", "图片 OCR 功能未启用（缺少 pytesseract 或 Pillow），请复制文字粘贴到文本框。"
+
+        try:
+            image = Image.open(io.BytesIO(content))
+            try:
+                text = pytesseract.image_to_string(image, lang="chi_sim+eng")
+            except pytesseract.pytesseract.TesseractError as exc:
+                if "Error opening data file" not in str(exc) and "Failed loading language" not in str(exc):
+                    raise
+                text = pytesseract.image_to_string(image, lang="eng")
+            return text.strip(), None
+        except pytesseract.pytesseract.TesseractNotFoundError:
+            return "", "图片 OCR 功能未启用（缺少 Tesseract 引擎），请复制文字粘贴到文本框。"
+        except pytesseract.pytesseract.TesseractError as exc:
+            return "", f"图片 OCR 语言包不可用或识别失败：{exc}"
+        except Exception as exc:
+            return "", f"图片识别失败：{exc}"
+
+    if extension:
+        return "", f"不支持的文件格式：.{extension}"
+    return "", "不支持的文件格式，请上传 txt、md、json、PDF、Word 文档或图片。"
+
+
+@app.post("/api/profile/resume-upload")
+async def upload_resume_file(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_auth),
+):
+    content = await file.read()
+    if len(content) > MAX_RESUME_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="文件过大，请上传 10MB 以内的简历文件。")
+
+    text, error_message = extract_text_from_resume_file(file.filename or "", content)
+    if error_message:
+        raise HTTPException(status_code=422, detail=error_message)
+
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="文件内容为空或未能提取到文本，请检查文件或直接粘贴简历文本。")
+
+    saved_text = text[:12000]
+
+    ensure_profile(user)
+    db.execute(
+        "UPDATE profiles SET resume_text = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (saved_text, user["id"]),
+    )
+    db.commit()
+
+    return {
+        "filename": file.filename,
+        "text": saved_text,
+        "char_count": len(saved_text),
+        "original_char_count": len(text),
+        "truncated": len(text) > len(saved_text),
+        "profile": find_profile_by_user_id(user["id"]),
+    }
 
 
 @app.get("/api/profile/resume-analysis")

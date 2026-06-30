@@ -5,3 +5,8 @@ pymysql
 dashscope
 websocket-client
 websockets
+python-multipart
+pypdf
+python-docx
+pytesseract
+Pillow

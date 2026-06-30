@@ -356,6 +356,54 @@ function buildResumeAnalysis(text, fileName = '') {
   };
 }
 
+function normalizeAnalysisList(value, limit = 4) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, limit);
+}
+
+function buildBriefFromResumeAnalysis(analysis) {
+  if (!analysis || typeof analysis !== 'object') return '';
+
+  const sections = [];
+  const summary = String(analysis.candidate_summary || '').trim();
+  const skills = normalizeAnalysisList(analysis.core_skills, 6);
+  const risks = normalizeAnalysisList(analysis.risk_points, 3);
+  const projects = Array.isArray(analysis.projects) ? analysis.projects.filter((item) => item && typeof item === 'object').slice(0, 2) : [];
+  const questions = projects.flatMap((project) => normalizeAnalysisList(project.possible_questions, 2)).slice(0, 4);
+
+  if (summary) sections.push(`候选人概述：${summary}`);
+  if (skills.length) sections.push(`核心技能：${skills.join('、')}`);
+  if (projects.length) {
+    const projectText = projects
+      .map((project) => {
+        const name = String(project.name || '核心项目').trim();
+        const role = String(project.role || '').trim();
+        const highlights = normalizeAnalysisList(project.highlights, 3);
+        return `${name}${role ? `（${role}）` : ''}${highlights.length ? `：${highlights.join('、')}` : ''}`;
+      })
+      .join('；');
+    sections.push(`重点项目：${projectText}`);
+  }
+  if (questions.length) sections.push(`建议追问：${questions.join('；')}`);
+  if (risks.length) sections.push(`待验证点：${risks.join('、')}`);
+
+  return sections.join('\n');
+}
+
+function hasResumeAnalysisSource(profile) {
+  if (!profile || typeof profile !== 'object') return false;
+  return [
+    'target_role',
+    'experience_level',
+    'years_of_experience',
+    'education_level',
+    'skills',
+    'project_keywords',
+    'resume_text',
+    'project_experience',
+  ].some((field) => String(profile[field] || '').trim());
+}
+
 const authHighlights = [
   {
     title: '个人空间',
@@ -1538,6 +1586,7 @@ function ResumeAnalysisPage({ onUseSetup }) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -1565,7 +1614,7 @@ function ResumeAnalysisPage({ onUseSetup }) {
     };
   }, []);
 
-  const handleFileChange = (event) => {
+  const handleFileChange = async (event) => {
     const file = event.target.files?.[0];
     setFileName(file?.name || '');
     setMessage('');
@@ -1579,24 +1628,52 @@ function ResumeAnalysisPage({ onUseSetup }) {
     const extension = file.name.split('.').pop()?.toLowerCase();
     const readableTextExtensions = new Set(['txt', 'md', 'json']);
 
-    if (!readableTextExtensions.has(extension)) {
-      setAnalyzed(false);
-      setError('当前版本只会解析 txt、md、json 文本文件。PDF、Word、图片需要后端文件解析能力，暂时请复制简历文字粘贴到文本框。');
+    if (readableTextExtensions.has(extension)) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const nextText = String(reader.result || '').trim();
+        setResumeText(nextText);
+        setAnalysis(buildResumeAnalysis(nextText, file.name));
+        setAnalyzed(true);
+        setMessage(`已读取 ${file.name}，并刷新分析结果。`);
+      };
+      reader.onerror = () => {
+        setError('文件读取失败，请重新选择文件或直接粘贴简历文本。');
+      };
+      reader.readAsText(file);
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const nextText = String(reader.result || '').trim();
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await fetch(apiUrl('/api/profile/resume-upload'), {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail || data.error || '文件解析失败，请稍后再试。');
+      }
+
+      const nextText = String(data.text || '').trim();
+      if (!nextText) {
+        throw new Error('文件内容为空或未能提取到文本，请检查文件或直接粘贴简历文本。');
+      }
+
       setResumeText(nextText);
       setAnalysis(buildResumeAnalysis(nextText, file.name));
       setAnalyzed(true);
-      setMessage(`已读取 ${file.name}，并刷新分析结果。`);
-    };
-    reader.onerror = () => {
-      setError('文件读取失败，请重新选择文件或直接粘贴简历文本。');
-    };
-    reader.readAsText(file);
+      setProfile({ ...defaultProfile, ...(data.profile || profile || {}) });
+      setMessage(`已解析 ${file.name}（${data.char_count} 字符${data.truncated ? '，已保留前 12000 字符' : ''}），并刷新分析结果。`);
+    } catch (uploadError) {
+      setError(uploadError.message);
+      setAnalyzed(false);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleAnalyze = async () => {
@@ -1641,7 +1718,7 @@ function ResumeAnalysisPage({ onUseSetup }) {
             先解析真实简历，再生成岗位匹配、亮点风险、高概率追问和推荐面试配置，让后续多 Agent 面试更贴近候选人经历。
           </span>
         </div>
-        <button className="primary-action" onClick={handleAnalyze} disabled={analyzing}>
+        <button className="primary-action" onClick={handleAnalyze} disabled={analyzing || uploading}>
           <Sparkles size={17} />
           {analyzing ? '分析中' : '开始分析'}
         </button>
@@ -1656,9 +1733,9 @@ function ResumeAnalysisPage({ onUseSetup }) {
           <div className="resume-input-panel">
             <label className="resume-upload-box">
               <Upload size={24} />
-              <strong>{fileName || '上传简历文件'}</strong>
-              <span>支持 txt、md、json 文本解析；PDF、Word、图片请先复制文字粘贴。</span>
-              <input type="file" accept=".txt,.md,.json,.pdf,.doc,.docx,.png,.jpg,.jpeg" onChange={handleFileChange} />
+              <strong>{uploading ? '解析中...' : fileName || '上传简历文件'}</strong>
+              <span>支持 txt、md、json、PDF、Word 文档；图片 OCR 需部署环境安装 Tesseract。</span>
+              <input type="file" accept=".txt,.md,.json,.pdf,.doc,.docx,.png,.jpg,.jpeg" onChange={handleFileChange} disabled={uploading} />
             </label>
 
             <label className="brief-field">
@@ -1758,6 +1835,7 @@ function InsightList({ items, tone }) {
 }
 
 function SetupPage({ onStart }) {
+  const defaultBrief = '';
   const [form, setForm] = useState({
     role: setupOptions.roles[0],
     level: setupOptions.levels[2],
@@ -1766,20 +1844,23 @@ function SetupPage({ onStart }) {
     focusArea: setupOptions.focusAreas[0],
     intensity: setupOptions.intensity[1],
     style: setupOptions.styles[2],
-    brief:
-      '负责过中后台性能优化、低代码表单搭建和组件库治理，希望重点练习项目深挖与架构表达。',
+    brief: defaultBrief,
   });
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
+  const briefTouchedRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
 
-    apiRequest('/api/profile')
-      .then((data) => {
+    async function loadSetupDefaults() {
+      try {
+        const data = await apiRequest('/api/profile');
         if (!mounted) return;
         const profile = data.profile || {};
+        const profileBrief = profile.project_experience || profile.resume_text || defaultBrief;
+
         setForm((current) => ({
           ...current,
           role: profile.target_role || current.role,
@@ -1787,15 +1868,28 @@ function SetupPage({ onStart }) {
           interviewType: profile.preferred_interview_type || current.interviewType,
           intensity: profile.preferred_difficulty || current.intensity,
           style: profile.preferred_interviewer_style || current.style,
-          brief: profile.project_experience || profile.resume_text || current.brief,
+          brief: briefTouchedRef.current ? current.brief : profileBrief,
         }));
-      })
-      .catch((requestError) => {
+
+        if (hasResumeAnalysisSource(profile)) {
+          const analysisData = await apiRequest('/api/profile/resume-analysis', { method: 'POST' });
+          if (!mounted) return;
+          const analysisBrief = buildBriefFromResumeAnalysis(analysisData.resume_analysis?.analysis);
+          if (analysisBrief) {
+            setForm((current) => ({
+              ...current,
+              brief: briefTouchedRef.current ? current.brief : analysisBrief,
+            }));
+          }
+        }
+      } catch (requestError) {
         if (mounted) setError(requestError.message);
-      })
-      .finally(() => {
+      } finally {
         if (mounted) setLoadingProfile(false);
-      });
+      }
+    }
+
+    loadSetupDefaults();
 
     return () => {
       mounted = false;
@@ -1898,7 +1992,14 @@ function SetupPage({ onStart }) {
             />
             <label className="brief-field">
               <span>简历 / 项目简介</span>
-              <textarea value={form.brief} onChange={(event) => updateForm('brief', event.target.value)} />
+              <textarea
+                value={form.brief}
+                placeholder="可填写你的简历摘要、核心项目、希望重点练习的方向"
+                onChange={(event) => {
+                  briefTouchedRef.current = true;
+                  updateForm('brief', event.target.value);
+                }}
+              />
             </label>
           </div>
         </Card>

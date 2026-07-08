@@ -49,7 +49,7 @@ def _get_endpoint() -> str:
 
 def _get_ssl_options() -> dict:
     ssl_cert_file = os.environ.get("SSL_CERT_FILE") or os.environ.get("WEBSOCKET_CLIENT_CA_BUNDLE")
-    if ssl_cert_file:
+    if ssl_cert_file and os.path.isfile(ssl_cert_file):
         return {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": ssl_cert_file}
     return {"cert_reqs": ssl.CERT_REQUIRED}
 

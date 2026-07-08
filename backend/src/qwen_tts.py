@@ -27,7 +27,7 @@ def _load_dashscope():
         raise QwenTtsError("服务端未配置 DASHSCOPE_API_KEY，无法使用千问语音合成。")
 
     ssl_cert_file = os.environ.get("SSL_CERT_FILE") or os.environ.get("WEBSOCKET_CLIENT_CA_BUNDLE")
-    if ssl_cert_file:
+    if ssl_cert_file and os.path.isfile(ssl_cert_file):
         os.environ["WEBSOCKET_CLIENT_CA_BUNDLE"] = ssl_cert_file
         os.environ.setdefault("REQUESTS_CA_BUNDLE", ssl_cert_file)
 

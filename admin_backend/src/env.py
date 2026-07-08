@@ -17,4 +17,8 @@ def load_env_file(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
-load_env_file(Path(__file__).resolve().parents[1] / ".env")
+ADMIN_BACKEND_DIR = Path(__file__).resolve().parents[1]
+PROJECT_DIR = ADMIN_BACKEND_DIR.parent
+
+load_env_file(PROJECT_DIR / "backend" / ".env")
+load_env_file(ADMIN_BACKEND_DIR / ".env")

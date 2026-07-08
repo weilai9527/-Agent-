@@ -1,32 +1,40 @@
-from pathlib import Path
+from __future__ import annotations
+
 import os
+from pathlib import Path
 
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
 
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    if not key:
+        return None
 
-def _unquote(value: str) -> str:
     value = value.strip()
-    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-        return value[1:-1]
-    return value
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return key, value
 
 
-def load_env() -> None:
-    env_path = BACKEND_DIR / ".env"
-    if not env_path.exists():
+def load_env_file() -> None:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.is_file():
         return
 
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_env_line(raw_line)
+        if not parsed:
             continue
-
-        key, value = stripped.split("=", 1)
-        key = key.strip()
-        value = _unquote(value)
-        if key and key not in os.environ:
-            os.environ[key] = value
+        key, value = parsed
+        os.environ.setdefault(key, value)
 
 
-load_env()
+def normalize_certificate_env() -> None:
+    for key in ("SSL_CERT_FILE", "WEBSOCKET_CLIENT_CA_BUNDLE", "REQUESTS_CA_BUNDLE"):
+        value = os.environ.get(key, "").strip()
+        if value and not Path(value).is_file():
+            os.environ.pop(key, None)

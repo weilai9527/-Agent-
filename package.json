@@ -7,6 +7,8 @@
     "backend"
   ],
   "scripts": {
+    "terminal:utf8": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/use-utf8.ps1",
+    "db:init:mysql": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/init-mysql-db.ps1",
     "dev:frontend": "npm run dev --workspace frontend",
     "dev:admin": "npm run dev --prefix admin",
     "dev:backend": "npm run dev --workspace backend",

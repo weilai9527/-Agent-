@@ -5,13 +5,14 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 
 from . import env  # noqa: F401
 
 
 ADMIN_BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = ADMIN_BACKEND_DIR.parent
-DB_ENGINE = os.environ.get("DB_ENGINE", "sqlite").strip().lower()
+DB_ENGINE = os.environ.get("DB_ENGINE", "mysql").strip().lower()
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH") or PROJECT_DIR / "backend" / "data" / "dev.sqlite")
 
 
@@ -51,7 +52,7 @@ def _normalize_sql(sql: str) -> str:
 class MySQLDatabase:
     def __init__(self, cfg: MySQLConfig):
         self.cfg = cfg
-        self._conn = None
+        self._local = threading.local()
 
     def _ensure_database(self) -> None:
         pymysql = _load_pymysql()
@@ -75,11 +76,12 @@ class MySQLDatabase:
             conn.close()
 
     def connect(self):
-        if self._conn:
-            return self._conn
+        conn = getattr(self._local, "conn", None)
+        if conn and getattr(conn, "open", False):
+            return conn
         self._ensure_database()
         pymysql = _load_pymysql()
-        self._conn = pymysql.connect(
+        conn = pymysql.connect(
             host=self.cfg.host,
             port=self.cfg.port,
             user=self.cfg.user,
@@ -89,12 +91,20 @@ class MySQLDatabase:
             autocommit=False,
             cursorclass=pymysql.cursors.DictCursor,
         )
-        return self._conn
+        self._local.conn = conn
+        return conn
 
     def execute(self, sql: str, params: tuple = ()):
-        cursor = self.connect().cursor()
-        cursor.execute(_normalize_sql(sql), params)
-        return cursor
+        conn = self.connect()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(_normalize_sql(sql), params)
+            return cursor
+        except Exception:
+            cursor.close()
+            if not getattr(conn, "open", False):
+                self._local.conn = None
+            raise
 
 
 class SQLiteDatabase:

@@ -20,6 +20,11 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, Up
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from .env import load_env_file, normalize_certificate_env
+
+load_env_file()
+normalize_certificate_env()
+
 from .database import all_rows, db, get_database_path, one
 from .kimi_followup import KimiFollowupError, analyze_resume, generate_kimi_followup, generate_opening_question
 from .qwen_realtime_tts import QwenRealtimeTtsError, get_qwen_realtime_tts_media_type, stream_qwen_realtime_tts
@@ -33,7 +38,6 @@ from .security import (
     sanitize_user,
     verify_password,
 )
-
 
 app = FastAPI(title="Multi Agent Interview API")
 

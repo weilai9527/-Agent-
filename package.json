@@ -10,14 +10,14 @@
     "terminal:utf8": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/use-utf8.ps1",
     "db:init:mysql": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/init-mysql-db.ps1",
     "dev:frontend": "npm run dev --workspace frontend",
-    "dev:admin": "npm run dev --prefix admin",
+    "dev:admin": "npm --prefix admin run dev",
     "dev:backend": "npm run dev --workspace backend",
-    "dev:admin-backend": "npm run dev --prefix admin_backend",
+    "dev:admin-backend": "npm --prefix admin_backend run dev",
     "build": "npm run build --workspace frontend",
-    "build:admin": "npm run build --prefix admin",
+    "build:admin": "npm --prefix admin run build",
     "preview": "npm run preview --workspace frontend",
-    "preview:admin": "npm run preview --prefix admin",
+    "preview:admin": "npm --prefix admin run preview",
     "start": "npm run start --workspace backend",
-    "start:admin-backend": "npm run start --prefix admin_backend"
+    "start:admin-backend": "npm --prefix admin_backend run start"
   }
 }

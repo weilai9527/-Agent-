@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, Up
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from .env import load_env_file, normalize_certificate_env
+from .env import first_env_value, load_env_file, normalize_certificate_env
 
 load_env_file()
 normalize_certificate_env()
@@ -344,10 +344,10 @@ def find_user_by_session(request: Request) -> dict | None:
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token_hash = ?
-          AND sessions.expires_at > CURRENT_TIMESTAMP
+          AND sessions.expires_at > ?
           AND users.status = 'normal'
         """,
-        (hash_token(token),),
+        (hash_token(token), now_iso_after(0)),
     )
 
 
@@ -360,10 +360,10 @@ def find_user_by_session_token(token: str | None) -> dict | None:
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token_hash = ?
-          AND sessions.expires_at > CURRENT_TIMESTAMP
+          AND sessions.expires_at > ?
           AND users.status = 'normal'
         """,
-        (hash_token(token),),
+        (hash_token(token), now_iso_after(0)),
     )
 
 
@@ -1168,12 +1168,7 @@ def _qwen_realtime_model() -> str:
 
 
 def _qwen_realtime_api_key() -> str:
-    return (
-        os.environ.get("QWEN_OMNI_REALTIME_API_KEY")
-        or os.environ.get("QWEN_OMNI_API_KEY")
-        or os.environ.get("DASHSCOPE_API_KEY")
-        or ""
-    ).strip()
+    return first_env_value("QWEN_OMNI_REALTIME_API_KEY", "QWEN_OMNI_API_KEY", "DASHSCOPE_API_KEY")
 
 
 def _qwen_realtime_webrtc_url(model: str) -> str:
@@ -1183,11 +1178,22 @@ def _qwen_realtime_webrtc_url(model: str) -> str:
 
     configured_endpoint = os.environ.get("QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT", "").strip()
     if not configured_endpoint:
-        raise QwenRealtimeTtsError(
-            "Qwen-Omni WebRTC 需要配置白名单 Endpoint：请设置 QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT "
-            "或完整的 QWEN_OMNI_REALTIME_WEBRTC_URL。普通 dashscope.aliyuncs.com 域名仅用于 WebSocket，"
-            "不能直接作为 WebRTC SDP 交换地址。"
-        )
+        workspace_id = first_env_value("QWEN_OMNI_REALTIME_WORKSPACE_ID", "DASHSCOPE_WORKSPACE_ID")
+        if not workspace_id:
+            raise QwenRealtimeTtsError(
+                "Qwen-Omni WebRTC 缺少 Workspace ID：请配置 QWEN_OMNI_REALTIME_WORKSPACE_ID "
+                "或 DASHSCOPE_WORKSPACE_ID，也可以直接配置 QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT。"
+            )
+        region = first_env_value("QWEN_OMNI_REALTIME_REGION", "DASHSCOPE_TTS_REGION").lower() or "beijing"
+        if region in {"beijing", "cn", "cn-beijing"}:
+            domain = f"{workspace_id}.cn-beijing.maas.aliyuncs.com"
+        elif region in {"singapore", "intl", "international", "ap-southeast-1"}:
+            domain = f"{workspace_id}.ap-southeast-1.maas.aliyuncs.com"
+        else:
+            raise QwenRealtimeTtsError(
+                "QWEN_OMNI_REALTIME_REGION 仅支持 beijing/cn 或 singapore/ap-southeast-1。"
+            )
+        configured_endpoint = f"https://{domain}/api/v1/webrtc/realtime"
 
     endpoint = configured_endpoint
     if not endpoint.startswith(("http://", "https://")):
@@ -1249,8 +1255,8 @@ def build_qwen_realtime_session_update(session_config: dict, start_payload: dict
 
 
 async def _stream_qwen_omni_http_response(websocket: WebSocket, audio_bytes: bytes, mime_type: str, session_config: dict, start_payload: dict) -> None:
-    api_key = os.environ.get("QWEN_OMNI_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
-    if not api_key or api_key in {"your-dashscope-api-key", "your-api-key-here"}:
+    api_key = first_env_value("QWEN_OMNI_API_KEY", "DASHSCOPE_API_KEY")
+    if not api_key:
         await websocket.send_json({"type": "error", "message": "请先配置 DASHSCOPE_API_KEY 或 QWEN_OMNI_API_KEY。"})
         return
     if not audio_bytes:
@@ -2185,9 +2191,9 @@ async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends
         raise error(404, "面试不存在。")
     if interview["status"] == "completed":
         raise error(409, "已完成的面试不能开启语音通话。")
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY")
-    if not api_key or api_key == "your-api-key-here":
-        raise error(500, "服务端未配置 OPENAI_API_KEY，无法开启实时语音。")
+    api_key = first_env_value("OPENAI_REALTIME_API_KEY", "OPENAI_API_KEY", "AI_API_KEY")
+    if not api_key:
+        raise error(500, "服务端未配置 OPENAI_REALTIME_API_KEY 或 OPENAI_API_KEY，无法开启实时语音。")
     sdp = (await request.body()).decode("utf-8")
     if not sdp.strip():
         raise error(400, "缺少 WebRTC SDP offer。")
@@ -2281,7 +2287,7 @@ async def qwen_omni_realtime_sdp(interview_id: str, body: dict | None = None, us
         raise error(400, "请提供有效的 WebRTC offer。")
 
     api_key = _qwen_realtime_api_key()
-    if not api_key or api_key in {"your-dashscope-api-key", "your-api-key-here"}:
+    if not api_key:
         raise error(500, "服务端未配置 DASHSCOPE_API_KEY 或 QWEN_OMNI_REALTIME_API_KEY，无法开启 Qwen-Omni Realtime。")
 
     agents = list_agents_by_interview_id(interview["id"])
@@ -2436,7 +2442,7 @@ async def qwen_omni_realtime_ws(websocket: WebSocket, interview_id: str):
         return
 
     headers = {}
-    upstream_key = os.environ.get("QWEN_OMNI_REALTIME_API_KEY", "").strip()
+    upstream_key = first_env_value("QWEN_OMNI_REALTIME_API_KEY", "QWEN_OMNI_API_KEY", "DASHSCOPE_API_KEY")
     if upstream_key:
         headers["Authorization"] = f"Bearer {upstream_key}"
 

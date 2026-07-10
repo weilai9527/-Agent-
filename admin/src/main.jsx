@@ -39,6 +39,11 @@ const emptyAdminData = {
     qwenTtsVoice: '-',
     qwenTtsRegion: 'beijing',
     qwenTtsWorkspaceId: '',
+    qwenOmniModel: 'qwen3.5-omni-plus-realtime',
+    qwenOmniVoice: 'Tina',
+    qwenOmniRegion: 'beijing',
+    qwenOmniWorkspaceId: '',
+    qwenOmniEndpoint: '',
     reviewRule: '-',
   },
 };
@@ -431,12 +436,18 @@ function SettingsPage({ data, onSettingsSaved }) {
     qwenTtsVoice: settings.qwenTtsVoice === '-' ? '' : settings.qwenTtsVoice,
     qwenTtsRegion: settings.qwenTtsRegion || 'beijing',
     qwenTtsWorkspaceId: settings.qwenTtsWorkspaceId || '',
+    qwenOmniModel: settings.qwenOmniModel || 'qwen3.5-omni-plus-realtime',
+    qwenOmniVoice: settings.qwenOmniVoice || 'Tina',
+    qwenOmniRegion: settings.qwenOmniRegion || 'beijing',
+    qwenOmniWorkspaceId: settings.qwenOmniWorkspaceId || '',
+    qwenOmniEndpoint: settings.qwenOmniEndpoint || '',
   });
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [saveError, setSaveError] = useState('');
   const openaiReady = Boolean(settings.openaiApiKeyConfigured);
   const dashscopeReady = Boolean(settings.dashscopeApiKeyConfigured);
+  const qwenOmniReady = Boolean(settings.qwenOmniApiKeyConfigured);
 
   useEffect(() => {
     setForm((current) => ({
@@ -447,6 +458,11 @@ function SettingsPage({ data, onSettingsSaved }) {
       qwenTtsVoice: settings.qwenTtsVoice === '-' ? '' : settings.qwenTtsVoice,
       qwenTtsRegion: settings.qwenTtsRegion || 'beijing',
       qwenTtsWorkspaceId: settings.qwenTtsWorkspaceId || '',
+      qwenOmniModel: settings.qwenOmniModel || 'qwen3.5-omni-plus-realtime',
+      qwenOmniVoice: settings.qwenOmniVoice || 'Tina',
+      qwenOmniRegion: settings.qwenOmniRegion || 'beijing',
+      qwenOmniWorkspaceId: settings.qwenOmniWorkspaceId || '',
+      qwenOmniEndpoint: settings.qwenOmniEndpoint || '',
     }));
   }, [
     settings.openaiRealtimeModel,
@@ -455,6 +471,11 @@ function SettingsPage({ data, onSettingsSaved }) {
     settings.qwenTtsVoice,
     settings.qwenTtsRegion,
     settings.qwenTtsWorkspaceId,
+    settings.qwenOmniModel,
+    settings.qwenOmniVoice,
+    settings.qwenOmniRegion,
+    settings.qwenOmniWorkspaceId,
+    settings.qwenOmniEndpoint,
   ]);
 
   const updateForm = (key, value) => setForm((current) => ({ ...current, [key]: value }));
@@ -494,6 +515,13 @@ function SettingsPage({ data, onSettingsSaved }) {
               <div>
                 <strong>千问语音合成</strong>
                 <span>{dashscopeReady ? `已配置 ${settings.dashscopeApiKeyMasked}` : '待配置 DashScope Key'}</span>
+              </div>
+            </div>
+            <div className={`settings-status ${qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? 'ready' : 'missing'}`}>
+              {qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+              <div>
+                <strong>Qwen Omni WebRTC</strong>
+                <span>{qwenOmniReady ? `密钥已配置 ${settings.qwenOmniApiKeyMasked}` : '待配置 DashScope Key'}</span>
               </div>
             </div>
           </div>
@@ -574,6 +602,48 @@ function SettingsPage({ data, onSettingsSaved }) {
                 <small>仅新加坡地域需要，用来拼接专属 WebSocket 接入地址。</small>
               </label>
             </div>
+          </div>
+
+          <div className="provider-card">
+            <div className="provider-card-header">
+              <div>
+                <KeyRound size={18} />
+                <div>
+                  <h3>Qwen-Omni Realtime WebRTC</h3>
+                  <p>浏览器与千问实时模型直连音频，后端仅代理 SDP 鉴权和会话配置。</p>
+                </div>
+              </div>
+              <span className={`provider-pill ${qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? 'ready' : 'missing'}`}>
+                {qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? '可联调' : '缺少配置'}
+              </span>
+            </div>
+            <div className="field-grid">
+              <label className="field-block">
+                <span>Realtime 模型</span>
+                <input value={form.qwenOmniModel} onChange={(event) => updateForm('qwenOmniModel', event.target.value)} placeholder="qwen3.5-omni-plus-realtime" />
+              </label>
+              <label className="field-block">
+                <span>输出音色</span>
+                <input value={form.qwenOmniVoice} onChange={(event) => updateForm('qwenOmniVoice', event.target.value)} placeholder="Tina" />
+              </label>
+            </div>
+            <div className="field-grid">
+              <label className="field-block">
+                <span>地域</span>
+                <input value={form.qwenOmniRegion} onChange={(event) => updateForm('qwenOmniRegion', event.target.value)} placeholder="beijing" />
+                <small>支持 beijing/cn 或 singapore/ap-southeast-1。</small>
+              </label>
+              <label className="field-block">
+                <span>Workspace ID</span>
+                <input value={form.qwenOmniWorkspaceId} onChange={(event) => updateForm('qwenOmniWorkspaceId', event.target.value)} placeholder="百炼业务空间 ID" />
+                <small>后端会根据地域自动生成官方 WebRTC Endpoint。</small>
+              </label>
+            </div>
+            <label className="field-block">
+              <span>自定义 WebRTC Endpoint（可选）</span>
+              <input value={form.qwenOmniEndpoint} onChange={(event) => updateForm('qwenOmniEndpoint', event.target.value)} placeholder="https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/webrtc/realtime" />
+              <small>仅代理、自定义域名或特殊部署需要填写；常规接入留空即可。</small>
+            </label>
           </div>
 
           <div className="settings-note">

@@ -6,6 +6,8 @@ import re
 import threading
 from collections.abc import Iterator
 
+from .env import valid_env_value
+
 
 class QwenTtsError(RuntimeError):
     pass
@@ -22,8 +24,8 @@ def _load_dashscope():
     except ImportError as exc:
         raise QwenTtsError("服务端未安装 dashscope，无法使用千问语音合成。") from exc
 
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
-    if not api_key or api_key == "your-dashscope-api-key":
+    api_key = valid_env_value("DASHSCOPE_API_KEY")
+    if not api_key:
         raise QwenTtsError("服务端未配置 DASHSCOPE_API_KEY，无法使用千问语音合成。")
 
     ssl_cert_file = os.environ.get("SSL_CERT_FILE") or os.environ.get("WEBSOCKET_CLIENT_CA_BUNDLE")

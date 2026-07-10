@@ -90,6 +90,34 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+PLACEHOLDER_VALUES = {
+    "your-api-key-here",
+    "your-dashscope-api-key",
+    "your-kimi-api-key-here",
+    "your-deepseek-api-key-here",
+    "placeholder",
+}
+
+
+def is_placeholder_secret(value: str | None) -> bool:
+    cleaned = (value or "").strip().lower()
+    if not cleaned:
+        return False
+    return (
+        cleaned in PLACEHOLDER_VALUES
+        or cleaned.startswith("your-")
+        or "api-key-here" in cleaned
+    )
+
+
+def configured_secret(env_values: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = (env_values.get(key) or os.environ.get(key, "")).strip()
+        if value and not is_placeholder_secret(value):
+            return value
+    return ""
+
+
 def write_env_values(path: Path, updates: dict[str, str]) -> None:
     existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     seen: set[str] = set()
@@ -123,8 +151,14 @@ def mask_secret(value: str | None) -> str:
 
 def build_settings() -> dict[str, Any]:
     backend_env = read_env_file(USER_BACKEND_ENV_PATH)
-    openai_key = backend_env.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-    dashscope_key = backend_env.get("DASHSCOPE_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
+    openai_key = configured_secret(backend_env, "OPENAI_REALTIME_API_KEY", "OPENAI_API_KEY")
+    dashscope_key = configured_secret(backend_env, "DASHSCOPE_API_KEY")
+    qwen_omni_key = configured_secret(
+        backend_env,
+        "QWEN_OMNI_REALTIME_API_KEY",
+        "QWEN_OMNI_API_KEY",
+        "DASHSCOPE_API_KEY",
+    )
     return {
         "openaiRealtimeModel": backend_env.get("OPENAI_REALTIME_MODEL") or os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-2"),
         "openaiVoice": backend_env.get("OPENAI_REALTIME_VOICE") or os.environ.get("OPENAI_REALTIME_VOICE", "marin"),
@@ -132,11 +166,18 @@ def build_settings() -> dict[str, Any]:
         "qwenTtsVoice": backend_env.get("DASHSCOPE_TTS_VOICE") or os.environ.get("DASHSCOPE_TTS_VOICE", "longanyang"),
         "qwenTtsRegion": backend_env.get("DASHSCOPE_TTS_REGION") or os.environ.get("DASHSCOPE_TTS_REGION", "beijing"),
         "qwenTtsWorkspaceId": backend_env.get("DASHSCOPE_WORKSPACE_ID") or os.environ.get("DASHSCOPE_WORKSPACE_ID", ""),
+        "qwenOmniModel": backend_env.get("QWEN_OMNI_REALTIME_MODEL") or os.environ.get("QWEN_OMNI_REALTIME_MODEL", "qwen3.5-omni-plus-realtime"),
+        "qwenOmniVoice": backend_env.get("QWEN_OMNI_REALTIME_VOICE") or os.environ.get("QWEN_OMNI_REALTIME_VOICE", "Tina"),
+        "qwenOmniRegion": backend_env.get("QWEN_OMNI_REALTIME_REGION") or os.environ.get("QWEN_OMNI_REALTIME_REGION", "beijing"),
+        "qwenOmniWorkspaceId": backend_env.get("QWEN_OMNI_REALTIME_WORKSPACE_ID") or backend_env.get("DASHSCOPE_WORKSPACE_ID") or os.environ.get("QWEN_OMNI_REALTIME_WORKSPACE_ID") or os.environ.get("DASHSCOPE_WORKSPACE_ID", ""),
+        "qwenOmniEndpoint": backend_env.get("QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT") or os.environ.get("QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT", ""),
         "reviewRule": "低于 70 分自动进入复核",
         "openaiApiKeyConfigured": bool(openai_key and openai_key != "your-api-key-here"),
         "openaiApiKeyMasked": mask_secret(openai_key),
         "dashscopeApiKeyConfigured": bool(dashscope_key),
         "dashscopeApiKeyMasked": mask_secret(dashscope_key),
+        "qwenOmniApiKeyConfigured": bool(qwen_omni_key),
+        "qwenOmniApiKeyMasked": mask_secret(qwen_omni_key),
         "envPath": str(USER_BACKEND_ENV_PATH),
     }
 
@@ -435,7 +476,7 @@ def agent_detail(agent_name: str):
 async def update_settings(request: Request):
     body = await request.json()
     allowed_fields = {
-        "OPENAI_API_KEY": "openaiApiKey",
+        "OPENAI_REALTIME_API_KEY": "openaiApiKey",
         "OPENAI_REALTIME_MODEL": "openaiRealtimeModel",
         "OPENAI_REALTIME_VOICE": "openaiVoice",
         "DASHSCOPE_API_KEY": "dashscopeApiKey",
@@ -443,6 +484,11 @@ async def update_settings(request: Request):
         "DASHSCOPE_TTS_VOICE": "qwenTtsVoice",
         "DASHSCOPE_TTS_REGION": "qwenTtsRegion",
         "DASHSCOPE_WORKSPACE_ID": "qwenTtsWorkspaceId",
+        "QWEN_OMNI_REALTIME_MODEL": "qwenOmniModel",
+        "QWEN_OMNI_REALTIME_VOICE": "qwenOmniVoice",
+        "QWEN_OMNI_REALTIME_REGION": "qwenOmniRegion",
+        "QWEN_OMNI_REALTIME_WORKSPACE_ID": "qwenOmniWorkspaceId",
+        "QWEN_OMNI_REALTIME_WEBRTC_ENDPOINT": "qwenOmniEndpoint",
     }
     updates: dict[str, str] = {}
     for env_key, body_key in allowed_fields.items():

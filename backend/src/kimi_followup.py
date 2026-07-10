@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from .env import first_env_value, is_placeholder_value
+
 
 class KimiFollowupError(RuntimeError):
     pass
@@ -29,15 +31,11 @@ class FollowupProvider:
 
 
 def _first_env(*names: str) -> str:
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return ""
+    return first_env_value(*names)
 
 
 def _valid_key(value: str) -> bool:
-    return bool(value and not value.startswith("your-"))
+    return bool(value and not is_placeholder_value(value))
 
 
 def _provider_config(name: str) -> FollowupProvider | None:
@@ -56,7 +54,7 @@ def _provider_config(name: str) -> FollowupProvider | None:
             max_tokens=int(os.environ.get("KIMI_MAX_TOKENS", "160")),
         )
     if normalized == "deepseek":
-        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        api_key = _first_env("DEEPSEEK_API_KEY")
         if not _valid_key(api_key):
             return None
         return FollowupProvider(
@@ -82,7 +80,7 @@ def _provider_config(name: str) -> FollowupProvider | None:
             max_tokens=int(os.environ.get("QWEN_MAX_TOKENS", "160")),
         )
     if normalized == "openai":
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = _first_env("OPENAI_API_KEY")
         if not _valid_key(api_key):
             return None
         return FollowupProvider(
@@ -95,7 +93,7 @@ def _provider_config(name: str) -> FollowupProvider | None:
             max_tokens=int(os.environ.get("OPENAI_FOLLOWUP_MAX_TOKENS", "160")),
         )
     if normalized in {"custom", "ai"}:
-        api_key = os.environ.get("AI_API_KEY", "")
+        api_key = _first_env("AI_API_KEY")
         if not _valid_key(api_key):
             return None
         return FollowupProvider(

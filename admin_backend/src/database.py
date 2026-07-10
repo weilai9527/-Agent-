@@ -88,7 +88,7 @@ class MySQLDatabase:
             password=self.cfg.password,
             database=self.cfg.database,
             charset=self.cfg.charset,
-            autocommit=False,
+            autocommit=True,
             cursorclass=pymysql.cursors.DictCursor,
         )
         self._local.conn = conn

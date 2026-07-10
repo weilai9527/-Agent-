@@ -2158,6 +2158,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const omniWebrtcAudioTrackRef = useRef(null);
   const omniWebrtcSessionUpdateRef = useRef(null);
   const omniWebrtcSessionUpdatedRef = useRef(false);
+  const omniWebrtcOpeningRequestedRef = useRef(false);
   const omniWebrtcCandidateTranscriptRef = useRef('');
   const omniWebrtcAgentTranscriptRef = useRef('');
   const qwenAudioRef = useRef(null);
@@ -2499,6 +2500,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     omniWebrtcAudioTrackRef.current = null;
     omniWebrtcSessionUpdateRef.current = null;
     omniWebrtcSessionUpdatedRef.current = false;
+    omniWebrtcOpeningRequestedRef.current = false;
     omniWebrtcCandidateTranscriptRef.current = '';
     omniWebrtcAgentTranscriptRef.current = '';
     omniWebrtcSessionIdRef.current = '';
@@ -2727,17 +2729,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
     channel.send(JSON.stringify(sessionUpdate));
     omniWebrtcSessionUpdatedRef.current = true;
-    window.setTimeout(() => {
-      if (channel.readyState !== 'open') return;
-      channel.send(JSON.stringify({
-        event_id: `event_${Date.now()}`,
-        type: 'response.create',
-        response: {
-          modalities: ['text', 'audio'],
-          instructions: `请用一句自然的中文电话面试开场白开始，并提出当前问题：${currentQuestion}`,
-        },
-      }));
-    }, 100);
     if (omniWebrtcAudioTrackRef.current) {
       omniWebrtcAudioTrackRef.current.enabled = true;
     }
@@ -2745,13 +2736,29 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setOmniMessage('Qwen-Omni WebRTC 已接通，请直接说话');
   };
 
+  const sendOmniWebrtcOpening = (channel) => {
+    if (omniWebrtcOpeningRequestedRef.current || !channel || channel.readyState !== 'open') return;
+    channel.send(JSON.stringify({
+      event_id: `event_${Date.now()}`,
+      type: 'response.create',
+      response: {
+        modalities: ['text', 'audio'],
+        instructions: `请用一句自然的中文电话面试开场白开始，并提出当前问题：${currentQuestion}`,
+      },
+    }));
+    omniWebrtcOpeningRequestedRef.current = true;
+  };
+
   const handleOmniWebrtcEvent = (event, channel) => {
     if (event.type === 'session.created') {
+      omniWebrtcDataChannelRef.current = channel;
       sendOmniWebrtcSessionUpdate(channel);
       return;
     }
 
     if (event.type === 'session.updated') {
+      omniWebrtcDataChannelRef.current = channel;
+      sendOmniWebrtcOpening(channel);
       setOmniStatus('connected');
       setOmniMessage('Qwen-Omni 会话配置已生效，请直接说话');
       return;
@@ -2770,9 +2777,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
 
     if (event.type === 'conversation.item.input_audio_transcription.delta') {
-      const delta = event.delta || event.text || '';
-      if (delta) {
-        omniWebrtcCandidateTranscriptRef.current = `${omniWebrtcCandidateTranscriptRef.current}${delta}`;
+      const delta = String(event.delta || '');
+      const preview = delta
+        ? `${omniWebrtcCandidateTranscriptRef.current}${delta}`
+        : `${event.text || ''}${event.stash || ''}`;
+      if (preview) {
+        omniWebrtcCandidateTranscriptRef.current = preview;
         setAnswer(omniWebrtcCandidateTranscriptRef.current.trim());
         setOmniSignals((current) => ({ ...current, text: true }));
       }
@@ -2935,10 +2945,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       };
 
       const attachDataChannel = (channel) => {
-        omniWebrtcDataChannelRef.current = channel;
-        channel.addEventListener('open', () => {
-          window.setTimeout(() => sendOmniWebrtcSessionUpdate(channel), 1200);
-        });
         channel.addEventListener('message', (event) => handleOmniWebrtcDataChannelMessage(event, channel));
         channel.addEventListener('close', () => {
           if (omniWebrtcDataChannelRef.current === channel) {
@@ -2981,7 +2987,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         type: data.answer?.type || 'answer',
         sdp: normalizeSdp(data.answer?.sdp),
       });
-      window.setTimeout(() => sendOmniWebrtcSessionUpdate(omniWebrtcDataChannelRef.current), 500);
       setOmniMessage(`Qwen-Omni WebRTC SDP 已交换，等待 ${data.model || '实时模型'} 会话创建`);
     } catch (requestError) {
       stopOmniWebrtcCall('Qwen-Omni WebRTC 启动失败', { resetAudio: true });
@@ -3746,6 +3751,14 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
                   role="menuitem"
                 >
                   千问实时对话
+                </button>
+                <button
+                  className={`dropdown-item ${voiceProvider === 'omni-webrtc' ? 'active' : ''}`}
+                  onClick={() => { setVoiceProvider('omni-webrtc'); setShowVoiceDropdown(false); }}
+                  type="button"
+                  role="menuitem"
+                >
+                  Qwen 官方 WebRTC
                 </button>
               </div>
             )}

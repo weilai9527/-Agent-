@@ -91,7 +91,7 @@ class MySQLDatabase:
             password=self.cfg.password,
             database=self.cfg.database,
             charset=self.cfg.charset,
-            autocommit=False,
+            autocommit=True,
             cursorclass=pymysql.cursors.DictCursor,
         )
         self._local.conn = conn
@@ -116,14 +116,26 @@ class MySQLDatabase:
         self.connect().rollback()
 
     def __enter__(self):
-        self.connect()
+        conn = self.connect()
+        depth = getattr(self._local, "transaction_depth", 0)
+        if depth == 0:
+            conn.autocommit(False)
+            conn.begin()
+        self._local.transaction_depth = depth + 1
         return self
 
     def __exit__(self, exc_type, _exc, _tb):
-        if exc_type:
-            self.rollback()
-        else:
-            self.commit()
+        conn = self.connect()
+        depth = max(0, getattr(self._local, "transaction_depth", 1) - 1)
+        self._local.transaction_depth = depth
+        if depth == 0:
+            try:
+                if exc_type:
+                    conn.rollback()
+                else:
+                    conn.commit()
+            finally:
+                conn.autocommit(True)
         return False
 
 

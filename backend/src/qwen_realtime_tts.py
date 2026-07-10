@@ -8,6 +8,8 @@ from collections.abc import Iterator
 from contextlib import suppress
 from uuid import uuid4
 
+from .env import valid_env_value
+
 
 class QwenRealtimeTtsError(RuntimeError):
     pass
@@ -204,8 +206,8 @@ def stream_qwen_realtime_tts(text: str) -> Iterator[bytes]:
     if not chunks:
         raise QwenRealtimeTtsError("请提供要合成的文本。")
 
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
-    if not api_key or api_key == "your-dashscope-api-key":
+    api_key = valid_env_value("DASHSCOPE_API_KEY")
+    if not api_key:
         raise QwenRealtimeTtsError("服务端未配置 DASHSCOPE_API_KEY，无法使用千问实时语音合成。")
 
     try:

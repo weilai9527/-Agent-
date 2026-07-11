@@ -37,14 +37,43 @@ from .security import (
 
 app = FastAPI(title="Multi Agent Interview API")
 
-allowed_origins = [
-    origin.strip()
-    for origin in os.environ.get("FRONTEND_ORIGIN", "http://127.0.0.1:5173").split(",")
-    if origin.strip()
-]
+
+def csv_env(name: str, default: str = "") -> list[str]:
+    return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_frontend_origin_regex() -> str | None:
+    configured_regex = os.environ.get("FRONTEND_ORIGIN_REGEX", "").strip()
+    if configured_regex:
+        return configured_regex
+
+    app_env = os.environ.get("APP_ENV", "development").strip().lower()
+    if app_env in {"production", "prod"} or not env_flag("ALLOW_PRIVATE_NETWORK_ORIGINS", True):
+        return None
+
+    return (
+        r"https?://("
+        r"localhost|127\.0\.0\.1|0\.0\.0\.0|"
+        r"10(?:\.\d{1,3}){3}|"
+        r"192\.168(?:\.\d{1,3}){2}|"
+        r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}"
+        r")(?::\d+)?"
+    )
+
+
+allowed_origins = csv_env("FRONTEND_ORIGIN", "http://127.0.0.1:5173")
+allowed_origin_regex = build_frontend_origin_regex()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=allowed_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
@@ -299,6 +328,26 @@ def clear_failed_logins(request: Request, email: str) -> None:
     login_attempts.pop(login_attempt_key(request, email), None)
 
 
+def cookie_samesite() -> str:
+    value = os.environ.get("COOKIE_SAMESITE", "lax").strip().lower()
+    if value not in {"lax", "strict", "none"}:
+        return "lax"
+    return value
+
+
+def session_cookie_options() -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "httponly": True,
+        "samesite": cookie_samesite(),
+        "secure": env_flag("COOKIE_SECURE", False),
+        "path": "/",
+    }
+    cookie_domain = os.environ.get("COOKIE_DOMAIN", "").strip()
+    if cookie_domain:
+        options["domain"] = cookie_domain
+    return options
+
+
 def create_session(response: Response, user_id: str, user_agent: str | None) -> None:
     token = create_token()
     db.execute(
@@ -312,21 +361,15 @@ def create_session(response: Response, user_id: str, user_agent: str | None) -> 
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
-        httponly=True,
-        samesite="lax",
-        secure=os.environ.get("COOKIE_SECURE") == "true",
-        path="/",
         max_age=SESSION_MAX_AGE_SECONDS,
+        **session_cookie_options(),
     )
 
 
 def clear_session(response: Response) -> None:
     response.delete_cookie(
         SESSION_COOKIE_NAME,
-        httponly=True,
-        samesite="lax",
-        secure=os.environ.get("COOKIE_SECURE") == "true",
-        path="/",
+        **session_cookie_options(),
     )
 
 

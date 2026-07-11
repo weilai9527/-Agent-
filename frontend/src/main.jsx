@@ -948,6 +948,32 @@ function getSpeechRecognitionConstructor() {
   return window.SpeechRecognition || window.webkitSpeechRecognition;
 }
 
+function getMicrophoneAccessMessage(baseMessage = '当前浏览器不支持麦克风采集。') {
+  const origin = window.location?.origin || '当前地址';
+  if (window.isSecureContext === false) {
+    return `当前访问地址 ${origin} 不是浏览器认可的安全上下文，麦克风会被拦截。请改用 https 地址，或让 Windows 端通过 localhost/127.0.0.1 访问。`;
+  }
+  return baseMessage;
+}
+
+function getRealtimeConnectionErrorMessage(error) {
+  const name = error?.name || '';
+  const rawMessage = String(error?.message || '');
+  if (name === 'NotAllowedError' || /permission denied/i.test(rawMessage)) {
+    if (window.isSecureContext === false) {
+      return getMicrophoneAccessMessage();
+    }
+    return '麦克风权限被系统或浏览器拒绝，请在系统设置和浏览器站点权限里允许录音后重试。';
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+    return '没有检测到可用麦克风，请连接或启用麦克风后重试。';
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return '麦克风正被其他应用占用，关闭占用录音的应用后重试。';
+  }
+  return rawMessage || '语音通话连接失败，请检查麦克风权限和 OPENAI_API_KEY。';
+}
+
 function waitForMediaSourceOpen(mediaSource) {
   return new Promise((resolve, reject) => {
     if (mediaSource.readyState === 'open') {
@@ -2617,8 +2643,10 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
 
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      const message = getMicrophoneAccessMessage('当前浏览器不支持 MediaRecorder 录音，无法测试 Omni 语音模式');
       setOmniStatus('error');
-      setOmniMessage('当前浏览器不支持 MediaRecorder 录音，无法测试 Omni 语音模式');
+      setOmniMessage(message);
+      setError(message);
       return;
     }
 
@@ -2873,8 +2901,10 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
 
     if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+      const message = getMicrophoneAccessMessage('当前浏览器不支持 WebRTC 麦克风采集');
       setOmniStatus('error');
-      setOmniMessage('当前浏览器不支持 WebRTC 麦克风采集');
+      setOmniMessage(message);
+      setError(message);
       return;
     }
 
@@ -3262,7 +3292,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError('当前浏览器不支持麦克风采集。');
+      const message = getMicrophoneAccessMessage('当前浏览器不支持麦克风采集。');
+      setError(message);
+      setVoiceMessage(message);
       setVoiceStatus('error');
       return;
     }
@@ -3347,10 +3379,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     } catch (requestError) {
       stopRealtimeCall();
       setVoiceStatus('error');
-      const fallbackMessage = requestError.name === 'NotAllowedError'
-        ? '麦克风权限被拒绝，请允许浏览器录音后重试'
-        : '语音通话连接失败，请检查麦克风权限和 OPENAI_API_KEY';
-      const detailMessage = requestError.message || fallbackMessage;
+      const detailMessage = getRealtimeConnectionErrorMessage(requestError);
       setError(detailMessage);
       setVoiceMessage(detailMessage);
     }

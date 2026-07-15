@@ -73,6 +73,34 @@ def load_env_file() -> None:
         os.environ.setdefault(key, value)
 
 
+AI_RUNTIME_PREFIXES = (
+    "AI_",
+    "OPENAI_",
+    "QWEN_",
+    "KIMI_",
+    "DEEPSEEK_",
+    "DASHSCOPE_",
+    "REPORT_",
+    "EVALUATION_",
+    "FOLLOWUP_",
+    "RESUME_ANALYSIS_",
+)
+
+
+def reload_runtime_ai_env() -> None:
+    """Reload admin-managed AI settings without replacing unrelated process env."""
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_env_line(raw_line)
+        if not parsed:
+            continue
+        key, value = parsed
+        if key.startswith(AI_RUNTIME_PREFIXES):
+            os.environ[key] = value
+
+
 def normalize_certificate_env() -> None:
     for key in ("SSL_CERT_FILE", "WEBSOCKET_CLIENT_CA_BUNDLE", "REQUESTS_CA_BUNDLE"):
         value = os.environ.get(key, "").strip()

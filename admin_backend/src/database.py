@@ -106,6 +106,15 @@ class MySQLDatabase:
                 self._local.conn = None
             raise
 
+    def commit(self) -> None:
+        self.connect().commit()
+
+    def rollback(self) -> None:
+        self.connect().rollback()
+
+    def begin(self) -> None:
+        self.connect().begin()
+
 
 class SQLiteDatabase:
     def __init__(self, path: Path):
@@ -122,6 +131,15 @@ class SQLiteDatabase:
 
     def execute(self, sql: str, params: tuple = ()):
         return self.connect().execute(sql, params)
+
+    def commit(self) -> None:
+        self.connect().commit()
+
+    def rollback(self) -> None:
+        self.connect().rollback()
+
+    def begin(self) -> None:
+        self.connect().execute("BEGIN")
 
 
 db = SQLiteDatabase(SQLITE_PATH) if DB_ENGINE == "sqlite" else MySQLDatabase(config)
@@ -145,3 +163,110 @@ def get_database_path() -> str:
     if DB_ENGINE == "sqlite":
         return f"sqlite:///{SQLITE_PATH}"
     return f"mysql://{config.user}@{config.host}:{config.port}/{config.database}"
+
+
+def ensure_admin_schema() -> None:
+    if DB_ENGINE == "sqlite":
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS admin_users (
+              id TEXT PRIMARY KEY,
+              email TEXT NOT NULL UNIQUE,
+              password_hash TEXT NOT NULL,
+              name TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'reviewer',
+              status TEXT NOT NULL DEFAULT 'normal',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              last_login_at TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS admin_sessions (
+              id TEXT PRIMARY KEY,
+              admin_user_id TEXT NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              expires_at TIMESTAMP NOT NULL,
+              user_agent TEXT,
+              ip_address TEXT,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+              id TEXT PRIMARY KEY,
+              admin_user_id TEXT,
+              actor_email TEXT,
+              action TEXT NOT NULL,
+              target_type TEXT,
+              target_id TEXT,
+              summary TEXT,
+              ip_address TEXT,
+              user_agent TEXT,
+              success INTEGER NOT NULL DEFAULT 1,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE SET NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_admin_sessions_user_id ON admin_sessions(admin_user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires_at ON admin_sessions(expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_logs(created_at)",
+        ]
+    else:
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS admin_users (
+              id VARCHAR(36) PRIMARY KEY,
+              email VARCHAR(255) NOT NULL UNIQUE,
+              password_hash VARCHAR(255) NOT NULL,
+              name VARCHAR(80) NOT NULL,
+              role VARCHAR(32) NOT NULL DEFAULT 'reviewer',
+              status VARCHAR(32) NOT NULL DEFAULT 'normal',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              last_login_at TIMESTAMP NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS admin_sessions (
+              id VARCHAR(36) PRIMARY KEY,
+              admin_user_id VARCHAR(36) NOT NULL,
+              token_hash VARCHAR(64) NOT NULL UNIQUE,
+              expires_at TIMESTAMP NOT NULL,
+              user_agent VARCHAR(500),
+              ip_address VARCHAR(80),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              INDEX idx_admin_sessions_user_id (admin_user_id),
+              INDEX idx_admin_sessions_expires_at (expires_at),
+              CONSTRAINT fk_admin_sessions_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+              id VARCHAR(36) PRIMARY KEY,
+              admin_user_id VARCHAR(36),
+              actor_email VARCHAR(255),
+              action VARCHAR(100) NOT NULL,
+              target_type VARCHAR(80),
+              target_id VARCHAR(255),
+              summary VARCHAR(1000),
+              ip_address VARCHAR(80),
+              user_agent VARCHAR(500),
+              success TINYINT(1) NOT NULL DEFAULT 1,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              INDEX idx_admin_audit_created_at (created_at),
+              CONSTRAINT fk_admin_audit_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+        ]
+
+    for statement in statements:
+        cursor = db.execute(statement)
+        cursor.close()
+    db.commit()
+
+    from shared.career_catalog import ensure_catalog_schema, seed_computer_pilot
+
+    ensure_catalog_schema(db, DB_ENGINE)
+    seed_computer_pilot(db)

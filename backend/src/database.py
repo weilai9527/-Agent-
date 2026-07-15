@@ -277,6 +277,7 @@ def _init_sqlite_db() -> None:
           nickname TEXT,
           target_role TEXT,
           experience_level TEXT,
+          resume_filename TEXT,
           resume_text TEXT,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -311,6 +312,7 @@ def _init_sqlite_db() -> None:
           interview_type TEXT,
           company_context TEXT,
           focus_areas TEXT,
+          resume_context TEXT,
           difficulty TEXT,
           interviewer_style TEXT,
           status TEXT NOT NULL DEFAULT 'draft',
@@ -372,6 +374,16 @@ def _init_sqlite_db() -> None:
           issues TEXT NOT NULL,
           suggestions TEXT NOT NULL,
           dimension_scores TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'local',
+          model TEXT NOT NULL DEFAULT 'rules-v1',
+          prompt_version TEXT NOT NULL DEFAULT 'legacy-local-v1',
+          generation_status TEXT NOT NULL DEFAULT 'succeeded',
+          generation_error TEXT,
+          fallback INTEGER NOT NULL DEFAULT 1,
+          generated_at TEXT,
+          review_status TEXT NOT NULL DEFAULT 'pending',
+          reviewed_by TEXT,
+          reviewed_at TEXT,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(interview_id, message_id),
@@ -392,6 +404,16 @@ def _init_sqlite_db() -> None:
           timeline_review TEXT NOT NULL,
           summary TEXT NOT NULL,
           suggestions TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT 'local',
+          model TEXT NOT NULL DEFAULT 'rules-v1',
+          prompt_version TEXT NOT NULL DEFAULT 'legacy-local-v1',
+          generation_status TEXT NOT NULL DEFAULT 'succeeded',
+          generation_error TEXT,
+          fallback INTEGER NOT NULL DEFAULT 1,
+          generated_at TEXT,
+          review_status TEXT NOT NULL DEFAULT 'pending',
+          reviewed_by TEXT,
+          reviewed_at TEXT,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -441,6 +463,7 @@ def _init_sqlite_db() -> None:
         ("education_level", "TEXT"),
         ("skills", "TEXT"),
         ("project_keywords", "TEXT"),
+        ("resume_filename", "TEXT"),
         ("project_experience", "TEXT"),
         ("portfolio_links", "TEXT"),
         ("preferred_interview_type", "TEXT"),
@@ -451,6 +474,28 @@ def _init_sqlite_db() -> None:
     for name, column_type in profile_columns:
         if name not in existing:
             db.execute(f"ALTER TABLE profiles ADD COLUMN {name} {column_type}")
+    interview_columns = [("resume_context", "TEXT")]
+    existing = {row["name"] for row in db.execute("PRAGMA table_info(interview_sessions)").fetchall()}
+    for name, column_type in interview_columns:
+        if name not in existing:
+            db.execute(f"ALTER TABLE interview_sessions ADD COLUMN {name} {column_type}")
+    generated_columns = [
+        ("provider", "TEXT NOT NULL DEFAULT 'local'"),
+        ("model", "TEXT NOT NULL DEFAULT 'rules-v1'"),
+        ("prompt_version", "TEXT NOT NULL DEFAULT 'legacy-local-v1'"),
+        ("generation_status", "TEXT NOT NULL DEFAULT 'succeeded'"),
+        ("generation_error", "TEXT"),
+        ("fallback", "INTEGER NOT NULL DEFAULT 1"),
+        ("generated_at", "TEXT"),
+        ("review_status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("reviewed_by", "TEXT"),
+        ("reviewed_at", "TEXT"),
+    ]
+    for table_name in ("interview_evaluations", "interview_reports"):
+        existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        for name, column_type in generated_columns:
+            if name not in existing:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {column_type}")
     db.commit()
 
 
@@ -479,6 +524,7 @@ def init_db() -> None:
           nickname VARCHAR(120),
           target_role VARCHAR(160),
           experience_level VARCHAR(80),
+          resume_filename VARCHAR(255),
           resume_text MEDIUMTEXT,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -516,6 +562,7 @@ def init_db() -> None:
           interview_type VARCHAR(120),
           company_context VARCHAR(240),
           focus_areas TEXT,
+          resume_context MEDIUMTEXT,
           difficulty VARCHAR(80),
           interviewer_style VARCHAR(120),
           status VARCHAR(40) NOT NULL DEFAULT 'draft',
@@ -581,6 +628,16 @@ def init_db() -> None:
           issues MEDIUMTEXT NOT NULL,
           suggestions MEDIUMTEXT NOT NULL,
           dimension_scores TEXT NOT NULL,
+          provider VARCHAR(80) NOT NULL DEFAULT 'local',
+          model VARCHAR(160) NOT NULL DEFAULT 'rules-v1',
+          prompt_version VARCHAR(80) NOT NULL DEFAULT 'legacy-local-v1',
+          generation_status VARCHAR(40) NOT NULL DEFAULT 'succeeded',
+          generation_error TEXT,
+          fallback TINYINT(1) NOT NULL DEFAULT 1,
+          generated_at DATETIME NULL,
+          review_status VARCHAR(40) NOT NULL DEFAULT 'pending',
+          reviewed_by CHAR(36) NULL,
+          reviewed_at DATETIME NULL,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(interview_id, message_id),
@@ -602,6 +659,16 @@ def init_db() -> None:
           timeline_review MEDIUMTEXT NOT NULL,
           summary MEDIUMTEXT NOT NULL,
           suggestions MEDIUMTEXT NOT NULL,
+          provider VARCHAR(80) NOT NULL DEFAULT 'local',
+          model VARCHAR(160) NOT NULL DEFAULT 'rules-v1',
+          prompt_version VARCHAR(80) NOT NULL DEFAULT 'legacy-local-v1',
+          generation_status VARCHAR(40) NOT NULL DEFAULT 'succeeded',
+          generation_error TEXT,
+          fallback TINYINT(1) NOT NULL DEFAULT 1,
+          generated_at DATETIME NULL,
+          review_status VARCHAR(40) NOT NULL DEFAULT 'pending',
+          reviewed_by CHAR(36) NULL,
+          reviewed_at DATETIME NULL,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -639,6 +706,7 @@ def init_db() -> None:
         ("education_level", "VARCHAR(120)"),
         ("skills", "TEXT"),
         ("project_keywords", "TEXT"),
+        ("resume_filename", "VARCHAR(255)"),
         ("project_experience", "MEDIUMTEXT"),
         ("portfolio_links", "TEXT"),
         ("preferred_interview_type", "VARCHAR(120)"),
@@ -648,6 +716,28 @@ def init_db() -> None:
     for name, column_type in profile_columns:
         if not _column_exists("profiles", name):
             _execute_schema(f"ALTER TABLE profiles ADD COLUMN {name} {column_type}")
+
+    interview_columns = [("resume_context", "MEDIUMTEXT")]
+    for name, column_type in interview_columns:
+        if not _column_exists("interview_sessions", name):
+            _execute_schema(f"ALTER TABLE interview_sessions ADD COLUMN {name} {column_type}")
+
+    generated_columns = [
+        ("provider", "VARCHAR(80) NOT NULL DEFAULT 'local'"),
+        ("model", "VARCHAR(160) NOT NULL DEFAULT 'rules-v1'"),
+        ("prompt_version", "VARCHAR(80) NOT NULL DEFAULT 'legacy-local-v1'"),
+        ("generation_status", "VARCHAR(40) NOT NULL DEFAULT 'succeeded'"),
+        ("generation_error", "TEXT"),
+        ("fallback", "TINYINT(1) NOT NULL DEFAULT 1"),
+        ("generated_at", "DATETIME NULL"),
+        ("review_status", "VARCHAR(40) NOT NULL DEFAULT 'pending'"),
+        ("reviewed_by", "CHAR(36) NULL"),
+        ("reviewed_at", "DATETIME NULL"),
+    ]
+    for table_name in ("interview_evaluations", "interview_reports"):
+        for name, column_type in generated_columns:
+            if not _column_exists(table_name, name):
+                _execute_schema(f"ALTER TABLE {table_name} ADD COLUMN {name} {column_type}")
 
     _ensure_index("sessions", "idx_sessions_token_hash", "token_hash")
     _ensure_index("sessions", "idx_sessions_user_id", "user_id")
@@ -674,3 +764,11 @@ def get_database_path() -> str:
 
 
 init_db()
+
+# The career catalog is shared by the candidate and administration services.
+# Keeping its schema service independent avoids coupling catalog growth to resume
+# or interview tables.
+from shared.career_catalog import ensure_catalog_schema, seed_computer_pilot
+
+ensure_catalog_schema(db, DB_ENGINE)
+seed_computer_pilot(db)

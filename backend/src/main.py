@@ -12,13 +12,14 @@ import random
 import re
 import time
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from .env import first_env_value, load_env_file, normalize_certificate_env
 
@@ -26,9 +27,26 @@ load_env_file()
 normalize_certificate_env()
 
 from .database import all_rows, db, get_database_path, one
-from .kimi_followup import KimiFollowupError, analyze_resume, generate_kimi_followup, generate_opening_question
+from .ai_evaluation import (
+    AiEvaluationError,
+    DIMENSIONS,
+    EVALUATION_PROMPT_VERSION,
+    REPORT_PROMPT_VERSION,
+    generate_ai_evaluation,
+    generate_ai_report,
+)
+from .kimi_followup import KimiFollowupError, analyze_resume, generate_kimi_followup, generate_opening_question, resume_analysis_source_text
 from .qwen_realtime_tts import QwenRealtimeTtsError, get_qwen_realtime_tts_media_type, stream_qwen_realtime_tts
 from .qwen_tts import QwenTtsError, get_qwen_tts_media_type, stream_qwen_tts
+from .resume_parser import extract_pdf_text
+from .password_reset import (
+    consume_reset_token,
+    find_valid_reset_token,
+    password_reset_email_config,
+    send_password_reset_email,
+    validate_new_password,
+)
+from shared.career_catalog import catalog_tree, enrich_resume_directions, list_versions, refresh_resume_direction_matches
 from .security import (
     create_token,
     hash_password,
@@ -57,9 +75,21 @@ app.add_middleware(
 SESSION_COOKIE_NAME = "interview_session"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 RESET_MAX_AGE_SECONDS = 60 * 20
+RESET_REQUEST_WINDOW_SECONDS = int(os.environ.get("PASSWORD_RESET_RATE_WINDOW", str(60 * 15)))
+RESET_REQUEST_MAX_PER_EMAIL = int(os.environ.get("PASSWORD_RESET_RATE_EMAIL_MAX", "3"))
+RESET_REQUEST_MAX_PER_IP = int(os.environ.get("PASSWORD_RESET_RATE_IP_MAX", "10"))
+PASSWORD_RESET_ENABLED = os.environ.get("PASSWORD_RESET_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 LOGIN_WINDOW_SECONDS = 60 * 15
 MAX_LOGIN_ATTEMPTS = 8
 login_attempts: dict[str, dict[str, int | float]] = {}
+password_reset_attempts: dict[str, dict[str, int | float]] = {}
+
+if (
+    PASSWORD_RESET_ENABLED
+    and os.environ.get("APP_ENV", "development").strip().lower() == "production"
+    and not password_reset_email_config()
+):
+    raise RuntimeError("生产环境必须配置密码重置 SMTP 和发件邮箱。")
 
 PROFILE_TEXT_FIELDS = [
     ("nickname", "昵称", 60, True),
@@ -90,6 +120,7 @@ INTERVIEW_TEXT_FIELDS = [
     ("interview_type", "面试类型", 60),
     ("company_context", "公司场景", 120),
     ("focus_areas", "重点方向", 500),
+    ("resume_context", "简历与项目简介", 12000),
     ("difficulty", "难度", 40),
     ("interviewer_style", "面试官风格", 60),
 ]
@@ -303,6 +334,29 @@ def clear_failed_logins(request: Request, email: str) -> None:
     login_attempts.pop(login_attempt_key(request, email), None)
 
 
+def password_reset_rate_key(request: Request, email: str) -> tuple[str, str]:
+    ip = request.client.host if request.client else "unknown"
+    return f"ip:{ip}", f"email:{email}"
+
+
+def record_password_reset_attempt(request: Request, email: str) -> bool:
+    now = time.time()
+    keys_and_limits = zip(
+        password_reset_rate_key(request, email),
+        (RESET_REQUEST_MAX_PER_IP, RESET_REQUEST_MAX_PER_EMAIL),
+    )
+    limited = False
+    for key, limit in keys_and_limits:
+        record = password_reset_attempts.get(key)
+        if not record or float(record["reset_at"]) <= now:
+            record = {"count": 0, "reset_at": now + RESET_REQUEST_WINDOW_SECONDS}
+            password_reset_attempts[key] = record
+        if int(record["count"]) >= limit:
+            limited = True
+        record["count"] = int(record["count"]) + 1
+    return limited
+
+
 def create_session(response: Response, user_id: str, user_agent: str | None) -> None:
     token = create_token()
     db.execute(
@@ -386,7 +440,7 @@ def find_profile_by_user_id(user_id: str) -> dict | None:
         """
         SELECT id, user_id, nickname, avatar_url, target_role, experience_level, company_type,
                target_city, expected_salary, years_of_experience, education_level, skills,
-               project_keywords, resume_text, project_experience, portfolio_links,
+               project_keywords, resume_filename, resume_text, project_experience, portfolio_links,
                preferred_interview_type, preferred_difficulty, preferred_interviewer_style,
                created_at, updated_at
         FROM profiles
@@ -397,23 +451,13 @@ def find_profile_by_user_id(user_id: str) -> dict | None:
 
 
 def resume_source_text(profile: dict | None) -> str:
-    if not profile:
-        return ""
-    fields = [
-        "target_role",
-        "experience_level",
-        "years_of_experience",
-        "education_level",
-        "skills",
-        "project_keywords",
-        "resume_text",
-        "project_experience",
-    ]
-    return "\n".join(str(profile.get(field) or "").strip() for field in fields if str(profile.get(field) or "").strip())
+    return resume_analysis_source_text(profile)
 
 
 def resume_source_hash(profile: dict | None) -> str:
-    return hashlib.sha256(resume_source_text(profile).encode("utf-8")).hexdigest()
+    analysis_version = "direction-ai-v5-catalog-match"
+    source = f"{analysis_version}\n{resume_source_text(profile)}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def find_resume_analysis_by_user_id(user_id: str) -> dict | None:
@@ -459,6 +503,9 @@ def serialize_resume_analysis(row: dict | None) -> dict | None:
     if not row:
         return None
     analysis = parse_json_object(row.get("analysis_json"), {})
+    directions = analysis.get("recommended_directions")
+    if isinstance(directions, list):
+        analysis["recommended_directions"] = refresh_resume_direction_matches(db, directions)
     return {
         "id": row.get("id"),
         "user_id": row.get("user_id"),
@@ -486,6 +533,11 @@ def ensure_resume_analysis_for_user(user: dict, force: bool = False) -> dict:
             return serialized
 
     result = analyze_resume(profile or {})
+    directions = result.get("analysis", {}).get("recommended_directions", [])
+    if isinstance(directions, list):
+        result["analysis"]["recommended_directions"] = enrich_resume_directions(
+            db, directions, result.get("provider") or "local"
+        )
     row = upsert_resume_analysis(
         user["id"],
         current_hash,
@@ -540,7 +592,7 @@ def find_interview_by_user_id(interview_id: str, user_id: str) -> dict | None:
     return one(
         """
         SELECT id, user_id, target_role, experience_level, interview_type, company_context,
-               focus_areas, difficulty, interviewer_style, status, created_at, updated_at,
+               focus_areas, resume_context, difficulty, interviewer_style, status, created_at, updated_at,
                started_at, completed_at
         FROM interview_sessions
         WHERE id = ? AND user_id = ?
@@ -718,7 +770,12 @@ def find_evaluation_by_message_id(interview_id: str, message_id: str) -> dict | 
         SELECT evaluations.id, evaluations.interview_id, evaluations.message_id, evaluations.agent_id,
                agents.agent_name, agents.agent_type,
                evaluations.score, evaluations.strengths, evaluations.issues, evaluations.suggestions,
-               evaluations.dimension_scores, evaluations.created_at, evaluations.updated_at
+               evaluations.dimension_scores, evaluations.provider, evaluations.model,
+               evaluations.prompt_version, evaluations.generation_status,
+               evaluations.generation_error, evaluations.fallback,
+               evaluations.generated_at, evaluations.review_status,
+               evaluations.reviewed_by, evaluations.reviewed_at,
+               evaluations.created_at, evaluations.updated_at
         FROM interview_evaluations AS evaluations
         LEFT JOIN interview_agents AS agents ON agents.id = evaluations.agent_id
         WHERE evaluations.interview_id = ? AND evaluations.message_id = ?
@@ -733,7 +790,12 @@ def find_evaluation_by_id(interview_id: str, evaluation_id: str) -> dict | None:
         SELECT evaluations.id, evaluations.interview_id, evaluations.message_id, evaluations.agent_id,
                agents.agent_name, agents.agent_type,
                evaluations.score, evaluations.strengths, evaluations.issues, evaluations.suggestions,
-               evaluations.dimension_scores, evaluations.created_at, evaluations.updated_at
+               evaluations.dimension_scores, evaluations.provider, evaluations.model,
+               evaluations.prompt_version, evaluations.generation_status,
+               evaluations.generation_error, evaluations.fallback,
+               evaluations.generated_at, evaluations.review_status,
+               evaluations.reviewed_by, evaluations.reviewed_at,
+               evaluations.created_at, evaluations.updated_at
         FROM interview_evaluations AS evaluations
         LEFT JOIN interview_agents AS agents ON agents.id = evaluations.agent_id
         WHERE evaluations.interview_id = ? AND evaluations.id = ?
@@ -748,7 +810,12 @@ def list_evaluations_by_interview_id(interview_id: str) -> list[dict]:
         SELECT evaluations.id, evaluations.interview_id, evaluations.message_id, evaluations.agent_id,
                agents.agent_name, agents.agent_type,
                evaluations.score, evaluations.strengths, evaluations.issues, evaluations.suggestions,
-               evaluations.dimension_scores, evaluations.created_at, evaluations.updated_at,
+               evaluations.dimension_scores, evaluations.provider, evaluations.model,
+               evaluations.prompt_version, evaluations.generation_status,
+               evaluations.generation_error, evaluations.fallback,
+               evaluations.generated_at, evaluations.review_status,
+               evaluations.reviewed_by, evaluations.reviewed_at,
+               evaluations.created_at, evaluations.updated_at,
                messages.content AS message_content, messages.order_index AS message_order_index
         FROM interview_evaluations AS evaluations
         LEFT JOIN interview_agents AS agents ON agents.id = evaluations.agent_id
@@ -794,17 +861,23 @@ def build_agent_feedback(agents: list[dict], evaluations: list[dict]) -> list[di
     for agent in agents:
         related = [evaluation for evaluation in evaluations if evaluation.get("agent_id") == agent["id"]]
         score = clamp_score(average([evaluation["score"] for evaluation in related], 72))
+        strengths = [str(item.get("strengths") or "").splitlines()[0].strip() for item in related if str(item.get("strengths") or "").strip()]
+        issues = [str(item.get("issues") or "").splitlines()[0].strip() for item in related if str(item.get("issues") or "").strip()]
+        evidence_comment = ""
+        if related:
+            evidence_parts = [f"平均得分 {score} 分，共复盘 {len(related)} 个回答。"]
+            if strengths:
+                evidence_parts.append(f"主要优势：{strengths[0][:100]}。")
+            if issues:
+                evidence_parts.append(f"优先改进：{issues[0][:100]}。")
+            evidence_comment = "".join(evidence_parts)
         feedback.append(
             {
                 "agent_id": agent["id"],
                 "agent_name": agent["agent_name"],
                 "agent_type": agent["agent_type"],
                 "score": score,
-                "comment": (
-                    f"已完成 {len(related)} 条回答复盘，整体表现{'稳定' if score >= 80 else '仍需加强'}。"
-                    if related
-                    else "暂无关联单轮评价，后续可结合该 Agent 的追问补充更细的判断。"
-                ),
+                "comment": evidence_comment or "暂无关联单题评价，暂时无法形成可靠判断。",
             }
         )
     return feedback
@@ -813,19 +886,33 @@ def build_agent_feedback(agents: list[dict], evaluations: list[dict]) -> list[di
 def build_timeline_review(messages: list[dict], evaluations: list[dict]) -> list[dict]:
     evaluation_by_message_id = {evaluation["message_id"]: evaluation for evaluation in evaluations}
     timeline = []
+    latest_question = None
     for message in messages:
         content = message.get("content") or ""
+        if message["sender_type"] == "agent" and message["message_type"] != "system":
+            latest_question = message
+            continue
+        if message["sender_type"] != "candidate":
+            continue
+        evaluation = evaluation_by_message_id.get(message["id"], {})
+        question_content = (latest_question or {}).get("content") or ""
         timeline.append(
             {
                 "message_id": message["id"],
                 "order_index": message["order_index"],
-                "sender_type": message["sender_type"],
-                "message_type": message["message_type"],
-                "agent_name": message.get("agent_name"),
+                "sender_type": "candidate",
+                "message_type": "answer",
+                "agent_name": (latest_question or {}).get("agent_name"),
+                "question_preview": f"{question_content[:160]}..." if len(question_content) > 160 else question_content,
+                "answer_preview": f"{content[:240]}..." if len(content) > 240 else content,
                 "content_preview": f"{content[:80]}..." if len(content) > 80 else content,
-                "score": evaluation_by_message_id.get(message["id"], {}).get("score"),
+                "score": evaluation.get("score"),
+                "strengths": str(evaluation.get("strengths") or "")[:500],
+                "issues": str(evaluation.get("issues") or "")[:500],
+                "suggestions": str(evaluation.get("suggestions") or "")[:500],
             }
         )
+        latest_question = None
     return timeline
 
 
@@ -906,6 +993,8 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
                 f"面试类型：{interview.get('interview_type') or '综合模拟'}",
                 f"难度：{interview.get('difficulty') or '标准'}",
                 f"面试官风格：{interview.get('interviewer_style') or '专业追问'}",
+                f"练习重点：{interview.get('focus_areas') or '项目经历'}",
+                f"候选人简历与项目材料：\n{str(interview.get('resume_context') or '未填写')[:12000]}",
                 f"当前面试官：{current_agent.get('agent_name') if current_agent else '技术面试 Agent'}",
                 f"当前问题：{latest_question}",
                 f"最近对话：\n{recent_context}",
@@ -1382,7 +1471,10 @@ def find_report_by_interview_id(interview_id: str, user_id: str) -> dict | None:
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
                reports.total_score, reports.grade, reports.pass_recommendation,
                reports.ability_radar, reports.agent_feedback, reports.timeline_review,
-               reports.summary, reports.suggestions, reports.created_at, reports.updated_at
+               reports.summary, reports.suggestions, reports.provider, reports.model,
+               reports.prompt_version, reports.generation_status, reports.generation_error,
+               reports.fallback, reports.generated_at, reports.review_status,
+               reports.reviewed_by, reports.reviewed_at, reports.created_at, reports.updated_at
         FROM interview_reports AS reports
         JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
         WHERE reports.interview_id = ? AND reports.user_id = ?
@@ -1398,7 +1490,10 @@ def find_report_by_id(report_id: str, user_id: str) -> dict | None:
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
                reports.total_score, reports.grade, reports.pass_recommendation,
                reports.ability_radar, reports.agent_feedback, reports.timeline_review,
-               reports.summary, reports.suggestions, reports.created_at, reports.updated_at
+               reports.summary, reports.suggestions, reports.provider, reports.model,
+               reports.prompt_version, reports.generation_status, reports.generation_error,
+               reports.fallback, reports.generated_at, reports.review_status,
+               reports.reviewed_by, reports.reviewed_at, reports.created_at, reports.updated_at
         FROM interview_reports AS reports
         JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
         WHERE reports.id = ? AND reports.user_id = ?
@@ -1413,7 +1508,10 @@ def list_reports_by_user_id(user_id: str) -> list[dict]:
         SELECT reports.id, reports.user_id, reports.interview_id,
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
                reports.total_score, reports.grade, reports.pass_recommendation,
-               reports.summary, reports.created_at, reports.updated_at
+               reports.summary, reports.provider, reports.model, reports.prompt_version,
+               reports.generation_status, reports.generation_error, reports.fallback,
+               reports.generated_at, reports.review_status, reports.reviewed_by, reports.reviewed_at,
+               reports.created_at, reports.updated_at
         FROM interview_reports AS reports
         JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
         WHERE reports.user_id = ?
@@ -1428,7 +1526,10 @@ def list_full_reports_by_user_id(user_id: str) -> list[dict]:
         """
         SELECT reports.id, reports.user_id, reports.interview_id,
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
-               reports.total_score, reports.ability_radar, reports.created_at, reports.updated_at
+               reports.total_score, reports.ability_radar, reports.provider, reports.model,
+               reports.prompt_version, reports.generation_status, reports.generation_error,
+               reports.fallback, reports.generated_at, reports.review_status,
+               reports.reviewed_by, reports.reviewed_at, reports.created_at, reports.updated_at
         FROM interview_reports AS reports
         JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
         WHERE reports.user_id = ?
@@ -1545,33 +1646,75 @@ def refresh_user_skill_stats(user_id: str) -> dict:
     return find_user_skill_stats(user_id)
 
 
-def build_user_dimension_stats(stats: dict) -> list[dict]:
-    trends = parse_json_object(stats.get("dimension_trends"))
-    return [
-        {
-            "key": "technical_depth",
-            "label": "技术深度",
-            "average_score": stats["technical_depth_avg"],
-            "trend": trends.get("technical_depth", "stable"),
-        },
-        {
-            "key": "expression_clarity",
-            "label": "表达清晰度",
-            "average_score": stats["expression_clarity_avg"],
-            "trend": trends.get("expression_clarity", "stable"),
-        },
-        {
-            "key": "business_understanding",
-            "label": "业务理解",
-            "average_score": stats["business_understanding_avg"],
-            "trend": trends.get("business_understanding", "stable"),
-        },
-    ]
+DIMENSION_LABELS = {
+    "technical_accuracy": "技术准确性",
+    "technical_depth": "技术深度",
+    "expression_clarity": "表达清晰度",
+    "business_understanding": "业务理解",
+    "tradeoff_reasoning": "权衡决策",
+    "risk_awareness": "风险意识",
+    "result_quantification": "结果量化",
+    "role_fit": "岗位匹配度",
+}
+
+
+def build_user_dimension_stats(user_id: str) -> list[dict]:
+    reports = list_full_reports_by_user_id(user_id)
+    histories: dict[str, list[dict]] = {dimension: [] for dimension in DIMENSIONS}
+    for report in reports:
+        radar = parse_json_object(report.get("ability_radar"))
+        for dimension in DIMENSIONS:
+            value = radar.get(dimension)
+            if not isinstance(value, (int, float)):
+                continue
+            histories[dimension].append(
+                {
+                    "score": clamp_stat_score(round(value)),
+                    "recorded_at": report.get("updated_at") or report.get("created_at"),
+                    "target_role": report.get("target_role"),
+                    "interview_id": report.get("interview_id"),
+                }
+            )
+
+    result = []
+    for dimension in DIMENSIONS:
+        history = histories[dimension]
+        values = [item["score"] for item in history]
+        latest_score = values[-1] if values else 0
+        previous_score = values[-2] if len(values) > 1 else latest_score
+        result.append(
+            {
+                "key": dimension,
+                "label": DIMENSION_LABELS.get(dimension, dimension),
+                "average_score": clamp_stat_score(average(values, 0)),
+                "latest_score": latest_score,
+                "change": latest_score - previous_score,
+                "trend": compute_dimension_trend(values),
+                "evidence_count": len(values),
+                "history": history[-8:],
+            }
+        )
+    return result
 
 
 @app.get("/api/health")
 def health():
     return {"ok": True, "databasePath": get_database_path()}
+
+
+@app.get("/api/catalog/versions")
+def get_catalog_versions():
+    """Return published catalog versions available to candidate flows."""
+    return {"versions": list_versions(db)}
+
+
+@app.get("/api/catalog/tree")
+def get_catalog_tree(version: str | None = None):
+    """Return the college-to-job hierarchy and its ability matrices."""
+    result = catalog_tree(db, version_code=version)
+    if not result:
+        raise error(404, "职业能力目录版本不存在或尚未发布。")
+    return result
 
 
 @app.get("/api/auth/me")
@@ -1637,21 +1780,68 @@ def auth_logout(request: Request, response: Response):
 
 
 @app.post("/api/auth/password-reset/request")
-def password_reset_request(body: dict | None = None):
+async def password_reset_request(request: Request, body: dict | None = None):
+    if not PASSWORD_RESET_ENABLED:
+        raise error(503, "密码找回暂未开放，请联系管理员处理。")
     body = json_body(body)
     email = normalize_email(body.get("email"))
+    if record_password_reset_attempt(request, email):
+        raise error(429, "密码重置申请过于频繁，请稍后再试。")
     user = one("SELECT id FROM users WHERE email = ? AND status = ?", (email, "normal")) if is_valid_email(email) else None
     dev_reset_token = None
     if user:
         token = create_token()
-        db.execute(
-            "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)",
-            (str(uuid4()), user["id"], hash_token(token), now_iso_after(RESET_MAX_AGE_SECONDS)),
-        )
-        db.commit()
-        if os.environ.get("APP_ENV") != "production":
+        with db:
+            db.execute(
+                "UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP WHERE user_id = ? AND used_at IS NULL",
+                (user["id"],),
+            ).close()
+            db.execute(
+                "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)",
+                (str(uuid4()), user["id"], hash_token(token), now_iso_after(RESET_MAX_AGE_SECONDS)),
+            ).close()
+        try:
+            await run_in_threadpool(send_password_reset_email, email, token)
+        except Exception:
+            # The response remains generic so account existence and mail-provider state are not exposed.
+            pass
+        if os.environ.get("APP_ENV", "development").strip().lower() != "production":
             dev_reset_token = token
     return {"ok": True, "message": "如果邮箱存在，我们会发送密码重置链接。", "devResetToken": dev_reset_token}
+
+
+@app.post("/api/auth/password-reset/verify")
+def password_reset_verify(body: dict | None = None):
+    if not PASSWORD_RESET_ENABLED:
+        raise error(503, "密码找回暂未开放，请联系管理员处理。")
+    token = str(json_body(body).get("token") or "").strip()
+    if not token:
+        raise error(400, "密码重置链接无效或已过期。")
+    reset = find_valid_reset_token(db, hash_token(token), now_iso_after(0))
+    if not reset:
+        raise error(400, "密码重置链接无效或已过期。")
+    return {"valid": True, "expiresAt": str(reset["expires_at"])}
+
+
+@app.post("/api/auth/password-reset/confirm")
+def password_reset_confirm(response: Response, body: dict | None = None):
+    if not PASSWORD_RESET_ENABLED:
+        raise error(503, "密码找回暂未开放，请联系管理员处理。")
+    payload = json_body(body)
+    token = str(payload.get("token") or "").strip()
+    password = str(payload.get("password") or "")
+    confirmation = str(payload.get("confirm_password") or "")
+    password_error = validate_new_password(password, confirmation)
+    if password_error:
+        raise error(400, password_error)
+    reset = find_valid_reset_token(db, hash_token(token), now_iso_after(0)) if token else None
+    if not reset:
+        raise error(400, "密码重置链接无效或已过期。")
+    now = now_iso_after(0)
+    if not consume_reset_token(db, hash_token(token), reset["user_id"], hash_password(password), now):
+        raise error(400, "密码重置链接无效或已过期。")
+    clear_session(response)
+    return {"ok": True, "message": "密码已重置，请使用新密码登录。"}
 
 
 @app.get("/api/profile")
@@ -1708,17 +1898,7 @@ def extract_text_from_resume_file(filename: str, content: bytes) -> tuple[str, s
         return content.decode("utf-8", errors="replace").strip(), None
 
     if extension == "pdf":
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            return "", "PDF 解析功能未启用（缺少 pypdf），请复制文字粘贴到文本框。"
-
-        try:
-            reader = PdfReader(io.BytesIO(content))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
-            return text.strip(), None
-        except Exception as exc:
-            return "", f"PDF 解析失败：{exc}"
+        return extract_pdf_text(content)
 
     if extension == "docx":
         try:
@@ -1779,7 +1959,11 @@ async def upload_resume_file(
     if len(content) > MAX_RESUME_FILE_BYTES:
         raise HTTPException(status_code=413, detail="文件过大，请上传 10MB 以内的简历文件。")
 
-    text, error_message = extract_text_from_resume_file(file.filename or "", content)
+    text, error_message = await run_in_threadpool(
+        extract_text_from_resume_file,
+        file.filename or "",
+        content,
+    )
     if error_message:
         raise HTTPException(status_code=422, detail=error_message)
 
@@ -1787,16 +1971,17 @@ async def upload_resume_file(
         raise HTTPException(status_code=422, detail="文件内容为空或未能提取到文本，请检查文件或直接粘贴简历文本。")
 
     saved_text = text[:12000]
+    safe_filename = re.split(r"[\\/]", file.filename or "")[-1].strip()[:255] or "resume"
 
     ensure_profile(user)
     db.execute(
-        "UPDATE profiles SET resume_text = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
-        (saved_text, user["id"]),
+        "UPDATE profiles SET resume_text = ?, resume_filename = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (saved_text, safe_filename, user["id"]),
     )
     db.commit()
 
     return {
-        "filename": file.filename,
+        "filename": safe_filename,
         "text": saved_text,
         "char_count": len(saved_text),
         "original_char_count": len(text),
@@ -1834,9 +2019,9 @@ def create_interview(body: dict | None = None, user: dict = Depends(require_auth
             """
             INSERT INTO interview_sessions (
               id, user_id, target_role, experience_level, interview_type, company_context,
-              focus_areas, difficulty, interviewer_style, status
+              focus_areas, resume_context, difficulty, interviewer_style, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 interview_id,
@@ -1846,6 +2031,7 @@ def create_interview(body: dict | None = None, user: dict = Depends(require_auth
                 interview["interview_type"],
                 interview["company_context"],
                 interview["focus_areas"],
+                interview["resume_context"],
                 interview["difficulty"],
                 interview["interviewer_style"],
                 "draft",
@@ -1865,7 +2051,7 @@ def list_interviews(request: Request, user: dict = Depends(require_auth)):
         interviews = all_rows(
             """
             SELECT id, user_id, target_role, experience_level, interview_type, company_context,
-                   focus_areas, difficulty, interviewer_style, status, created_at, updated_at,
+                   focus_areas, resume_context, difficulty, interviewer_style, status, created_at, updated_at,
                    started_at, completed_at
             FROM interview_sessions
             WHERE user_id = ? AND status = ?
@@ -1877,7 +2063,7 @@ def list_interviews(request: Request, user: dict = Depends(require_auth)):
         interviews = all_rows(
             """
             SELECT id, user_id, target_role, experience_level, interview_type, company_context,
-                   focus_areas, difficulty, interviewer_style, status, created_at, updated_at,
+                   focus_areas, resume_context, difficulty, interviewer_style, status, created_at, updated_at,
                    started_at, completed_at
             FROM interview_sessions
             WHERE user_id = ?
@@ -1909,7 +2095,7 @@ def update_interview(interview_id: str, body: dict | None = None, user: dict = D
         """
         UPDATE interview_sessions
         SET target_role = ?, experience_level = ?, interview_type = ?, company_context = ?,
-            focus_areas = ?, difficulty = ?, interviewer_style = ?, updated_at = CURRENT_TIMESTAMP
+            focus_areas = ?, resume_context = ?, difficulty = ?, interviewer_style = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND user_id = ?
         """,
         (
@@ -1918,6 +2104,7 @@ def update_interview(interview_id: str, body: dict | None = None, user: dict = D
             next_interview["interview_type"],
             next_interview["company_context"],
             next_interview["focus_areas"],
+            next_interview["resume_context"],
             next_interview["difficulty"],
             next_interview["interviewer_style"],
             interview["id"],
@@ -2500,7 +2687,9 @@ def create_evaluation(
     interview = find_interview_by_user_id(interview_id, user["id"])
     if not interview:
         raise error(404, "面试不存在。")
-    message_id = str(json_body(body).get("message_id") or "").strip()
+    payload = json_body(body)
+    message_id = str(payload.get("message_id") or "").strip()
+    force = bool(payload.get("force"))
     if not message_id:
         raise error(400, "请提供要评价的 message_id。")
     message = find_message_by_interview_id(message_id, interview["id"])
@@ -2509,31 +2698,68 @@ def create_evaluation(
     if message["sender_type"] != "candidate" or message["message_type"] not in {"answer", "transcript"}:
         raise error(400, "只能评价候选人的回答消息。")
     existing = find_evaluation_by_message_id(interview["id"], message["id"])
-    if existing:
+    if existing and not force and existing.get("generation_status") != "failed":
         if response:
             response.status_code = 200
         return {"evaluation": existing}
-    evaluation_id = str(uuid4())
-    evaluation = generate_mock_evaluation(message)
-    db.execute(
-        """
-        INSERT INTO interview_evaluations (
-          id, interview_id, message_id, agent_id, score, strengths, issues, suggestions, dimension_scores
+    messages = list_messages_by_interview_id(interview["id"])
+    prior_questions = [
+        item for item in messages
+        if item["order_index"] < message["order_index"]
+        and item["sender_type"] == "agent"
+        and item["message_type"] in AGENT_QUESTION_MESSAGE_TYPES
+    ]
+    question_message = prior_questions[-1] if prior_questions else None
+    agent = find_agent_by_interview_id(question_message["agent_id"], interview["id"]) if question_message and question_message.get("agent_id") else None
+    resume_row = find_resume_analysis_by_user_id(user["id"])
+    resume_analysis = parse_json_object(resume_row.get("analysis_json"), {}) if resume_row else None
+    try:
+        evaluation = generate_ai_evaluation(
+            interview=interview,
+            agent=agent,
+            question=question_message.get("content", "") if question_message else "",
+            answer=message["content"],
+            messages=messages,
+            resume_analysis=resume_analysis,
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            evaluation_id,
-            interview["id"],
-            message["id"],
-            message["agent_id"],
-            evaluation["score"],
-            evaluation["strengths"],
-            evaluation["issues"],
-            evaluation["suggestions"],
-            json.dumps(evaluation["dimension_scores"], ensure_ascii=False),
-        ),
+    except AiEvaluationError as exc:
+        evaluation = {
+            **generate_mock_evaluation(message),
+            "provider": "local",
+            "model": "rules-v1",
+            "prompt_version": EVALUATION_PROMPT_VERSION,
+            "fallback": True,
+            "generation_error": str(exc),
+        }
+
+    evaluation_id = existing["id"] if existing else str(uuid4())
+    values = (
+        evaluation["score"], evaluation["strengths"], evaluation["issues"], evaluation["suggestions"],
+        json.dumps(evaluation["dimension_scores"], ensure_ascii=False), evaluation["provider"],
+        evaluation["model"], evaluation["prompt_version"], "degraded" if evaluation.get("fallback") else "succeeded", evaluation.get("generation_error"),
+        1 if evaluation.get("fallback") else 0,
     )
+    if existing:
+        response.status_code = 200
+        db.execute(
+            """UPDATE interview_evaluations
+               SET score = ?, strengths = ?, issues = ?, suggestions = ?, dimension_scores = ?,
+                   provider = ?, model = ?, prompt_version = ?, generation_status = ?,
+                   generation_error = ?, fallback = ?, agent_id = ?, generated_at = CURRENT_TIMESTAMP,
+                   review_status = 'pending', reviewed_by = NULL, reviewed_at = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND interview_id = ?""",
+            (*values, agent["id"] if agent else message["agent_id"], evaluation_id, interview["id"]),
+        )
+    else:
+        db.execute(
+            """INSERT INTO interview_evaluations (
+                 id, interview_id, message_id, agent_id, score, strengths, issues, suggestions,
+                 dimension_scores, provider, model, prompt_version, generation_status, generation_error, fallback
+                 , generated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (evaluation_id, interview["id"], message["id"], agent["id"] if agent else message["agent_id"], *values),
+        )
     db.execute("UPDATE interview_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?", (interview["id"], user["id"]))
     db.commit()
     return {"evaluation": find_evaluation_by_id(interview["id"], evaluation_id)}
@@ -2548,7 +2774,7 @@ def list_evaluations(interview_id: str, user: dict = Depends(require_auth)):
 
 
 @app.post("/api/interviews/{interview_id}/report", status_code=201)
-def create_report(interview_id: str, response: Response, user: dict = Depends(require_auth)):
+def create_report(interview_id: str, response: Response, body: dict | None = None, user: dict = Depends(require_auth)):
     interview = find_interview_by_user_id(interview_id, user["id"])
     if not interview:
         raise error(404, "面试不存在。")
@@ -2557,9 +2783,26 @@ def create_report(interview_id: str, response: Response, user: dict = Depends(re
     agents = list_agents_by_interview_id(interview["id"])
     messages = list_messages_by_interview_id(interview["id"])
     evaluations = list_evaluations_by_interview_id(interview["id"])
-    report = generate_mock_report(interview, agents, messages, evaluations)
     existing = find_report_by_interview_id(interview["id"], user["id"])
     report_id = existing["id"] if existing else str(uuid4())
+    local_report = generate_mock_report(interview, agents, messages, evaluations)
+    try:
+        report = generate_ai_report(
+            interview=interview,
+            agents=agents,
+            messages=messages,
+            evaluations=evaluations,
+            fallback_report=local_report,
+        )
+    except AiEvaluationError as exc:
+        report = {
+            **local_report,
+            "provider": "local",
+            "model": "rules-v1",
+            "prompt_version": REPORT_PROMPT_VERSION,
+            "fallback": True,
+            "generation_error": str(exc),
+        }
 
     if existing:
         response.status_code = 200
@@ -2568,6 +2811,10 @@ def create_report(interview_id: str, response: Response, user: dict = Depends(re
             UPDATE interview_reports
             SET total_score = ?, grade = ?, pass_recommendation = ?, ability_radar = ?,
                 agent_feedback = ?, timeline_review = ?, summary = ?, suggestions = ?,
+                provider = ?, model = ?, prompt_version = ?, generation_status = ?,
+                generation_error = ?, fallback = ?,
+                generated_at = CURRENT_TIMESTAMP, review_status = 'pending',
+                reviewed_by = NULL, reviewed_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND user_id = ?
             """,
@@ -2580,6 +2827,12 @@ def create_report(interview_id: str, response: Response, user: dict = Depends(re
                 json.dumps(report["timeline_review"], ensure_ascii=False),
                 report["summary"],
                 report["suggestions"],
+                report["provider"],
+                report["model"],
+                report["prompt_version"],
+                "degraded" if report.get("fallback") else "succeeded",
+                report.get("generation_error"),
+                1 if report.get("fallback") else 0,
                 report_id,
                 user["id"],
             ),
@@ -2589,9 +2842,10 @@ def create_report(interview_id: str, response: Response, user: dict = Depends(re
             """
             INSERT INTO interview_reports (
               id, user_id, interview_id, total_score, grade, pass_recommendation,
-              ability_radar, agent_feedback, timeline_review, summary, suggestions
+              ability_radar, agent_feedback, timeline_review, summary, suggestions,
+              provider, model, prompt_version, generation_status, generation_error, fallback, generated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 report_id,
@@ -2605,6 +2859,12 @@ def create_report(interview_id: str, response: Response, user: dict = Depends(re
                 json.dumps(report["timeline_review"], ensure_ascii=False),
                 report["summary"],
                 report["suggestions"],
+                report["provider"],
+                report["model"],
+                report["prompt_version"],
+                "degraded" if report.get("fallback") else "succeeded",
+                report.get("generation_error"),
+                1 if report.get("fallback") else 0,
             ),
         )
     db.commit()
@@ -2621,6 +2881,116 @@ def get_interview_report(interview_id: str, user: dict = Depends(require_auth)):
     if not report:
         raise error(404, "报告不存在。")
     return {"report": report}
+
+
+def _download_json_value(value: Any, fallback: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
+
+
+def _download_markdown_text(value: Any, fallback: str = "—") -> str:
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def build_report_markdown(report: dict, candidate_name: str) -> str:
+    recommendation_labels = {
+        "strong_pass": "强烈建议通过",
+        "pass": "建议通过",
+        "borderline": "谨慎通过",
+        "no_pass": "暂不建议通过",
+    }
+    ability_radar = _download_json_value(report.get("ability_radar"), {})
+    agent_feedback = _download_json_value(report.get("agent_feedback"), [])
+    timeline_review = _download_json_value(report.get("timeline_review"), [])
+    suggestions_value = report.get("suggestions")
+    suggestions = suggestions_value if isinstance(suggestions_value, list) else str(suggestions_value or "").splitlines()
+    suggestions = [str(item).strip() for item in suggestions if str(item).strip()]
+    lines = [
+        "# AI 智能面试综合复盘报告",
+        "",
+        f"- 候选人：{_download_markdown_text(candidate_name, '候选人')}",
+        f"- 应聘岗位：{_download_markdown_text(report.get('target_role'), '目标岗位')}",
+        f"- 综合评分：{int(report.get('total_score') or 0)}/100",
+        f"- 等级：{_download_markdown_text(report.get('grade'))}",
+        f"- 结论：{recommendation_labels.get(report.get('pass_recommendation'), _download_markdown_text(report.get('pass_recommendation'), '待判断'))}",
+        f"- 报告来源：{_download_markdown_text(report.get('provider'), 'local')} · {_download_markdown_text(report.get('model'), 'rules-v1')}",
+        f"- 报告编号：{_download_markdown_text(report.get('id'))}",
+        f"- 生成时间：{_download_markdown_text(report.get('updated_at') or report.get('created_at'))}",
+        "",
+        "## 报告摘要",
+        "",
+        _download_markdown_text(report.get("summary"), "暂无报告摘要。"),
+    ]
+    if isinstance(ability_radar, dict) and ability_radar:
+        lines.extend(["", "## 能力评分", "", "| 维度 | 分数 |", "| --- | ---: |"])
+        for dimension, score in ability_radar.items():
+            safe_dimension = _download_markdown_text(dimension).replace("|", "\\|")
+            lines.append(f"| {safe_dimension} | {int(score or 0)}/100 |")
+    if suggestions:
+        lines.extend(["", "## 训练建议", ""])
+        lines.extend(f"- {item}" for item in suggestions)
+    if isinstance(agent_feedback, list) and agent_feedback:
+        lines.extend(["", "## 面试官综合评价", ""])
+        for item in agent_feedback:
+            if not isinstance(item, dict):
+                continue
+            lines.extend([
+                f"### {_download_markdown_text(item.get('agent_name'), 'AI 面试官')}",
+                "",
+                _download_markdown_text(item.get("comment"), "暂无评价。"),
+                "",
+            ])
+    answers = [item for item in timeline_review if isinstance(item, dict) and item.get("sender_type") == "candidate"] if isinstance(timeline_review, list) else []
+    if answers:
+        lines.extend(["", "## 逐题问答复盘", ""])
+        for index, item in enumerate(answers, start=1):
+            lines.extend([
+                f"### 第 {index} 轮 · {_download_markdown_text(item.get('agent_name'), 'AI 面试官')}",
+                "",
+                f"**问题：** {_download_markdown_text(item.get('question_preview'), '未记录对应问题')}",
+                "",
+                f"**回答：** {_download_markdown_text(item.get('answer_preview') or item.get('content_preview'), '未记录候选人回答')}",
+                "",
+                f"**得分：** {int(item.get('score') or 0)}/100",
+                "",
+                f"**亮点：** {_download_markdown_text(item.get('strengths'), '暂无')}",
+                "",
+                f"**问题：** {_download_markdown_text(item.get('issues'), '暂无')}",
+                "",
+                f"**建议：** {_download_markdown_text(item.get('suggestions'), '暂无')}",
+                "",
+            ])
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_report_download_filename(report: dict) -> str:
+    role = re.sub(r'[^\w\u4e00-\u9fff.-]+', '-', str(report.get("target_role") or "目标岗位"), flags=re.UNICODE).strip("-._")[:80]
+    created_date = str(report.get("updated_at") or report.get("created_at") or datetime.now(timezone.utc).date())[:10]
+    return f"面试复盘报告-{role or '目标岗位'}-{created_date}.md"
+
+
+@app.get("/api/interviews/{interview_id}/report/download")
+def download_interview_report(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    report = find_report_by_interview_id(interview["id"], user["id"])
+    if not report:
+        raise error(404, "报告不存在。")
+    filename = build_report_download_filename(report)
+    content_disposition = f"attachment; filename=interview-report.md; filename*=UTF-8''{quote(filename)}"
+    return Response(
+        content="\ufeff" + build_report_markdown(report, user.get("name") or "候选人"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": content_disposition},
+    )
 
 
 @app.get("/api/reports")
@@ -2643,5 +3013,5 @@ def get_stats(user: dict = Depends(require_auth)):
 
 @app.get("/api/stats/me/dimensions")
 def get_dimensions(user: dict = Depends(require_auth)):
-    stats = refresh_user_skill_stats(user["id"])
-    return {"dimensions": build_user_dimension_stats(stats)}
+    refresh_user_skill_stats(user["id"])
+    return {"dimensions": build_user_dimension_stats(user["id"])}

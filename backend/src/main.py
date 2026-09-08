@@ -26,7 +26,7 @@ from .env import first_env_value, load_env_file, normalize_certificate_env
 load_env_file()
 normalize_certificate_env()
 
-from .database import all_rows, db, get_database_path, one
+from .database import DB_ENGINE, all_rows, db, get_database_path, one
 from .ai_evaluation import (
     AiEvaluationError,
     DIMENSIONS,
@@ -83,6 +83,39 @@ LOGIN_WINDOW_SECONDS = 60 * 15
 MAX_LOGIN_ATTEMPTS = 8
 login_attempts: dict[str, dict[str, int | float]] = {}
 password_reset_attempts: dict[str, dict[str, int | float]] = {}
+
+
+def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+WEBRTC_DIAGNOSTIC_RETENTION_DAYS = bounded_env_int("WEBRTC_DIAGNOSTIC_RETENTION_DAYS", 14, 1, 365)
+WEBRTC_DIAGNOSTIC_CLEANUP_INTERVAL_SECONDS = bounded_env_int(
+    "WEBRTC_DIAGNOSTIC_CLEANUP_INTERVAL_SECONDS",
+    60 * 60 * 24,
+    60,
+    60 * 60 * 24 * 7,
+)
+WEBRTC_DIAGNOSTIC_LEVELS = {"info", "warning", "error"}
+WEBRTC_DIAGNOSTIC_METADATA_KEYS = {
+    "phase",
+    "reason",
+    "elapsed_ms",
+    "attempt",
+    "candidate_type",
+    "network_type",
+    "audio_track_count",
+    "remote_track_count",
+    "data_channel_label",
+    "error_name",
+    "browser_online",
+    "ice_restart",
+}
+webrtc_diagnostic_last_cleanup_at = 0.0
 
 if (
     PASSWORD_RESET_ENABLED
@@ -196,6 +229,62 @@ def read_url_field(body: dict, field: str, label: str, max_length: int, multilin
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return None, f"{label}只支持 http 或 https 链接。"
     return value, None
+
+
+def read_optional_diagnostic_text(body: dict, field: str, max_length: int) -> str | None:
+    value = str(body.get(field) or "").strip()
+    if not value:
+        return None
+    return value[:max_length]
+
+
+def sanitize_webrtc_metadata(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise error(400, "WebRTC 诊断 metadata 必须是对象。")
+    metadata: dict[str, Any] = {}
+    for key, item in value.items():
+        normalized_key = str(key).strip()
+        if normalized_key not in WEBRTC_DIAGNOSTIC_METADATA_KEYS:
+            continue
+        if isinstance(item, bool) or item is None:
+            metadata[normalized_key] = item
+        elif isinstance(item, (int, float)) and math.isfinite(float(item)):
+            metadata[normalized_key] = item
+        elif isinstance(item, str):
+            metadata[normalized_key] = item[:160]
+    return metadata
+
+
+def cleanup_webrtc_diagnostic_events(*, force: bool = False) -> int:
+    global webrtc_diagnostic_last_cleanup_at
+    now = time.monotonic()
+    if not force and now - webrtc_diagnostic_last_cleanup_at < WEBRTC_DIAGNOSTIC_CLEANUP_INTERVAL_SECONDS:
+        return 0
+
+    if DB_ENGINE == "mysql":
+        sql = (
+            "DELETE FROM webrtc_diagnostic_events "
+            f"WHERE created_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL {WEBRTC_DIAGNOSTIC_RETENTION_DAYS} DAY)"
+        )
+        params: tuple = ()
+    else:
+        sql = "DELETE FROM webrtc_diagnostic_events WHERE created_at < datetime('now', ?)"
+        params = (f"-{WEBRTC_DIAGNOSTIC_RETENTION_DAYS} days",)
+
+    with db:
+        cursor = db.execute(sql, params)
+        deleted = max(0, int(cursor.rowcount or 0))
+        cursor.close()
+    webrtc_diagnostic_last_cleanup_at = now
+    return deleted
+
+
+try:
+    cleanup_webrtc_diagnostic_events(force=True)
+except Exception as exc:
+    print(f"WebRTC diagnostic cleanup skipped: {exc}", flush=True)
 
 
 def parse_profile_input(body: dict, fallback_name: str) -> dict:
@@ -2549,6 +2638,95 @@ async def qwen_omni_webrtc_stop(interview_id: str, _body: dict | None = None, us
             }
         ]
     }
+
+
+@app.post("/api/interviews/{interview_id}/webrtc-events", status_code=201)
+async def create_webrtc_diagnostic_event(
+    interview_id: str,
+    body: dict | None = None,
+    user: dict = Depends(require_auth),
+):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+
+    payload = json_body(body)
+    event_type = read_optional_diagnostic_text(payload, "event_type", 80)
+    if not event_type:
+        raise error(400, "WebRTC 诊断事件类型不能为空。")
+    level = (read_optional_diagnostic_text(payload, "level", 20) or "info").lower()
+    if level == "warn":
+        level = "warning"
+    if level not in WEBRTC_DIAGNOSTIC_LEVELS:
+        raise error(400, "WebRTC 诊断级别不正确。")
+
+    metadata = sanitize_webrtc_metadata(payload.get("metadata"))
+    event_id = str(uuid4())
+    cleanup_webrtc_diagnostic_events()
+    with db:
+        db.execute(
+            """
+            INSERT INTO webrtc_diagnostic_events (
+              id, interview_id, user_id, session_id, provider, event_type, level,
+              connection_state, ice_connection_state, ice_gathering_state,
+              signaling_state, data_channel_state, message, metadata_json,
+              client_created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                interview_id,
+                user["id"],
+                read_optional_diagnostic_text(payload, "session_id", 128),
+                read_optional_diagnostic_text(payload, "provider", 80) or "qwen-omni-realtime-webrtc",
+                event_type,
+                level,
+                read_optional_diagnostic_text(payload, "connection_state", 40),
+                read_optional_diagnostic_text(payload, "ice_connection_state", 40),
+                read_optional_diagnostic_text(payload, "ice_gathering_state", 40),
+                read_optional_diagnostic_text(payload, "signaling_state", 40),
+                read_optional_diagnostic_text(payload, "data_channel_state", 40),
+                read_optional_diagnostic_text(payload, "message", 500),
+                json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+                read_optional_diagnostic_text(payload, "client_created_at", 64),
+            ),
+        ).close()
+    return {"event": {"id": event_id, "eventType": event_type, "retentionDays": WEBRTC_DIAGNOSTIC_RETENTION_DAYS}}
+
+
+@app.get("/api/interviews/{interview_id}/webrtc-events")
+def list_webrtc_diagnostic_events(
+    interview_id: str,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    try:
+        limit = int(request.query_params.get("limit", "200"))
+    except ValueError:
+        limit = 200
+    limit = max(1, min(500, limit))
+    rows = all_rows(
+        """
+        SELECT id, session_id, provider, event_type, level, connection_state,
+               ice_connection_state, ice_gathering_state, signaling_state,
+               data_channel_state, message, metadata_json, client_created_at,
+               created_at
+        FROM webrtc_diagnostic_events
+        WHERE interview_id = ? AND user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (interview_id, user["id"], limit),
+    )
+    for row in rows:
+        try:
+            row["metadata"] = json.loads(row.pop("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            row["metadata"] = {}
+    return {"events": rows, "retentionDays": WEBRTC_DIAGNOSTIC_RETENTION_DAYS}
 
 
 @app.websocket("/ws/interviews/{interview_id}/qwen/omni-realtime")

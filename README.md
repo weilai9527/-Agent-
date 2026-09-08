@@ -162,6 +162,29 @@ Excel 仅导入草稿版本，支持 `merge` 和 `replace`。工作簿需要包�
 - `POST /api/admin/catalog/job-suggestions/{suggestion_id}/review`
 - `POST /api/admin/catalog/job-suggestions/{suggestion_id}/merge`
 
+## WebRTC 诊断日志
+
+候选人端会记录千问官方 WebRTC 的关键状态，包括麦克风获取、ICE 收集、SDP
+耗时、连接状态、数据通道、远端音频轨道、自动播放失败和上游错误。日志不会保存
+SDP、API Key、音频或字幕正文。
+
+- `POST /api/interviews/{interview_id}/webrtc-events`：写入当前用户的诊断事件
+- `GET /api/interviews/{interview_id}/webrtc-events?limit=200`：查看当前用户的诊断事件
+- `GET /api/admin/connection-logs`：管理端按级别、事件和关键词查询诊断事件
+
+管理端侧栏的“连接日志”页面会展示近 24 小时事件、错误、警告和连接会话数，
+并可查看单条事件的 ICE、信令、数据通道及安全诊断字段。
+
+诊断事件默认保留 14 天。服务启动时会清理一次，运行期间默认至多每天清理一次：
+
+```env
+WEBRTC_DIAGNOSTIC_RETENTION_DAYS=14
+WEBRTC_DIAGNOSTIC_CLEANUP_INTERVAL_SECONDS=86400
+```
+
+保留天数会限制在 1～365 天；清理只影响 `webrtc_diagnostic_events`，不会删除
+面试、消息、评价或报告。
+
 ## 常用命令
 
 ```bash

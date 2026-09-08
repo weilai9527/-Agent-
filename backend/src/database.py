@@ -364,6 +364,27 @@ def _init_sqlite_db() -> None:
           FOREIGN KEY (agent_id) REFERENCES interview_agents(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS webrtc_diagnostic_events (
+          id TEXT PRIMARY KEY,
+          interview_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          session_id TEXT,
+          provider TEXT NOT NULL DEFAULT 'qwen-omni-realtime-webrtc',
+          event_type TEXT NOT NULL,
+          level TEXT NOT NULL DEFAULT 'info',
+          connection_state TEXT,
+          ice_connection_state TEXT,
+          ice_gathering_state TEXT,
+          signaling_state TEXT,
+          data_channel_state TEXT,
+          message TEXT,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          client_created_at TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS interview_evaluations (
           id TEXT PRIMARY KEY,
           interview_id TEXT NOT NULL,
@@ -446,6 +467,8 @@ def _init_sqlite_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_interview_agents_interview_id ON interview_agents(interview_id);
         CREATE INDEX IF NOT EXISTS idx_interview_messages_interview_id ON interview_messages(interview_id);
         CREATE INDEX IF NOT EXISTS idx_interview_messages_agent_id ON interview_messages(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_webrtc_events_interview_id ON webrtc_diagnostic_events(interview_id);
+        CREATE INDEX IF NOT EXISTS idx_webrtc_events_created_at ON webrtc_diagnostic_events(created_at);
         CREATE INDEX IF NOT EXISTS idx_interview_evaluations_interview_id ON interview_evaluations(interview_id);
         CREATE INDEX IF NOT EXISTS idx_interview_evaluations_message_id ON interview_evaluations(message_id);
         CREATE INDEX IF NOT EXISTS idx_interview_reports_user_id ON interview_reports(user_id);
@@ -618,6 +641,28 @@ def init_db() -> None:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
         """
+        CREATE TABLE IF NOT EXISTS webrtc_diagnostic_events (
+          id CHAR(36) PRIMARY KEY,
+          interview_id CHAR(36) NOT NULL,
+          user_id CHAR(36) NOT NULL,
+          session_id VARCHAR(128),
+          provider VARCHAR(80) NOT NULL DEFAULT 'qwen-omni-realtime-webrtc',
+          event_type VARCHAR(80) NOT NULL,
+          level VARCHAR(20) NOT NULL DEFAULT 'info',
+          connection_state VARCHAR(40),
+          ice_connection_state VARCHAR(40),
+          ice_gathering_state VARCHAR(40),
+          signaling_state VARCHAR(40),
+          data_channel_state VARCHAR(40),
+          message VARCHAR(500),
+          metadata_json TEXT NOT NULL,
+          client_created_at VARCHAR(64),
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
         CREATE TABLE IF NOT EXISTS interview_evaluations (
           id CHAR(36) PRIMARY KEY,
           interview_id CHAR(36) NOT NULL,
@@ -749,6 +794,8 @@ def init_db() -> None:
     _ensure_index("interview_agents", "idx_interview_agents_interview_id", "interview_id")
     _ensure_index("interview_messages", "idx_interview_messages_interview_id", "interview_id")
     _ensure_index("interview_messages", "idx_interview_messages_agent_id", "agent_id")
+    _ensure_index("webrtc_diagnostic_events", "idx_webrtc_events_interview_id", "interview_id")
+    _ensure_index("webrtc_diagnostic_events", "idx_webrtc_events_created_at", "created_at")
     _ensure_index("interview_evaluations", "idx_interview_evaluations_interview_id", "interview_id")
     _ensure_index("interview_evaluations", "idx_interview_evaluations_message_id", "message_id")
     _ensure_index("interview_reports", "idx_interview_reports_user_id", "user_id")

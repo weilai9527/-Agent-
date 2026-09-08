@@ -2651,6 +2651,36 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const qwenRecognitionSubmittedRef = useRef(false);
   const savedRealtimeEventsRef = useRef(new Set());
 
+  const recordOmniWebrtcDiagnostic = (eventType, {
+    level = 'info',
+    message = '',
+    peerConnection = omniWebrtcPeerRef.current,
+    dataChannel = omniWebrtcDataChannelRef.current,
+    metadata = {},
+  } = {}) => {
+    const sessionId = omniWebrtcSessionIdRef.current;
+    if (!interviewId || !sessionId) return;
+    void apiRequest(`/api/interviews/${interviewId}/webrtc-events`, {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: 'qwen-omni-realtime-webrtc',
+        session_id: sessionId,
+        event_type: eventType,
+        level,
+        connection_state: peerConnection?.connectionState || '',
+        ice_connection_state: peerConnection?.iceConnectionState || '',
+        ice_gathering_state: peerConnection?.iceGatheringState || '',
+        signaling_state: peerConnection?.signalingState || '',
+        data_channel_state: dataChannel?.readyState || '',
+        message,
+        metadata,
+        client_created_at: new Date().toISOString(),
+      }),
+    }).catch(() => {
+      // Diagnostics must never interrupt the interview flow.
+    });
+  };
+
   const activeAgent = agents.find((agent) => agent.status === 'active') || agents.find((agent) => agent.status !== 'completed') || agents[0] || null;
   const currentAgentName = activeAgent?.agent_name || liveInterview.currentAgent;
   const currentQuestion =
@@ -2839,15 +2869,23 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   };
 
   const waitForPeerIceGathering = (connection) => {
-    if (connection.iceGatheringState === 'complete') return Promise.resolve();
+    if (connection.iceGatheringState === 'complete') return Promise.resolve('complete');
     return new Promise((resolve) => {
-      const timeoutId = window.setTimeout(resolve, 3000);
-      connection.addEventListener('icegatheringstatechange', () => {
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        connection.removeEventListener('icegatheringstatechange', handleStateChange);
+        resolve(result);
+      };
+      const timeoutId = window.setTimeout(() => finish('timeout'), 3000);
+      const handleStateChange = () => {
         if (connection.iceGatheringState === 'complete') {
           window.clearTimeout(timeoutId);
-          resolve();
+          finish('complete');
         }
-      });
+      };
+      connection.addEventListener('icegatheringstatechange', handleStateChange);
     });
   };
 
@@ -2966,6 +3004,10 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   };
 
   const stopOmniWebrtcCall = (message = 'Qwen-Omni WebRTC 已断开', { resetAudio = false } = {}) => {
+    recordOmniWebrtcDiagnostic('call_stopped', {
+      message,
+      metadata: { reason: resetAudio ? 'reset_audio' : 'manual_or_provider_switch' },
+    });
     stopOmniRecognition();
     omniWebrtcDataChannelRef.current?.close();
     omniWebrtcStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -3217,6 +3259,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
     setOmniStatus('connected');
     setOmniMessage('Qwen-Omni WebRTC 已接通，请直接说话');
+    recordOmniWebrtcDiagnostic('session_update_sent', { dataChannel: channel });
   };
 
   const sendOmniWebrtcOpening = (channel) => {
@@ -3235,12 +3278,14 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const handleOmniWebrtcEvent = (event, channel) => {
     if (event.type === 'session.created') {
       omniWebrtcDataChannelRef.current = channel;
+      recordOmniWebrtcDiagnostic('session_created', { dataChannel: channel });
       sendOmniWebrtcSessionUpdate(channel);
       return;
     }
 
     if (event.type === 'session.updated') {
       omniWebrtcDataChannelRef.current = channel;
+      recordOmniWebrtcDiagnostic('session_updated', { dataChannel: channel });
       sendOmniWebrtcOpening(channel);
       setOmniStatus('connected');
       setOmniMessage('Qwen-Omni 会话配置已生效，请直接说话');
@@ -3342,6 +3387,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
     if (event.type === 'error') {
       const message = event.error?.message || event.message || 'Qwen-Omni WebRTC 会话发生错误';
+      recordOmniWebrtcDiagnostic('upstream_error', {
+        level: 'error',
+        message,
+        dataChannel: channel,
+        metadata: { error_name: String(event.error?.type || event.error?.code || 'upstream_error') },
+      });
       setOmniStatus('error');
       setOmniMessage(message);
       setError(message);
@@ -3391,8 +3442,21 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       const peerConnection = new RTCPeerConnection({ iceServers: [] });
       omniWebrtcPeerRef.current = peerConnection;
       omniWebrtcSessionIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      recordOmniWebrtcDiagnostic('call_start_requested', {
+        peerConnection,
+        metadata: { browser_online: navigator.onLine },
+      });
 
       peerConnection.onconnectionstatechange = () => {
+        recordOmniWebrtcDiagnostic('connection_state_changed', {
+          level: peerConnection.connectionState === 'failed'
+            ? 'error'
+            : peerConnection.connectionState === 'disconnected'
+              ? 'warning'
+              : 'info',
+          peerConnection,
+          message: `connectionState=${peerConnection.connectionState}`,
+        });
         if (peerConnection.connectionState === 'connected') {
           setOmniStatus('connected');
           setOmniMessage('Qwen-Omni WebRTC 已连接，请直接说话');
@@ -3408,9 +3472,28 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         }
       };
 
+      peerConnection.oniceconnectionstatechange = () => {
+        recordOmniWebrtcDiagnostic('ice_connection_state_changed', {
+          level: ['failed', 'disconnected'].includes(peerConnection.iceConnectionState) ? 'warning' : 'info',
+          peerConnection,
+          message: `iceConnectionState=${peerConnection.iceConnectionState}`,
+        });
+      };
+
+      peerConnection.onicegatheringstatechange = () => {
+        recordOmniWebrtcDiagnostic('ice_gathering_state_changed', {
+          peerConnection,
+          message: `iceGatheringState=${peerConnection.iceGatheringState}`,
+        });
+      };
+
       peerConnection.ontrack = async (event) => {
         const remoteStream = event.streams[0];
         if (!remoteStream) return;
+        recordOmniWebrtcDiagnostic('remote_audio_track_received', {
+          peerConnection,
+          metadata: { remote_track_count: remoteStream.getAudioTracks().length },
+        });
         const remoteAudio = document.createElement('audio');
         remoteAudio.autoplay = true;
         remoteAudio.playsInline = true;
@@ -3422,17 +3505,44 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         try {
           await remoteAudio.play();
           setOmniSignals((current) => ({ ...current, playableAudio: true }));
-        } catch {
+          recordOmniWebrtcDiagnostic('remote_audio_playing', { peerConnection });
+        } catch (playError) {
+          recordOmniWebrtcDiagnostic('remote_audio_play_failed', {
+            level: 'warning',
+            message: playError.message || '浏览器拒绝自动播放远端音频',
+            peerConnection,
+            metadata: { error_name: playError.name || 'play_error' },
+          });
           setOmniMessage('已收到 Qwen-Omni 远端音频轨道，请检查浏览器自动播放权限');
         }
       };
 
       const attachDataChannel = (channel) => {
         channel.addEventListener('message', (event) => handleOmniWebrtcDataChannelMessage(event, channel));
+        channel.addEventListener('open', () => {
+          omniWebrtcDataChannelRef.current = channel;
+          recordOmniWebrtcDiagnostic('data_channel_opened', {
+            dataChannel: channel,
+            metadata: { data_channel_label: channel.label || '' },
+          });
+        });
         channel.addEventListener('close', () => {
+          recordOmniWebrtcDiagnostic('data_channel_closed', {
+            level: 'warning',
+            dataChannel: channel,
+            metadata: { data_channel_label: channel.label || '' },
+          });
           if (omniWebrtcDataChannelRef.current === channel) {
             omniWebrtcDataChannelRef.current = null;
           }
+        });
+        channel.addEventListener('error', (channelError) => {
+          recordOmniWebrtcDiagnostic('data_channel_error', {
+            level: 'error',
+            message: channelError.message || 'WebRTC 数据通道发生错误',
+            dataChannel: channel,
+            metadata: { data_channel_label: channel.label || '' },
+          });
         });
       };
 
@@ -3441,6 +3551,10 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       omniWebrtcStreamRef.current = stream;
+      recordOmniWebrtcDiagnostic('microphone_acquired', {
+        peerConnection,
+        metadata: { audio_track_count: stream.getAudioTracks().length },
+      });
       stream.getAudioTracks().forEach((track) => peerConnection.addTrack(track, stream));
       omniWebrtcAudioSenderRef.current = peerConnection.getSenders().find((sender) => sender.track?.kind === 'audio') || null;
       omniWebrtcAudioTrackRef.current = omniWebrtcAudioSenderRef.current?.track || stream.getAudioTracks()[0] || null;
@@ -3453,8 +3567,17 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         offerToReceiveVideo: false,
       });
       await peerConnection.setLocalDescription(offer);
-      await waitForPeerIceGathering(peerConnection);
+      const iceGatheringResult = await waitForPeerIceGathering(peerConnection);
+      recordOmniWebrtcDiagnostic('local_offer_ready', {
+        level: iceGatheringResult === 'timeout' ? 'warning' : 'info',
+        peerConnection,
+        message: iceGatheringResult === 'timeout'
+          ? 'ICE 候选收集等待 3 秒后超时，继续交换 SDP'
+          : 'ICE 候选收集完成',
+        metadata: { phase: iceGatheringResult },
+      });
 
+      const sdpStartedAt = Date.now();
       const data = await apiRequest(`/api/interviews/${interviewId}/qwen/omni-realtime/sdp`, {
         method: 'POST',
         body: JSON.stringify({
@@ -3464,14 +3587,27 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           activeAgent: currentAgentName,
         }),
       });
+      recordOmniWebrtcDiagnostic('sdp_answer_received', {
+        peerConnection,
+        metadata: { elapsed_ms: Date.now() - sdpStartedAt },
+      });
 
       omniWebrtcSessionUpdateRef.current = data.session_update;
       await peerConnection.setRemoteDescription({
         type: data.answer?.type || 'answer',
         sdp: normalizeSdp(data.answer?.sdp),
       });
+      recordOmniWebrtcDiagnostic('remote_description_applied', { peerConnection });
       setOmniMessage(`Qwen-Omni WebRTC SDP 已交换，等待 ${data.model || '实时模型'} 会话创建`);
     } catch (requestError) {
+      recordOmniWebrtcDiagnostic('call_start_failed', {
+        level: 'error',
+        message: requestError.message || 'Qwen-Omni WebRTC 启动失败',
+        metadata: {
+          error_name: requestError.name || 'start_error',
+          browser_online: navigator.onLine,
+        },
+      });
       stopOmniWebrtcCall('Qwen-Omni WebRTC 启动失败', { resetAudio: true });
       setOmniStatus('error');
       setOmniMessage(requestError.message);

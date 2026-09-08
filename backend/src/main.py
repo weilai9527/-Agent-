@@ -939,6 +939,8 @@ def pass_recommendation_from_score(score: int) -> str:
 
 
 def build_ability_radar(evaluations: list[dict]) -> dict:
+    if not evaluations:
+        return {}
     radar = {}
     for dimension in ["technical_depth", "expression_clarity", "business_understanding"]:
         radar[dimension] = clamp_score(average([parse_json_object(e.get("dimension_scores")).get(dimension) for e in evaluations], 70))
@@ -1006,8 +1008,39 @@ def build_timeline_review(messages: list[dict], evaluations: list[dict]) -> list
 
 
 def generate_mock_report(interview: dict, agents: list[dict], messages: list[dict], evaluations: list[dict]) -> dict:
+    candidate_messages = [
+        message
+        for message in messages
+        if message.get("sender_type") == "candidate" and str(message.get("content") or "").strip()
+    ]
+    if not candidate_messages:
+        return {
+            "total_score": 0,
+            "grade": "-",
+            "pass_recommendation": "insufficient_evidence",
+            "ability_radar": {},
+            "agent_feedback": [
+                {
+                    "agent_id": agent["id"],
+                    "agent_name": agent["agent_name"],
+                    "agent_type": agent["agent_type"],
+                    "score": None,
+                    "comment": "未记录到候选人回答，无法形成可靠评价。",
+                }
+                for agent in agents
+            ],
+            "timeline_review": [],
+            "summary": "本次面试未记录到候选人回答，缺少可用于评分和复盘的证据，因此不生成综合评分、能力指标或推进建议。",
+            "suggestions": "",
+            "provider": "local",
+            "model": "evidence-check-v1",
+            "prompt_version": REPORT_PROMPT_VERSION,
+            "fallback": False,
+            "generation_error": None,
+            "generation_status": "insufficient_evidence",
+        }
     total_score = clamp_score(average([evaluation["score"] for evaluation in evaluations], 72 if messages else 60))
-    candidate_answers = len([message for message in messages if message["sender_type"] == "candidate"])
+    candidate_answers = len(candidate_messages)
     agent_questions = len([message for message in messages if message["sender_type"] == "agent"])
     return {
         "total_score": total_score,
@@ -1600,7 +1633,14 @@ def list_reports_by_user_id(user_id: str) -> list[dict]:
                reports.summary, reports.provider, reports.model, reports.prompt_version,
                reports.generation_status, reports.generation_error, reports.fallback,
                reports.generated_at, reports.review_status, reports.reviewed_by, reports.reviewed_at,
-               reports.created_at, reports.updated_at
+               reports.created_at, reports.updated_at,
+               EXISTS (
+                 SELECT 1
+                 FROM interview_messages AS messages
+                 WHERE messages.interview_id = reports.interview_id
+                   AND messages.sender_type = 'candidate'
+                   AND TRIM(messages.content) <> ''
+               ) AS has_candidate_answer
         FROM interview_reports AS reports
         JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
         WHERE reports.user_id = ?
@@ -1618,7 +1658,14 @@ def list_full_reports_by_user_id(user_id: str) -> list[dict]:
                reports.total_score, reports.ability_radar, reports.provider, reports.model,
                reports.prompt_version, reports.generation_status, reports.generation_error,
                reports.fallback, reports.generated_at, reports.review_status,
-               reports.reviewed_by, reports.reviewed_at, reports.created_at, reports.updated_at
+               reports.reviewed_by, reports.reviewed_at, reports.created_at, reports.updated_at,
+               EXISTS (
+                 SELECT 1
+                 FROM interview_messages AS messages
+                 WHERE messages.interview_id = reports.interview_id
+                   AND messages.sender_type = 'candidate'
+                   AND TRIM(messages.content) <> ''
+               ) AS has_candidate_answer
         FROM interview_reports AS reports
         JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
         WHERE reports.user_id = ?
@@ -1664,9 +1711,15 @@ def refresh_user_skill_stats(user_id: str) -> dict:
         (user_id,),
     ) or {"total_interviews": 0, "completed_interviews": 0}
     reports = list_full_reports_by_user_id(user_id)
+    scored_reports = [
+        report
+        for report in reports
+        if report.get("generation_status") != "insufficient_evidence"
+        and ("has_candidate_answer" not in report or bool(report.get("has_candidate_answer")))
+    ]
     dimensions = ["technical_depth", "expression_clarity", "business_understanding"]
     dimension_values: dict[str, list[int]] = {dimension: [] for dimension in dimensions}
-    for report in reports:
+    for report in scored_reports:
         radar = parse_json_object(report.get("ability_radar"))
         for dimension in dimensions:
             value = radar.get(dimension)
@@ -1679,8 +1732,8 @@ def refresh_user_skill_stats(user_id: str) -> dict:
         [{"dimension": dimension, "score": score} for dimension, score in dimension_averages.items() if score > 0],
         key=lambda item: item["score"],
     )[:2]
-    recent_focus = reports[-1]["target_role"] if reports else None
-    average_total_score = clamp_stat_score(average([report["total_score"] for report in reports], 0))
+    recent_focus = scored_reports[-1]["target_role"] if scored_reports else None
+    average_total_score = clamp_stat_score(average([report["total_score"] for report in scored_reports], 0))
     existing = one("SELECT id FROM user_skill_stats WHERE user_id = ?", (user_id,))
     stats_id = existing["id"] if existing else str(uuid4())
 
@@ -1751,6 +1804,8 @@ def build_user_dimension_stats(user_id: str) -> list[dict]:
     reports = list_full_reports_by_user_id(user_id)
     histories: dict[str, list[dict]] = {dimension: [] for dimension in DIMENSIONS}
     for report in reports:
+        if "has_candidate_answer" in report and not bool(report.get("has_candidate_answer")):
+            continue
         radar = parse_json_object(report.get("ability_radar"))
         for dimension in DIMENSIONS:
             value = radar.get(dimension)
@@ -2964,23 +3019,27 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
     existing = find_report_by_interview_id(interview["id"], user["id"])
     report_id = existing["id"] if existing else str(uuid4())
     local_report = generate_mock_report(interview, agents, messages, evaluations)
-    try:
-        report = generate_ai_report(
-            interview=interview,
-            agents=agents,
-            messages=messages,
-            evaluations=evaluations,
-            fallback_report=local_report,
-        )
-    except AiEvaluationError as exc:
-        report = {
-            **local_report,
-            "provider": "local",
-            "model": "rules-v1",
-            "prompt_version": REPORT_PROMPT_VERSION,
-            "fallback": True,
-            "generation_error": str(exc),
-        }
+    if local_report.get("generation_status") == "insufficient_evidence":
+        report = local_report
+    else:
+        try:
+            report = generate_ai_report(
+                interview=interview,
+                agents=agents,
+                messages=messages,
+                evaluations=evaluations,
+                fallback_report=local_report,
+            )
+        except AiEvaluationError as exc:
+            report = {
+                **local_report,
+                "provider": "local",
+                "model": "rules-v1",
+                "prompt_version": REPORT_PROMPT_VERSION,
+                "fallback": True,
+                "generation_error": str(exc),
+            }
+    generation_status = report.get("generation_status") or ("degraded" if report.get("fallback") else "succeeded")
 
     if existing:
         response.status_code = 200
@@ -3008,7 +3067,7 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
                 report["provider"],
                 report["model"],
                 report["prompt_version"],
-                "degraded" if report.get("fallback") else "succeeded",
+                generation_status,
                 report.get("generation_error"),
                 1 if report.get("fallback") else 0,
                 report_id,
@@ -3040,7 +3099,7 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
                 report["provider"],
                 report["model"],
                 report["prompt_version"],
-                "degraded" if report.get("fallback") else "succeeded",
+                generation_status,
                 report.get("generation_error"),
                 1 if report.get("fallback") else 0,
             ),
@@ -3083,6 +3142,7 @@ def build_report_markdown(report: dict, candidate_name: str) -> str:
         "pass": "建议通过",
         "borderline": "谨慎通过",
         "no_pass": "暂不建议通过",
+        "insufficient_evidence": "证据不足，未作判断",
     }
     ability_radar = _download_json_value(report.get("ability_radar"), {})
     agent_feedback = _download_json_value(report.get("agent_feedback"), [])
@@ -3090,12 +3150,13 @@ def build_report_markdown(report: dict, candidate_name: str) -> str:
     suggestions_value = report.get("suggestions")
     suggestions = suggestions_value if isinstance(suggestions_value, list) else str(suggestions_value or "").splitlines()
     suggestions = [str(item).strip() for item in suggestions if str(item).strip()]
+    score_text = "未评分" if report.get("generation_status") == "insufficient_evidence" else f"{int(report.get('total_score') or 0)}/100"
     lines = [
         "# AI 智能面试综合复盘报告",
         "",
         f"- 候选人：{_download_markdown_text(candidate_name, '候选人')}",
         f"- 应聘岗位：{_download_markdown_text(report.get('target_role'), '目标岗位')}",
-        f"- 综合评分：{int(report.get('total_score') or 0)}/100",
+        f"- 综合评分：{score_text}",
         f"- 等级：{_download_markdown_text(report.get('grade'))}",
         f"- 结论：{recommendation_labels.get(report.get('pass_recommendation'), _download_markdown_text(report.get('pass_recommendation'), '待判断'))}",
         f"- 报告来源：{_download_markdown_text(report.get('provider'), 'local')} · {_download_markdown_text(report.get('model'), 'rules-v1')}",

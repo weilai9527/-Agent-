@@ -611,6 +611,7 @@ const recommendationLabels = {
   pass: '建议通过',
   borderline: '谨慎推进',
   no_pass: '暂不通过',
+  insufficient_evidence: '证据不足',
 };
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
@@ -951,12 +952,16 @@ function reportToViewModel(reportData, user) {
     latestQuestion = null;
   });
 
+  // Older reports may have been saved as "succeeded" even though no candidate
+  // answer existed. The deterministic timeline is the evidence source of truth.
+  const hasEvidence = reportData?.generation_status !== 'insufficient_evidence' && timeline.length > 0;
+
   return {
     candidate: user?.name || '候选人',
     role: reportData?.target_role || '目标岗位',
-    result: recommendationLabels[reportData?.pass_recommendation] || '待判断',
-    grade: reportData?.grade || '-',
-    score: reportData?.total_score || 0,
+    result: hasEvidence ? (recommendationLabels[reportData?.pass_recommendation] || '待判断') : '证据不足',
+    grade: hasEvidence ? (reportData?.grade || '-') : '-',
+    score: hasEvidence ? (reportData?.total_score || 0) : 0,
     generatedAt: formatDateTime(reportData?.updated_at || reportData?.created_at),
     interviewId: reportData?.interview_id || '-',
     provider: reportData?.provider || 'local',
@@ -965,24 +970,28 @@ function reportToViewModel(reportData, user) {
     generationStatus: reportData?.generation_status || 'succeeded',
     reviewStatus: reportData?.review_status || 'pending',
     fallback: Boolean(reportData?.fallback),
+    hasEvidence,
     generationError: reportData?.generation_error || '',
-    summary: reportData?.summary || '暂无报告摘要。',
-    suggestions,
-    radar: Object.entries(abilityRadar).map(([key, value]) => ({
+    summary: hasEvidence ? (reportData?.summary || '暂无报告摘要。') : '本次面试未记录到候选人回答，缺少可用于评分和复盘的证据，因此不生成综合评分、能力指标或推进建议。',
+    suggestions: hasEvidence ? suggestions : [],
+    radar: (hasEvidence ? Object.entries(abilityRadar) : []).map(([key, value]) => ({
       subject: dimensionLabels[key] || key,
       value: Number(value) || 0,
     })),
-    metrics: Object.entries(abilityRadar).map(([key, value]) => ({
+    metrics: (hasEvidence ? Object.entries(abilityRadar) : []).map(([key, value]) => ({
       label: dimensionLabels[key] || key,
       value: Number(value) || 0,
       note: `本场${dimensionLabels[key] || key}表现为 ${Number(value) || 0}/100，综合单题回答证据生成。`,
     })),
-    interviewers: agentFeedback.map((item) => ({
-      name: item.agent_name,
-      decision: item.score >= 80 ? '表现稳定' : item.score >= 70 ? '继续观察' : '需要加强',
-      color: item.score >= 80 ? 'green' : item.score >= 70 ? 'blue' : 'amber',
-      text: item.comment,
-    })),
+    interviewers: agentFeedback.map((item) => {
+      const hasScore = item.score !== null && item.score !== undefined && item.score !== '' && Number.isFinite(Number(item.score));
+      return {
+        name: item.agent_name,
+        decision: hasEvidence && hasScore ? (item.score >= 80 ? '表现稳定' : item.score >= 70 ? '继续观察' : '需要加强') : '证据不足',
+        color: hasEvidence && hasScore ? (item.score >= 80 ? 'green' : item.score >= 70 ? 'blue' : 'amber') : 'blue',
+        text: hasEvidence ? item.comment : '未记录到候选人回答，无法形成可靠评价。',
+      };
+    }),
     timeline,
   };
 }
@@ -4554,9 +4563,11 @@ function ReportPage({ interviewId, user }) {
   }
 
   const currentReport = reportToViewModel(reportData, user);
-  const radarData = currentReport.radar.length > 0 ? currentReport.radar : report.radar.slice(0, 3);
-  const metrics = currentReport.metrics.length > 0 ? currentReport.metrics : report.metrics.slice(0, 3);
-  const reportStatusLabel = currentReport.generationStatus === 'degraded'
+  const radarData = currentReport.radar;
+  const metrics = currentReport.metrics;
+  const reportStatusLabel = !currentReport.hasEvidence
+    ? '证据不足，未评分'
+    : currentReport.generationStatus === 'degraded'
     ? '已降级为本地规则'
     : currentReport.generationStatus === 'succeeded'
       ? (currentReport.fallback ? '已生成（兜底）' : 'AI 已生成')
@@ -4583,7 +4594,7 @@ function ReportPage({ interviewId, user }) {
               </div>
               <div>
                 <dt>报告来源</dt>
-                <dd>{currentReport.fallback ? `本地规则兜底 · ${currentReport.model}` : `${currentReport.provider} · ${currentReport.model}`}</dd>
+                <dd>{!currentReport.hasEvidence ? `证据校验 · ${currentReport.model}` : currentReport.fallback ? `本地规则兜底 · ${currentReport.model}` : `${currentReport.provider} · ${currentReport.model}`}</dd>
               </div>
               <div>
                 <dt>报告编号</dt>
@@ -4595,7 +4606,7 @@ function ReportPage({ interviewId, user }) {
         <div className="decision-badge">
           <span>{currentReport.result}</span>
           <strong>{currentReport.grade}</strong>
-          <small>综合评分 {currentReport.score}/100</small>
+          <small>{currentReport.hasEvidence ? `综合评分 ${currentReport.score}/100` : '综合评分 未生成'}</small>
         </div>
       </header>
 
@@ -4631,22 +4642,36 @@ function ReportPage({ interviewId, user }) {
         <div className="kpi-item">
           <Award size={16} />
           <span>复核状态</span>
-          <strong>{currentReport.reviewStatus === 'approved' ? '已通过复核' : currentReport.reviewStatus === 'rejected' ? '复核未通过' : '待人工复核'}</strong>
+          <strong>{!currentReport.hasEvidence ? '不适用' : currentReport.reviewStatus === 'approved' ? '已通过复核' : currentReport.reviewStatus === 'rejected' ? '复核未通过' : '待人工复核'}</strong>
         </div>
       </section>
 
       <section className="dashboard-grid">
         <Card title="核心能力模型" icon={<BarChart3 size={18} />}>
           <div className="radar-wrap">
-            <CompetencyRadar data={radarData} />
+            {radarData.length > 0 ? (
+              <CompetencyRadar data={radarData} />
+            ) : (
+              <div className="empty-state">
+                <strong>暂无能力评分</strong>
+                <span>未记录候选人回答，无法生成能力雷达。</span>
+              </div>
+            )}
           </div>
         </Card>
 
         <Card title="逐项得分指标" icon={<FileText size={18} />}>
           <div className="metrics-list">
-            {metrics.map((item) => (
-              <ProgressMetric key={item.label} item={item} />
-            ))}
+            {metrics.length > 0 ? (
+              metrics.map((item) => (
+                <ProgressMetric key={item.label} item={item} />
+              ))
+            ) : (
+              <div className="empty-state">
+                <strong>暂无逐项得分</strong>
+                <span>需要至少一条候选人回答才能生成评分指标。</span>
+              </div>
+            )}
           </div>
         </Card>
       </section>
@@ -4670,7 +4695,7 @@ function ReportPage({ interviewId, user }) {
           <div className="risk-table">
             <div>
               <span>报告摘要</span>
-              <StatusTag tone="blue">真实生成</StatusTag>
+              <StatusTag tone="blue">{currentReport.hasEvidence ? '真实生成' : '系统说明'}</StatusTag>
               <p>{currentReport.summary}</p>
             </div>
             {currentReport.suggestions.map((item) => (
@@ -4686,9 +4711,16 @@ function ReportPage({ interviewId, user }) {
 
       <Card title="逐题问答复盘" icon={<Clock3 size={18} />} className="timeline-panel">
         <div className="timeline">
-          {(currentReport.timeline.length > 0 ? currentReport.timeline : report.timeline).map((item, index) => (
-            <TimelineItem key={item.id || `${item.title}-${index}`} item={item} index={index} />
-          ))}
+          {currentReport.timeline.length > 0 ? (
+            currentReport.timeline.map((item, index) => (
+              <TimelineItem key={item.id || `${item.title}-${index}`} item={item} index={index} />
+            ))
+          ) : (
+            <div className="empty-state">
+              <strong>暂无逐题问答记录</strong>
+              <span>本次面试没有记录到候选人回答，因此不会展示演示答案。</span>
+            </div>
+          )}
         </div>
       </Card>
     </section>
@@ -4747,8 +4779,8 @@ function HistoryPage({ onOpenReport }) {
                 <p>{item.summary}</p>
               </div>
               <div className="history-score">
-                <strong>{item.total_score}</strong>
-                <span>{item.grade}</span>
+                <strong>{item.has_candidate_answer ? item.total_score : '—'}</strong>
+                <span>{item.has_candidate_answer ? item.grade : '未评分'}</span>
                 <button className="secondary-action" onClick={() => onOpenReport(item.interview_id)}>
                   查看报告
                 </button>
@@ -4867,7 +4899,9 @@ function StatsPage({ onStartTraining, onOpenReport }) {
           apiRequest('/api/reports'),
         ]);
         if (!mounted) return;
-        const reportItems = reportsData.reports || [];
+        const reportItems = (reportsData.reports || []).filter(
+          (item) => item.has_candidate_answer && item.generation_status !== 'insufficient_evidence',
+        );
         setStats(statsData.stats);
         setDimensions(dimensionData.dimensions || []);
         setReports(reportItems);

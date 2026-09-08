@@ -30,6 +30,11 @@ def test_completed_report_can_be_downloaded_as_utf8_markdown(tmp_path):
         )
         assert created.status_code == 201, created.text
         interview_id = created.json()["interview"]["id"]
+        answered = client.post(
+            f"/api/interviews/{interview_id}/messages",
+            json={"sender_type": "candidate", "message_type": "answer", "content": "使用 asyncio.Semaphore。"},
+        )
+        assert answered.status_code == 201, answered.text
         finished = client.post(f"/api/interviews/{interview_id}/finish")
         assert finished.status_code == 200, finished.text
 

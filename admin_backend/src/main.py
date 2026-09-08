@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -11,7 +14,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, Up
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .database import all_rows, db, ensure_admin_schema, get_database_path, one
+from .database import DB_ENGINE, all_rows, db, ensure_admin_schema, get_database_path, one
 from .security import (
     create_token,
     hash_password,
@@ -48,6 +51,10 @@ ADMIN_ROLES = {"super_admin", "operations", "reviewer"}
 LOGIN_WINDOW_SECONDS = 15 * 60
 MAX_LOGIN_ATTEMPTS = 8
 login_attempts: dict[str, dict[str, int | float]] = {}
+WEBRTC_DIAGNOSTIC_RETENTION_DAYS = max(
+    1,
+    min(365, int(os.environ.get("WEBRTC_DIAGNOSTIC_RETENTION_DAYS", "14"))),
+)
 
 allowed_origins = [
     origin.strip()
@@ -321,11 +328,11 @@ def report_review_status(score: int) -> str:
 
 def recommendation_label(value: str | None) -> str:
     return {
-        "strong_pass": "强烈建议录用",
-        "pass": "建议录用",
-        "next_round": "进入下一轮",
-        "hold": "暂缓",
-        "reject": "不建议通过",
+        "strong_pass": "准备充分",
+        "pass": "基本准备",
+        "next_round": "建议进阶训练",
+        "hold": "建议继续练习",
+        "reject": "建议重点提升",
     }.get(value or "", value or "-")
 
 
@@ -541,6 +548,109 @@ def list_interviews() -> list[dict[str, Any]]:
     ]
 
 
+def list_connection_logs(
+    *,
+    level: str = "",
+    event_type: str = "",
+    query: str = "",
+    limit: int = 300,
+) -> list[dict[str, Any]]:
+    conditions: list[str] = []
+    params: list[Any] = []
+    if level:
+        conditions.append("events.level = ?")
+        params.append(level)
+    if event_type:
+        conditions.append("events.event_type = ?")
+        params.append(event_type)
+    if query:
+        conditions.append(
+            """
+            (
+              users.name LIKE ? OR interviews.target_role LIKE ?
+              OR events.session_id LIKE ? OR events.interview_id LIKE ?
+              OR events.event_type LIKE ? OR events.message LIKE ?
+            )
+            """
+        )
+        keyword = f"%{query}%"
+        params.extend([keyword] * 6)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    safe_limit = max(1, min(limit, 500))
+    params.append(safe_limit)
+    rows = all_rows(
+        f"""
+        SELECT events.id, events.interview_id, events.session_id, events.provider,
+               events.event_type, events.level, events.connection_state,
+               events.ice_connection_state, events.ice_gathering_state,
+               events.signaling_state, events.data_channel_state, events.message,
+               events.metadata_json, events.client_created_at, events.created_at,
+               users.name AS candidate, interviews.target_role
+        FROM webrtc_diagnostic_events AS events
+        JOIN interview_sessions AS interviews ON interviews.id = events.interview_id
+        JOIN users ON users.id = events.user_id
+        {where_clause}
+        ORDER BY events.created_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    )
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            metadata = json.loads(row.get("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        result.append(
+            {
+                "id": row["id"],
+                "interviewId": row["interview_id"],
+                "sessionId": row.get("session_id") or "-",
+                "candidate": row.get("candidate") or "未命名学生",
+                "targetRole": row.get("target_role") or "未填写",
+                "provider": row.get("provider") or "-",
+                "eventType": row.get("event_type") or "-",
+                "level": row.get("level") or "info",
+                "connectionState": row.get("connection_state") or "-",
+                "iceConnectionState": row.get("ice_connection_state") or "-",
+                "iceGatheringState": row.get("ice_gathering_state") or "-",
+                "signalingState": row.get("signaling_state") or "-",
+                "dataChannelState": row.get("data_channel_state") or "-",
+                "message": row.get("message") or "",
+                "metadata": metadata,
+                "clientCreatedAt": str(row.get("client_created_at") or "-"),
+                "createdAt": str(row.get("created_at") or "-"),
+            }
+        )
+    return result
+
+
+def connection_log_summary() -> dict[str, Any]:
+    recent_clause = (
+        "created_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 DAY)"
+        if DB_ENGINE == "mysql"
+        else "created_at >= datetime('now', '-1 day')"
+    )
+    row = one(
+        f"""
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS errors,
+               SUM(CASE WHEN level = 'warning' THEN 1 ELSE 0 END) AS warnings,
+               COUNT(DISTINCT session_id) AS sessions,
+               MAX(created_at) AS latest_at
+        FROM webrtc_diagnostic_events
+        WHERE {recent_clause}
+        """
+    ) or {}
+    return {
+        "total": int(row.get("total") or 0),
+        "errors": int(row.get("errors") or 0),
+        "warnings": int(row.get("warnings") or 0),
+        "sessions": int(row.get("sessions") or 0),
+        "latestAt": str(row.get("latest_at") or "-"),
+    }
+
+
 def get_interview_detail(interview_id: str) -> dict[str, Any]:
     interview = one(
         """
@@ -678,6 +788,214 @@ def get_agent_detail(agent_name: str) -> dict[str, Any]:
     return {"agent": row, "recentUsage": recent}
 
 
+def _required_text(body: dict[str, Any], key: str, label: str, max_length: int = 160) -> str:
+    value = str(body.get(key) or "").strip()
+    if not value:
+        raise error(400, f"{label}不能为空。")
+    return value[:max_length]
+
+
+def _campus_catalog_options() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    majors = all_rows(
+        """
+        SELECT majors.id, majors.code, majors.name, colleges.name AS college_name
+        FROM catalog_majors AS majors
+        JOIN catalog_colleges AS colleges ON colleges.id = majors.college_id
+        JOIN catalog_versions AS versions ON versions.id = majors.version_id
+        WHERE versions.status = 'published' AND majors.enabled = 1 AND colleges.enabled = 1
+        ORDER BY colleges.sort_order, colleges.name, majors.sort_order, majors.name
+        """
+    )
+    jobs = all_rows(
+        """
+        SELECT jobs.id, jobs.code, jobs.name
+        FROM catalog_job_roles AS jobs
+        JOIN catalog_versions AS versions ON versions.id = jobs.version_id
+        WHERE versions.status = 'published' AND jobs.enabled = 1
+        ORDER BY jobs.sort_order, jobs.name
+        """
+    )
+    return majors, jobs
+
+
+def _student_growth_status(row: dict[str, Any]) -> str:
+    interviews = int(row.get("interviews") or 0)
+    readiness = float(row.get("readiness") or 0)
+    if bool(row.get("focus_flag")):
+        return "重点关注"
+    if not row.get("enrollment_id"):
+        return "未归班"
+    if interviews == 0:
+        return "尚未训练"
+    if interviews >= 2 and readiness < 60:
+        return "需要关注"
+    if interviews >= 2 and readiness >= 80:
+        return "表现稳定"
+    return "训练中"
+
+
+def list_campus_students() -> list[dict[str, Any]]:
+    rows = all_rows(
+        """
+        SELECT users.id, users.email, users.name, users.status, users.last_login_at,
+               profiles.target_role,
+               enrollments.id AS enrollment_id, enrollments.student_no,
+               enrollments.status AS enrollment_status, enrollments.focus_flag, enrollments.note,
+               classes.id AS class_id, classes.name AS class_name, classes.graduation_year,
+               programs.id AS program_id, programs.name AS program_name, programs.direction,
+               colleges.id AS college_id, colleges.name AS college_name,
+               COALESCE(interview_counts.interviews, 0) AS interviews,
+               COALESCE(report_scores.readiness, 0) AS readiness
+        FROM users
+        LEFT JOIN profiles ON profiles.user_id = users.id
+        LEFT JOIN student_enrollments AS enrollments ON enrollments.user_id = users.id
+        LEFT JOIN campus_classes AS classes ON classes.id = enrollments.class_id
+        LEFT JOIN campus_programs AS programs ON programs.id = classes.program_id
+        LEFT JOIN campus_colleges AS colleges ON colleges.id = programs.college_id
+        LEFT JOIN (
+          SELECT user_id, COUNT(*) AS interviews
+          FROM interview_sessions
+          GROUP BY user_id
+        ) AS interview_counts ON interview_counts.user_id = users.id
+        LEFT JOIN (
+          SELECT user_id, AVG(total_score) AS readiness
+          FROM interview_reports
+          GROUP BY user_id
+        ) AS report_scores ON report_scores.user_id = users.id
+        ORDER BY enrollments.focus_flag DESC, users.updated_at DESC, users.created_at DESC
+        LIMIT 500
+        """
+    )
+    result = []
+    for row in rows:
+        item = {
+            "id": row["id"],
+            "name": row.get("name") or "未命名学生",
+            "email": row.get("email") or "-",
+            "studentNo": row.get("student_no") or "-",
+            "collegeId": row.get("college_id"),
+            "college": row.get("college_name") or "未归属",
+            "programId": row.get("program_id"),
+            "program": row.get("program_name") or "未归属",
+            "direction": row.get("direction") or "",
+            "classId": row.get("class_id"),
+            "className": row.get("class_name") or "未归班",
+            "graduationYear": row.get("graduation_year"),
+            "targetRole": row.get("target_role") or "尚未选择",
+            "readiness": round(float(row.get("readiness") or 0), 1),
+            "interviews": int(row.get("interviews") or 0),
+            "focus": bool(row.get("focus_flag")),
+            "note": row.get("note") or "",
+            "accountStatus": status_label(row.get("status")),
+            "lastLogin": str(row.get("last_login_at") or "-"),
+        }
+        item["growthStatus"] = _student_growth_status(row)
+        result.append(item)
+    return result
+
+
+def campus_overview_data() -> dict[str, Any]:
+    colleges = all_rows("SELECT id, code, name, status, created_at FROM campus_colleges ORDER BY name")
+    programs = all_rows(
+        """
+        SELECT programs.id, programs.college_id, programs.standard_major_code, programs.name,
+               programs.direction, programs.coordinator, programs.status, colleges.name AS college_name
+        FROM campus_programs AS programs
+        JOIN campus_colleges AS colleges ON colleges.id = programs.college_id
+        ORDER BY colleges.name, programs.name
+        """
+    )
+    classes = all_rows(
+        """
+        SELECT classes.id, classes.program_id, classes.name, classes.graduation_year,
+               classes.advisor, classes.invite_code, classes.status,
+               programs.name AS program_name, programs.college_id
+        FROM campus_classes AS classes
+        JOIN campus_programs AS programs ON programs.id = classes.program_id
+        ORDER BY classes.graduation_year DESC, classes.name
+        """
+    )
+    mappings = all_rows(
+        """
+        SELECT mappings.program_id, mappings.job_role_id, mappings.priority, jobs.name AS job_name
+        FROM program_job_roles AS mappings
+        LEFT JOIN catalog_job_roles AS jobs ON jobs.id = mappings.job_role_id
+        ORDER BY mappings.priority DESC, jobs.name
+        """
+    )
+    majors, jobs = _campus_catalog_options()
+    try:
+        students = list_campus_students()
+    except Exception:
+        students = []
+
+    program_counts: dict[str, int] = {}
+    class_counts: dict[str, int] = {}
+    for student in students:
+        if student.get("programId"):
+            program_counts[student["programId"]] = program_counts.get(student["programId"], 0) + 1
+        if student.get("classId"):
+            class_counts[student["classId"]] = class_counts.get(student["classId"], 0) + 1
+    for college in colleges:
+        college["studentCount"] = len([item for item in students if item.get("collegeId") == college["id"]])
+    for program in programs:
+        program["studentCount"] = program_counts.get(program["id"], 0)
+        program["jobs"] = [item for item in mappings if item["program_id"] == program["id"]]
+    for class_item in classes:
+        class_item["studentCount"] = class_counts.get(class_item["id"], 0)
+    return {
+        "colleges": colleges,
+        "programs": programs,
+        "classes": classes,
+        "students": students,
+        "standardMajors": majors,
+        "jobRoles": jobs,
+        "summary": {
+            "colleges": len(colleges),
+            "programs": len(programs),
+            "classes": len(classes),
+            "students": len(students),
+            "unassigned": len([item for item in students if not item.get("classId")]),
+            "focus": len([item for item in students if item.get("focus")]),
+        },
+    }
+
+
+def upsert_student_enrollment(
+    user_id: str,
+    *,
+    class_id: str | None,
+    student_no: str = "",
+    status: str = "active",
+    focus_flag: bool = False,
+    note: str = "",
+) -> dict[str, Any]:
+    if not one("SELECT id FROM users WHERE id = ?", (user_id,)):
+        raise error(404, "学生账号不存在。")
+    if class_id and not one("SELECT id FROM campus_classes WHERE id = ?", (class_id,)):
+        raise error(404, "班级不存在。")
+    current = one("SELECT id FROM student_enrollments WHERE user_id = ?", (user_id,))
+    if current:
+        db.execute(
+            """
+            UPDATE student_enrollments
+            SET class_id = ?, student_no = ?, status = ?, focus_flag = ?, note = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (class_id, student_no[:80] or None, status, 1 if focus_flag else 0, note[:1000] or None, user_id),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO student_enrollments (id, user_id, class_id, student_no, status, focus_flag, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid4()), user_id, class_id, student_no[:80] or None, status, 1 if focus_flag else 0, note[:1000] or None),
+        )
+    db.commit()
+    return one("SELECT * FROM student_enrollments WHERE user_id = ?", (user_id,)) or {}
+
+
 def build_metrics(reports: list[dict[str, Any]]) -> list[dict[str, str]]:
     users = count_value("SELECT COUNT(*) AS count FROM users")
     interviews = count_value("SELECT COUNT(*) AS count FROM interview_sessions")
@@ -692,6 +1010,193 @@ def build_metrics(reports: list[dict[str, Any]]) -> list[dict[str, str]]:
         {"label": "报告生成", "value": f"{report_count:,}", "note": f"平均分 {average_score}", "tone": "amber"},
         {"label": "待复核", "value": f"{review_count:,}", "note": "按分数规则计算", "tone": "red"},
     ]
+
+
+@app.get("/api/admin/campus/overview")
+def campus_overview(_admin: dict = Depends(require_roles("super_admin", "operations"))):
+    return campus_overview_data()
+
+
+@app.post("/api/admin/campus/colleges", status_code=201)
+async def create_campus_college(request: Request, admin: dict = Depends(require_roles("super_admin", "operations"))):
+    validate_admin_origin(request)
+    body = await request.json()
+    code = _required_text(body, "code", "学院编码", 64).upper()
+    name = _required_text(body, "name", "学院名称")
+    if one("SELECT id FROM campus_colleges WHERE code = ? OR name = ?", (code, name)):
+        raise error(409, "学院编码或名称已存在。")
+    college_id = str(uuid4())
+    db.execute(
+        "INSERT INTO campus_colleges (id, code, name, status) VALUES (?, ?, ?, 'active')",
+        (college_id, code, name),
+    )
+    db.commit()
+    record_audit(request, admin, "campus.college.create", target_type="campus_college", target_id=college_id, summary=f"创建学院：{name}")
+    return {"college": one("SELECT * FROM campus_colleges WHERE id = ?", (college_id,))}
+
+
+@app.post("/api/admin/campus/programs", status_code=201)
+async def create_campus_program(request: Request, admin: dict = Depends(require_roles("super_admin", "operations"))):
+    validate_admin_origin(request)
+    body = await request.json()
+    college_id = _required_text(body, "collegeId", "所属学院", 36)
+    if not one("SELECT id FROM campus_colleges WHERE id = ?", (college_id,)):
+        raise error(404, "所属学院不存在。")
+    name = _required_text(body, "name", "专业名称")
+    direction = str(body.get("direction") or "").strip()[:160]
+    coordinator = str(body.get("coordinator") or "").strip()[:120]
+    standard_major_code = str(body.get("standardMajorCode") or "").strip()[:64]
+    if one(
+        "SELECT id FROM campus_programs WHERE college_id = ? AND name = ? AND COALESCE(direction, '') = ?",
+        (college_id, name, direction),
+    ):
+        raise error(409, "该学院下已经存在相同专业和培养方向。")
+    program_id = str(uuid4())
+    db.execute(
+        """
+        INSERT INTO campus_programs (id, college_id, standard_major_code, name, direction, coordinator, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'active')
+        """,
+        (program_id, college_id, standard_major_code or None, name, direction or None, coordinator or None),
+    )
+    db.commit()
+    record_audit(request, admin, "campus.program.create", target_type="campus_program", target_id=program_id, summary=f"创建专业：{name}")
+    return {"program": one("SELECT * FROM campus_programs WHERE id = ?", (program_id,))}
+
+
+@app.post("/api/admin/campus/classes", status_code=201)
+async def create_campus_class(request: Request, admin: dict = Depends(require_roles("super_admin", "operations"))):
+    validate_admin_origin(request)
+    body = await request.json()
+    program_id = _required_text(body, "programId", "所属专业", 36)
+    if not one("SELECT id FROM campus_programs WHERE id = ?", (program_id,)):
+        raise error(404, "所属专业不存在。")
+    name = _required_text(body, "name", "班级名称")
+    advisor = str(body.get("advisor") or "").strip()[:120]
+    raw_year = body.get("graduationYear")
+    try:
+        graduation_year = int(raw_year) if raw_year not in {None, ""} else None
+    except (TypeError, ValueError) as exc:
+        raise error(400, "毕业年份格式不正确。") from exc
+    if graduation_year and not 2000 <= graduation_year <= 2100:
+        raise error(400, "毕业年份应在 2000 到 2100 之间。")
+    invite_code = str(body.get("inviteCode") or f"CAMPUS-{uuid4().hex[:8]}").strip().upper()[:40]
+    if one("SELECT id FROM campus_classes WHERE invite_code = ?", (invite_code,)):
+        raise error(409, "班级邀请码已存在。")
+    class_id = str(uuid4())
+    db.execute(
+        """
+        INSERT INTO campus_classes (id, program_id, name, graduation_year, advisor, invite_code, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'active')
+        """,
+        (class_id, program_id, name, graduation_year, advisor or None, invite_code),
+    )
+    db.commit()
+    record_audit(request, admin, "campus.class.create", target_type="campus_class", target_id=class_id, summary=f"创建班级：{name}")
+    return {"class": one("SELECT * FROM campus_classes WHERE id = ?", (class_id,))}
+
+
+@app.put("/api/admin/campus/programs/{program_id}/jobs")
+async def replace_program_jobs(request: Request, program_id: str, admin: dict = Depends(require_roles("super_admin", "operations"))):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_programs WHERE id = ?", (program_id,)):
+        raise error(404, "专业不存在。")
+    body = await request.json()
+    job_role_ids = list(dict.fromkeys(str(item).strip() for item in (body.get("jobRoleIds") or []) if str(item).strip()))[:50]
+    for job_role_id in job_role_ids:
+        job = one(
+            """
+            SELECT jobs.id FROM catalog_job_roles AS jobs
+            JOIN catalog_versions AS versions ON versions.id = jobs.version_id
+            WHERE jobs.id = ? AND jobs.enabled = 1 AND versions.status = 'published'
+            """,
+            (job_role_id,),
+        )
+        if not job:
+            raise error(400, "包含不存在或尚未发布的目标岗位。")
+    try:
+        db.begin()
+        db.execute("DELETE FROM program_job_roles WHERE program_id = ?", (program_id,))
+        for index, job_role_id in enumerate(job_role_ids):
+            db.execute(
+                "INSERT INTO program_job_roles (id, program_id, job_role_id, priority) VALUES (?, ?, ?, ?)",
+                (str(uuid4()), program_id, job_role_id, "recommended" if index < 3 else "optional"),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "campus.program.jobs.update", target_type="campus_program", target_id=program_id, summary=f"更新推荐岗位：{len(job_role_ids)} 个")
+    return {"ok": True, "jobRoleIds": job_role_ids}
+
+
+@app.patch("/api/admin/campus/students/{user_id}")
+async def update_campus_student(request: Request, user_id: str, admin: dict = Depends(require_roles("super_admin", "operations"))):
+    validate_admin_origin(request)
+    body = await request.json()
+    existing = one("SELECT * FROM student_enrollments WHERE user_id = ?", (user_id,)) or {}
+    class_id = body.get("classId", existing.get("class_id"))
+    if class_id == "":
+        class_id = None
+    status = str(body.get("status", existing.get("status") or "active"))
+    if status not in {"active", "inactive"}:
+        raise error(400, "学生归属状态不正确。")
+    enrollment = upsert_student_enrollment(
+        user_id,
+        class_id=class_id,
+        student_no=str(body.get("studentNo", existing.get("student_no") or "")).strip(),
+        status=status,
+        focus_flag=bool(body.get("focus", existing.get("focus_flag") or False)),
+        note=str(body.get("note", existing.get("note") or "")).strip(),
+    )
+    record_audit(request, admin, "campus.student.update", target_type="student", target_id=user_id, summary="更新学生组织归属与成长关注状态")
+    return {"enrollment": enrollment}
+
+
+@app.post("/api/admin/campus/students/import")
+async def import_campus_students(
+    request: Request,
+    class_id: str,
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_roles("super_admin", "operations")),
+):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_classes WHERE id = ?", (class_id,)):
+        raise error(404, "目标班级不存在。")
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise error(400, "导入文件不能超过 2MB。")
+    try:
+        decoded = content.decode("utf-8-sig")
+        rows = list(csv.DictReader(io.StringIO(decoded)))
+    except Exception as exc:
+        raise error(400, "请上传 UTF-8 编码的 CSV 文件。") from exc
+    if len(rows) > 1000:
+        raise error(400, "单次最多导入 1000 名学生。")
+    matched = 0
+    unmatched: list[dict[str, str]] = []
+    for index, row in enumerate(rows, start=2):
+        email = normalize_email(row.get("邮箱") or row.get("email"))
+        student_no = str(row.get("学号") or row.get("student_no") or "").strip()
+        if not email:
+            unmatched.append({"row": str(index), "email": "", "reason": "缺少邮箱"})
+            continue
+        user = one("SELECT id FROM users WHERE email = ?", (email,))
+        if not user:
+            unmatched.append({"row": str(index), "email": email, "reason": "学生尚未注册"})
+            continue
+        existing = one("SELECT * FROM student_enrollments WHERE user_id = ?", (user["id"],)) or {}
+        upsert_student_enrollment(
+            user["id"],
+            class_id=class_id,
+            student_no=student_no or str(existing.get("student_no") or ""),
+            status=str(existing.get("status") or "active"),
+            focus_flag=bool(existing.get("focus_flag") or False),
+            note=str(existing.get("note") or ""),
+        )
+        matched += 1
+    record_audit(request, admin, "campus.students.import", target_type="campus_class", target_id=class_id, summary=f"批量归班成功 {matched} 人，未匹配 {len(unmatched)} 人")
+    return {"matched": matched, "unmatched": unmatched[:100], "total": len(rows)}
 
 
 @app.get("/api/admin/health")
@@ -987,6 +1492,31 @@ def admin_logout(request: Request, response: Response, admin: dict = Depends(req
     return {"ok": True}
 
 
+@app.get("/api/admin/connection-logs")
+def admin_connection_logs(
+    level: str = "",
+    event_type: str = "",
+    query: str = "",
+    limit: int = 300,
+    _admin: dict = Depends(require_roles("super_admin", "operations", "reviewer")),
+):
+    normalized_level = level.strip().lower()
+    if normalized_level and normalized_level not in {"info", "warning", "error"}:
+        raise error(400, "连接日志级别不正确。")
+    normalized_event_type = event_type.strip()[:80]
+    normalized_query = query.strip()[:100]
+    return {
+        "logs": list_connection_logs(
+            level=normalized_level,
+            event_type=normalized_event_type,
+            query=normalized_query,
+            limit=limit,
+        ),
+        "summary": connection_log_summary(),
+        "retentionDays": WEBRTC_DIAGNOSTIC_RETENTION_DAYS,
+    }
+
+
 @app.get("/api/admin/snapshot")
 def snapshot(admin: dict = Depends(require_admin)):
     try:
@@ -1008,6 +1538,8 @@ def snapshot(admin: dict = Depends(require_admin)):
                 "canViewInterviews": can_operate,
                 "canViewReports": True,
                 "canViewAgents": can_operate,
+                "canViewConnectionLogs": True,
+                "canManageCampus": can_operate,
                 "canManageSettings": is_super_admin,
                 "canViewAudit": is_super_admin,
                 "canViewCatalog": has_permission(db, str(role or ""), "read"),

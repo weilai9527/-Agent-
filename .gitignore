@@ -43,6 +43,22 @@ env/
 
 # Local scratch duplicates
 /src/CandidateRoomPrototype.jsx
+tmp/
+demo_recording/
+document_assets/
+交付物/
+
+# Local screenshot, recording, and document-production helpers
+scripts/*screenshot*
+scripts/*smartart*
+scripts/*recording*
+scripts/*docx*
+scripts/capture-complete-*
+scripts/recapture-*
+scripts/demo-client-control.py
+scripts/build-function-*.py
+scripts/render-function-*.ps1
+scripts/separate-login-config-sections.py
 
 # Local database files
 data/

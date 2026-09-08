@@ -3,14 +3,20 @@ import { createRoot } from 'react-dom/client';
 import {
   Activity,
   AlertCircle,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUpDown,
   BarChart3,
   Bot,
   BookOpen,
+  Building2,
   ChevronRight,
   CheckCircle2,
   ClipboardList,
+  Copy,
   FileText,
-  Gauge,
+  Filter,
+  GraduationCap,
   KeyRound,
   LayoutDashboard,
   LockKeyhole,
@@ -19,12 +25,14 @@ import {
   RefreshCw,
   Rocket,
   Search,
+  School,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
   UserCog,
   UsersRound,
   Upload,
+  Wifi,
   X,
 } from 'lucide-react';
 import './styles.css';
@@ -45,6 +53,8 @@ const emptyAdminData = {
     canViewInterviews: false,
     canViewReports: true,
     canViewAgents: false,
+    canViewConnectionLogs: false,
+    canManageCampus: false,
     canManageSettings: false,
     canViewAudit: false,
     canViewCatalog: false,
@@ -94,13 +104,15 @@ async function adminRequest(path, options = {}) {
 }
 
 const navItems = [
-  { key: 'dashboard', label: '总览', icon: LayoutDashboard },
-  { key: 'catalog', label: '职业目录', icon: BookOpen, permission: 'canViewCatalog' },
-  { key: 'candidates', label: '用户与候选人', icon: UsersRound, permission: 'canViewCandidates' },
-  { key: 'interviews', label: '面试运营', icon: ClipboardList, permission: 'canViewInterviews' },
-  { key: 'reports', label: '报告与复核', icon: FileText, permission: 'canViewReports' },
-  { key: 'agents', label: 'Agent 与模板', icon: Bot, permission: 'canViewAgents' },
-  { key: 'settings', label: '系统与权限', icon: Settings, permission: 'canManageSettings' },
+  { key: 'dashboard', label: '工作台', icon: LayoutDashboard, group: '工作台' },
+  { key: 'interviews', label: '训练记录', icon: ClipboardList, permission: 'canViewInterviews', group: '工作台' },
+  { key: 'reports', label: '报告质检', icon: FileText, permission: 'canViewReports', group: '工作台' },
+  { key: 'organization', label: '组织与学生', icon: School, permission: 'canManageCampus', group: '学生成长' },
+  { key: 'candidates', label: '学生成长', icon: UsersRound, permission: 'canViewCandidates', group: '学生成长' },
+  { key: 'catalog', label: '岗位与能力', icon: BookOpen, permission: 'canViewCatalog', group: '训练内容' },
+  { key: 'agents', label: 'AI 陪练角色', icon: Bot, permission: 'canViewAgents', group: '训练内容' },
+  { key: 'connectionLogs', label: '连接日志', icon: Wifi, permission: 'canViewConnectionLogs', group: '系统' },
+  { key: 'settings', label: '系统管理', icon: Settings, permission: 'canManageSettings', group: '系统' },
 ];
 
 const roleLabels = {
@@ -117,8 +129,16 @@ const statusTone = {
   草稿: 'gray',
   待抽检: 'blue',
   已复核: 'green',
+  待复核: 'blue',
+  复核未通过: 'red',
   需要复核: 'red',
   启用: 'green',
+  已禁用: 'gray',
+  未归班: 'gray',
+  尚未训练: 'gray',
+  训练中: 'blue',
+  表现稳定: 'green',
+  重点关注: 'red',
 };
 
 function AdminLogin({ onAuthenticated }) {
@@ -150,7 +170,7 @@ function AdminLogin({ onAuthenticated }) {
         <header>
           <span>Management Console</span>
           <h1>管理员登录</h1>
-          <p>登录后才能查看候选人、面试报告和系统配置。</p>
+          <p>登录后可以查看学生成长、训练报告和系统配置。</p>
         </header>
         <label>
           <span>管理员邮箱</span>
@@ -192,14 +212,62 @@ function EmptyState({ text = '暂无数据' }) {
   return <div className="empty-state">{text}</div>;
 }
 
-function AdminTable({ columns, rows, onView }) {
+function SectionCard({ title, icon, action, children, className = '' }) {
+  return (
+    <section className={`section-card ${className}`.trim()}>
+      <header>
+        <div>
+          {icon}
+          <h2>{title}</h2>
+        </div>
+        {action}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+function CompactId({ value }) {
+  const [copied, setCopied] = useState(false);
+  const text = String(value || '-');
+  const compact = text.length > 18 ? `${text.slice(0, 8)}…${text.slice(-5)}` : text;
+
+  const copyId = async (event) => {
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <span className="compact-id" title={text}>
+      <code>{compact}</code>
+      <button type="button" onClick={copyId} aria-label={`复制 ${text}`} title="复制完整 ID">
+        {copied ? <CheckCircle2 size={14} /> : <Copy size={14} />}
+      </button>
+    </span>
+  );
+}
+
+function AdminTable({ columns, rows, allRows, onView, sort, onSort }) {
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
             {columns.map((column) => (
-              <th key={column.key}>{column.label}</th>
+              <th key={column.key} className={column.className || ''}>
+                {column.sortable === false ? column.label : (
+                  <button type="button" className={sort.key === column.key ? 'active' : ''} onClick={() => onSort(column.key)}>
+                    {column.label}
+                    <ArrowUpDown size={13} />
+                  </button>
+                )}
+              </th>
             ))}
             <th aria-label="操作" />
           </tr>
@@ -208,19 +276,29 @@ function AdminTable({ columns, rows, onView }) {
           {rows.length === 0 && (
             <tr>
               <td colSpan={columns.length + 1}>
-                <EmptyState />
+                <EmptyState text="没有符合当前条件的数据" />
               </td>
             </tr>
           )}
           {rows.map((row) => (
-            <tr key={row.id || row.name}>
+            <tr
+              key={row.id || row.name}
+              className="data-row"
+              tabIndex={0}
+              onClick={() => onView?.(row, allRows)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onView?.(row, allRows);
+                }
+              }}
+            >
               {columns.map((column) => (
-                <td key={column.key}>{column.render ? column.render(row) : row[column.key]}</td>
+                <td key={column.key} className={column.className || ''}>{column.render ? column.render(row) : row[column.key] ?? '-'}</td>
               ))}
               <td className="row-action">
-                <button type="button" onClick={() => onView?.(row)}>
-                  查看
-                  <ChevronRight size={15} />
+                <button type="button" tabIndex={-1} onClick={(event) => { event.stopPropagation(); onView?.(row, allRows); }} aria-label="查看详情">
+                  <ChevronRight size={16} />
                 </button>
               </td>
             </tr>
@@ -231,24 +309,155 @@ function AdminTable({ columns, rows, onView }) {
   );
 }
 
-function DetailModal({ detail, loading, error, onClose, onReview, canReview }) {
-  if (!detail && !loading && !error) return null;
+function DataWorkspace({
+  title,
+  icon,
+  columns,
+  rows,
+  onView,
+  query,
+  onQueryChange,
+  filterKey,
+  filterLabel = '全部状态',
+  presetFilter = '',
+}) {
+  const [filterValue, setFilterValue] = useState(presetFilter);
+  const [sort, setSort] = useState({ key: '', direction: 'asc' });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(12);
+
+  useEffect(() => {
+    setFilterValue(presetFilter || '');
+    setPage(1);
+  }, [presetFilter]);
+
+  const filterOptions = useMemo(
+    () => [...new Set(rows.map((row) => row[filterKey]).filter(Boolean))],
+    [rows, filterKey],
+  );
+
+  const filteredRows = useMemo(() => {
+    const keyword = String(query || '').trim().toLowerCase();
+    const filtered = rows.filter((row) => {
+      const matchesFilter = !filterValue || row[filterKey] === filterValue;
+      const searchableText = Object.values(row).filter((value) => typeof value !== 'object').join(' ').toLowerCase();
+      return matchesFilter && (!keyword || searchableText.includes(keyword));
+    });
+    if (!sort.key) return filtered;
+    return [...filtered].sort((left, right) => {
+      const leftValue = left[sort.key] ?? '';
+      const rightValue = right[sort.key] ?? '';
+      const numericLeft = Number(leftValue);
+      const numericRight = Number(rightValue);
+      const comparison = Number.isFinite(numericLeft) && Number.isFinite(numericRight) && leftValue !== '' && rightValue !== ''
+        ? numericLeft - numericRight
+        : String(leftValue).localeCompare(String(rightValue), 'zh-CN', { numeric: true });
+      return sort.direction === 'asc' ? comparison : -comparison;
+    });
+  }, [rows, query, filterKey, filterValue, sort]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, filterValue, pageSize]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const startIndex = (safePage - 1) * pageSize;
+  const visibleRows = filteredRows.slice(startIndex, startIndex + pageSize);
+  const hasFilters = Boolean(query || filterValue);
+
+  const handleSort = (key) => {
+    setSort((current) => current.key === key
+      ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      : { key, direction: 'asc' });
+  };
+
+  const resetFilters = () => {
+    setFilterValue('');
+    onQueryChange?.('');
+    setSort({ key: '', direction: 'asc' });
+  };
+
+  return (
+    <SectionCard
+      title={title}
+      icon={icon}
+      className="data-workspace"
+      action={<span className="record-count">{filteredRows.length} 条结果</span>}
+    >
+      <div className="table-toolbar">
+        <div className="table-filter-group">
+          <Filter size={15} />
+          <select value={filterValue} onChange={(event) => setFilterValue(event.target.value)} aria-label={filterLabel}>
+            <option value="">{filterLabel}</option>
+            {filterOptions.map((option) => <option value={option} key={option}>{option}</option>)}
+          </select>
+          {hasFilters && <button type="button" className="clear-filter" onClick={resetFilters}>清空筛选</button>}
+        </div>
+        <span className="data-scope-note">当前数据源最多返回最近 50 条记录</span>
+      </div>
+      <AdminTable columns={columns} rows={visibleRows} allRows={filteredRows} onView={onView} sort={sort} onSort={handleSort} />
+      <footer className="table-pagination">
+        <span>
+          {filteredRows.length === 0 ? '0' : `${startIndex + 1}–${Math.min(startIndex + pageSize, filteredRows.length)}`} / {filteredRows.length}
+        </span>
+        <label>
+          每页
+          <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
+            {[12, 20, 50].map((value) => <option value={value} key={value}>{value}</option>)}
+          </select>
+        </label>
+        <div>
+          <button type="button" disabled={safePage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} aria-label="上一页"><ArrowLeft size={15} /></button>
+          <span>{safePage} / {totalPages}</span>
+          <button type="button" disabled={safePage >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))} aria-label="下一页"><ArrowRight size={15} /></button>
+        </div>
+      </footer>
+    </SectionCard>
+  );
+}
+
+function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, onMove, position }) {
+  const isOpen = Boolean(detail || loading || error);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
   const title = detail?.title || '详情';
   const rows = detail?.rows || [];
   const blocks = detail?.blocks || [];
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="detail-modal" role="dialog" aria-modal="true" aria-label={title}>
+    <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="detail-drawer" role="dialog" aria-modal="true" aria-label={title}>
         <header>
           <div>
-            <span>Detail</span>
+            <span>记录详情</span>
             <h2>{title}</h2>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭详情">
-            <X size={18} />
-          </button>
+          <div className="drawer-header-actions">
+            {position.total > 1 && (
+              <div className="drawer-stepper">
+                <button type="button" disabled={!position.hasPrevious || loading} onClick={() => onMove(-1)} aria-label="上一条"><ArrowLeft size={16} /></button>
+                <span>{position.current} / {position.total}</span>
+                <button type="button" disabled={!position.hasNext || loading} onClick={() => onMove(1)} aria-label="下一条"><ArrowRight size={16} /></button>
+              </div>
+            )}
+            <button type="button" onClick={onClose} aria-label="关闭详情"><X size={18} /></button>
+          </div>
         </header>
-        {loading && <div className="page-message">正在读取详情</div>}
+        {loading && <div className="drawer-loading"><RefreshCw size={18} className="spin" /> 正在读取详情</div>}
         {error && <div className="page-message error">{error}</div>}
         {!loading && !error && (
           <div className="detail-body">
@@ -273,18 +482,19 @@ function DetailModal({ detail, loading, error, onClose, onReview, canReview }) {
                       </article>
                     ))}
                   </div>
-                ) : (
-                  <p>{block.text || '暂无内容'}</p>
-                )}
+                ) : <p>{block.text || '暂无内容'}</p>}
               </section>
             ))}
-            {detail?.type === 'report' && canReview && (
-              <div className="detail-actions">
-                <button type="button" onClick={() => onReview('approved')}>通过复核</button>
-                <button type="button" className="danger" onClick={() => onReview('rejected')}>标记未通过</button>
-              </div>
-            )}
           </div>
+        )}
+        {detail?.type === 'report' && canReview && !error && (
+          <footer className="detail-actions">
+            <span>复核结果会立即写入系统并记录操作人</span>
+            <div>
+              <button type="button" className="danger" disabled={loading} onClick={() => onReview('rejected')}>标记未通过</button>
+              <button type="button" disabled={loading} onClick={() => onReview('approved')}>通过复核</button>
+            </div>
+          </footer>
         )}
       </section>
     </div>
@@ -301,7 +511,9 @@ function formatDetail(type, payload, fallbackRow) {
   if (type === 'candidate') {
     const item = payload.candidate || fallbackRow;
     return {
-      title: `候选人 · ${item.name || item.nickname || fallbackRow.name}`,
+      type: 'candidate',
+      id: item.id || fallbackRow.id,
+      title: `学生 · ${item.name || item.nickname || fallbackRow.name}`,
       rows: [
         { label: '邮箱', value: item.email },
         { label: '状态', value: item.status },
@@ -321,11 +533,13 @@ function formatDetail(type, payload, fallbackRow) {
   if (type === 'interview') {
     const interview = payload.interview || fallbackRow;
     return {
-      title: `面试 · ${interview.target_role || fallbackRow.role}`,
+      type: 'interview',
+      id: interview.id || fallbackRow.id,
+      title: `训练 · ${interview.target_role || fallbackRow.role}`,
       rows: [
         { label: '候选人', value: interview.candidate },
         { label: '邮箱', value: interview.candidate_email },
-        { label: '面试类型', value: interview.interview_type || fallbackRow.type },
+        { label: '训练类型', value: interview.interview_type || fallbackRow.type },
         { label: '状态', value: interview.status || fallbackRow.status },
         { label: '难度', value: interview.difficulty },
         { label: '公司场景', value: interview.company_context },
@@ -366,7 +580,7 @@ function formatDetail(type, payload, fallbackRow) {
         { label: '目标岗位', value: report.target_role || report.role },
         { label: '总分', value: report.total_score || report.score },
         { label: '等级', value: report.grade },
-        { label: '录用建议', value: report.pass_recommendation || report.recommendation },
+        { label: '准备建议', value: report.pass_recommendation || report.recommendation },
         { label: '生成来源', value: report.fallback ? `本地兜底 · ${report.model || 'rules-v1'}` : `${report.provider || '-'} · ${report.model || '-'}` },
         { label: '复核状态', value: report.review_status || report.reviewStatus || 'pending' },
         { label: '生成时间', value: report.created_at || report.createdAt },
@@ -381,6 +595,8 @@ function formatDetail(type, payload, fallbackRow) {
   }
   const agent = payload.agent || fallbackRow;
   return {
+    type: 'agent',
+    id: agent.agent_name || agent.name,
     title: `Agent · ${agent.agent_name || agent.name}`,
     rows: [
       { label: '类型', value: agent.agent_type || agent.type },
@@ -403,113 +619,134 @@ function formatDetail(type, payload, fallbackRow) {
   };
 }
 
-function SectionCard({ title, icon, action, children }) {
-  return (
-    <section className="section-card">
-      <header>
-        <div>
-          {icon}
-          <h2>{title}</h2>
-        </div>
-        {action}
-      </header>
-      {children}
-    </section>
-  );
-}
-
-function Dashboard({ data }) {
-  const reviewCount = data.reports.filter((report) => report.reviewStatus !== '已复核').length;
+function Dashboard({ data, admin, onNavigate, onView }) {
+  const reviewCount = data.reports.filter((report) => report.reviewStatus === '待复核').length;
   const runningCount = data.interviews.filter((interview) => interview.status === '进行中').length;
   const lowScoreCount = data.reports.filter((report) => Number(report.score) < 70).length;
-  const scoreRows = data.reports.length
-    ? [
-        ['报告平均分', Math.round(data.reports.reduce((sum, item) => sum + Number(item.score || 0), 0) / data.reports.length)],
-        ['高分报告', data.reports.filter((item) => Number(item.score) >= 85).length],
-        ['待复核报告', reviewCount],
-        ['低分报告', lowScoreCount],
-      ]
-    : [];
+  const averageScore = data.reports.length
+    ? Math.round(data.reports.reduce((sum, item) => sum + Number(item.score || 0), 0) / data.reports.length)
+    : 0;
+  const highScoreCount = data.reports.filter((item) => Number(item.score) >= 85).length;
+  const mediumScoreCount = data.reports.filter((item) => Number(item.score) >= 70 && Number(item.score) < 85).length;
+  const queueReports = data.reports.filter((report) => report.reviewStatus === '待复核').slice(0, 5);
+  const queueInterviews = data.interviews.filter((interview) => interview.status === '进行中').slice(0, 5);
+  const reviewer = admin?.role === 'reviewer';
+  const queueItems = reviewer || queueReports.length ? queueReports : queueInterviews;
+  const queueType = reviewer || queueReports.length ? 'report' : 'interview';
+
+  const metrics = [
+    { label: '待复核报告', value: reviewCount, note: '进入审核队列', tone: reviewCount ? 'red' : 'green', view: 'reports', filter: '待复核' },
+    ...(data.permissions?.canViewInterviews ? [{ label: '进行中面试', value: runningCount, note: '查看实时进度', tone: 'blue', view: 'interviews', filter: '进行中' }] : []),
+    { label: '低分报告', value: lowScoreCount, note: '低于 70 分', tone: lowScoreCount ? 'amber' : 'green', view: 'reports', filter: '' },
+    ...(data.permissions?.canViewCandidates ? [{ label: '候选人', value: data.candidates.length, note: '最近活跃记录', tone: 'neutral', view: 'candidates', filter: '' }] : []),
+  ];
 
   return (
-    <>
+    <div className="dashboard-page">
+      <section className="dashboard-welcome">
+        <div>
+          <span>{roleLabels[admin?.role] || '管理员'}工作台</span>
+          <h2>{reviewer ? '优先完成待复核报告' : '先处理今天最需要关注的事项'}</h2>
+          <p>{reviewer ? '审核结果会实时同步到报告列表。' : '指标卡和任务队列都可以直接进入对应记录。'}</p>
+        </div>
+        <span className="connection-pill"><i /> 服务正常</span>
+      </section>
+
       <section className="metric-grid">
-        {data.metrics.map((item) => (
-          <article className={`metric-card ${item.tone}`} key={item.label}>
+        {metrics.map((item) => (
+          <button className={`metric-card ${item.tone}`} key={item.label} type="button" onClick={() => onNavigate(item.view, item.filter)}>
             <span>{item.label}</span>
             <strong>{item.value}</strong>
-            <small>{item.note}</small>
-          </article>
+            <small>{item.note}<ChevronRight size={14} /></small>
+          </button>
         ))}
       </section>
 
       <section className="content-grid">
-        <SectionCard title="今日运营队列" icon={<Activity size={18} />}>
-          <div className="ops-list">
-            <div><strong>{reviewCount}</strong><span>报告需要人工复核或抽检</span></div>
-            <div><strong>{runningCount}</strong><span>进行中的面试需要监控稳定性</span></div>
-            <div><strong>{lowScoreCount}</strong><span>低分报告建议进入复核池</span></div>
-          </div>
-        </SectionCard>
-
-        <SectionCard title="能力分布概览" icon={<BarChart3 size={18} />}>
-          <div className="score-bars">
-            {scoreRows.length === 0 && <EmptyState text="生成报告后展示统计" />}
-            {scoreRows.map(([label, value]) => (
-              <div className="score-row" key={label}>
-                <div><span>{label}</span><b>{value}/100</b></div>
-                <div className="bar-track"><span style={{ width: `${Math.min(Number(value), 100)}%` }} /></div>
-              </div>
+        <SectionCard
+          title="优先处理"
+          icon={<Activity size={18} />}
+          action={<button className="section-link" type="button" onClick={() => onNavigate(queueType === 'report' ? 'reports' : 'interviews', queueType === 'report' ? '待复核' : '进行中')}>查看全部 <ChevronRight size={14} /></button>}
+        >
+          <div className="task-queue">
+            {queueItems.length === 0 && <EmptyState text="当前没有需要立即处理的任务" />}
+            {queueItems.map((item) => (
+              <button type="button" key={item.id} onClick={() => onView(queueType, item, queueItems)}>
+                <span className={`task-dot ${queueType === 'report' ? 'amber' : 'blue'}`} />
+                <span>
+                  <strong>{item.candidate || item.name || '未命名记录'}</strong>
+                  <small>{item.role || item.target_role || '-'} · {queueType === 'report' ? `${item.score || 0} 分` : item.status}</small>
+                </span>
+                <ChevronRight size={16} />
+              </button>
             ))}
           </div>
         </SectionCard>
+
+        <SectionCard title="报告质量概览" icon={<BarChart3 size={18} />}>
+          <div className="score-overview">
+            {data.reports.length === 0 ? <EmptyState text="生成报告后展示统计" /> : (
+              <>
+                <div className="average-score">
+                  <div><span>平均分</span><strong>{averageScore}<small>/100</small></strong></div>
+                  <div className="bar-track"><span style={{ width: `${Math.min(averageScore, 100)}%` }} /></div>
+                </div>
+                <div className="distribution-grid">
+                  <div><strong>{highScoreCount}</strong><span>优秀（85+）</span></div>
+                  <div><strong>{mediumScoreCount}</strong><span>合格（70–84）</span></div>
+                  <div><strong>{lowScoreCount}</strong><span>需关注（&lt;70）</span></div>
+                </div>
+              </>
+            )}
+          </div>
+        </SectionCard>
       </section>
-    </>
+    </div>
   );
 }
 
-function CandidatesPage({ data, onView }) {
+function CandidatesPage({ data, onView, query, onQueryChange, presetFilter }) {
   const columns = [
     { key: 'name', label: '候选人' },
-    { key: 'email', label: '邮箱' },
+    { key: 'email', label: '邮箱', className: 'wide-cell' },
     { key: 'role', label: '目标岗位' },
     { key: 'status', label: '状态', render: (row) => <StatusBadge>{row.status}</StatusBadge> },
     { key: 'interviews', label: '面试数' },
     { key: 'averageScore', label: '均分' },
     { key: 'lastLogin', label: '最后登录' },
   ];
-  return <SectionCard title="用户与候选人" icon={<UsersRound size={18} />}><AdminTable columns={columns} rows={data.candidates} onView={(row) => onView('candidate', row)} /></SectionCard>;
+  return <DataWorkspace title="学生成长列表" icon={<UsersRound size={18} />} columns={columns} rows={data.candidates} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部账号状态" presetFilter={presetFilter} onView={(row, rows) => onView('candidate', row, rows)} />;
 }
 
-function InterviewsPage({ data, onView }) {
+function InterviewsPage({ data, onView, query, onQueryChange, presetFilter }) {
   const columns = [
-    { key: 'id', label: '面试 ID' },
-    { key: 'candidate', label: '候选人' },
+    { key: 'id', label: '训练 ID', sortable: false, render: (row) => <CompactId value={row.id} /> },
+    { key: 'candidate', label: '学生' },
     { key: 'role', label: '目标岗位' },
-    { key: 'type', label: '面试类型' },
+    { key: 'type', label: '训练类型' },
     { key: 'status', label: '状态', render: (row) => <StatusBadge>{row.status}</StatusBadge> },
     { key: 'agents', label: 'Agent' },
     { key: 'messages', label: '消息数' },
     { key: 'updatedAt', label: '更新时间' },
   ];
-  return <SectionCard title="面试运营" icon={<ClipboardList size={18} />}><AdminTable columns={columns} rows={data.interviews} onView={(row) => onView('interview', row)} /></SectionCard>;
+  return <DataWorkspace title="模拟训练记录" icon={<ClipboardList size={18} />} columns={columns} rows={data.interviews} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部训练状态" presetFilter={presetFilter} onView={(row, rows) => onView('interview', row, rows)} />;
 }
 
-function ReportsPage({ data, onView }) {
+function ReportsPage({ data, onView, query, onQueryChange, presetFilter }) {
   const columns = [
-    { key: 'id', label: '报告 ID' },
-    { key: 'candidate', label: '候选人' },
+    { key: 'id', label: '报告 ID', sortable: false, render: (row) => <CompactId value={row.id} /> },
+    { key: 'candidate', label: '学生' },
     { key: 'role', label: '目标岗位' },
-    { key: 'score', label: '总分' },
+    { key: 'score', label: '总分', render: (row) => <strong className={Number(row.score) < 70 ? 'score-alert' : ''}>{row.score ?? '-'}</strong> },
     { key: 'grade', label: '等级' },
-    { key: 'recommendation', label: '建议' },
+    { key: 'recommendation', label: '准备建议' },
     { key: 'reviewStatus', label: '复核状态', render: (row) => <StatusBadge>{row.reviewStatus}</StatusBadge> },
     { key: 'createdAt', label: '生成时间' },
   ];
-  return <SectionCard title="报告与复核" icon={<FileText size={18} />}><AdminTable columns={columns} rows={data.reports} onView={(row) => onView('report', row)} /></SectionCard>;
+  return <DataWorkspace title="成长报告质检" icon={<FileText size={18} />} columns={columns} rows={data.reports} query={query} onQueryChange={onQueryChange} filterKey="reviewStatus" filterLabel="全部质检状态" presetFilter={presetFilter} onView={(row, rows) => onView('report', row, rows)} />;
 }
 
-function AgentsPage({ data, onView }) {
+function AgentsPage({ data, onView, query, onQueryChange, presetFilter }) {
   const columns = [
     { key: 'name', label: 'Agent 名称' },
     { key: 'type', label: '类型' },
@@ -519,9 +756,7 @@ function AgentsPage({ data, onView }) {
   ];
   return (
     <section className="content-grid">
-      <SectionCard title="Agent 模板" icon={<Bot size={18} />}>
-        <AdminTable columns={columns} rows={data.agents} onView={(row) => onView('agent', row)} />
-      </SectionCard>
+      <DataWorkspace title="AI 陪练角色" icon={<Bot size={18} />} columns={columns} rows={data.agents} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部角色状态" presetFilter={presetFilter} onView={(row, rows) => onView('agent', row, rows)} />
       <SectionCard title="评分维度配置" icon={<SlidersHorizontal size={18} />}>
         <div className="config-list">
           {['技术深度', '表达清晰度', '业务理解', '架构思维', '稳定抗压'].map((item) => (
@@ -530,6 +765,506 @@ function AgentsPage({ data, onView }) {
         </div>
       </SectionCard>
     </section>
+  );
+}
+
+const connectionEventLabels = {
+  call_start_requested: '开始连接',
+  microphone_acquired: '麦克风已获取',
+  ice_gathering_state_changed: 'ICE 收集状态',
+  ice_connection_state_changed: 'ICE 连接状态',
+  local_offer_ready: '本地 Offer 就绪',
+  sdp_answer_received: '收到 SDP Answer',
+  remote_description_applied: '远端描述已应用',
+  connection_state_changed: '连接状态变化',
+  data_channel_opened: '数据通道已打开',
+  data_channel_closed: '数据通道已关闭',
+  data_channel_error: '数据通道错误',
+  session_created: '会话已创建',
+  session_update_sent: '会话配置已发送',
+  session_updated: '会话配置已生效',
+  remote_audio_track_received: '收到远端音轨',
+  remote_audio_playing: '远端音频播放中',
+  remote_audio_play_failed: '远端音频播放失败',
+  upstream_error: '千问上游错误',
+  call_start_failed: '连接启动失败',
+  call_stopped: '连接已停止',
+};
+
+const connectionLevelLabels = {
+  info: '正常',
+  warning: '警告',
+  error: '错误',
+};
+
+function ConnectionLogsPage() {
+  const [payload, setPayload] = useState({
+    logs: [],
+    summary: { total: 0, errors: 0, warnings: 0, sessions: 0, latestAt: '-' },
+    retentionDays: 14,
+  });
+  const [loading, setLoading] = useState(true);
+  const [logsError, setLogsError] = useState('');
+  const [query, setQuery] = useState('');
+  const [level, setLevel] = useState('');
+  const [eventType, setEventType] = useState('');
+  const [selected, setSelected] = useState(null);
+
+  const loadLogs = async () => {
+    setLoading(true);
+    setLogsError('');
+    try {
+      const data = await adminRequest('/api/admin/connection-logs?limit=500');
+      setPayload(data);
+      setSelected((current) => current
+        ? data.logs.find((item) => item.id === current.id) || null
+        : null);
+    } catch (requestError) {
+      setLogsError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLogs();
+  }, []);
+
+  const eventTypes = useMemo(
+    () => [...new Set(payload.logs.map((item) => item.eventType).filter(Boolean))].sort(),
+    [payload.logs],
+  );
+  const filteredLogs = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    return payload.logs.filter((item) => {
+      if (level && item.level !== level) return false;
+      if (eventType && item.eventType !== eventType) return false;
+      if (!keyword) return true;
+      return [
+        item.candidate,
+        item.targetRole,
+        item.sessionId,
+        item.interviewId,
+        item.eventType,
+        item.message,
+      ].join(' ').toLowerCase().includes(keyword);
+    });
+  }, [payload.logs, query, level, eventType]);
+
+  return (
+    <div className="connection-logs-page">
+      <section className="connection-log-summary">
+        <article><span>近 24 小时事件</span><strong>{payload.summary.total}</strong></article>
+        <article className={payload.summary.errors ? 'danger' : ''}><span>错误</span><strong>{payload.summary.errors}</strong></article>
+        <article className={payload.summary.warnings ? 'warning' : ''}><span>警告</span><strong>{payload.summary.warnings}</strong></article>
+        <article><span>连接会话</span><strong>{payload.summary.sessions}</strong></article>
+      </section>
+
+      <SectionCard
+        title="连接日志"
+        icon={<Wifi size={18} />}
+        action={<span className="record-count">自动保留 {payload.retentionDays} 天</span>}
+        className="connection-log-card"
+      >
+        <div className="connection-log-toolbar">
+          <label>
+            <Search size={15} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、面试、会话或错误信息" />
+          </label>
+          <select value={level} onChange={(event) => setLevel(event.target.value)}>
+            <option value="">全部级别</option>
+            <option value="error">错误</option>
+            <option value="warning">警告</option>
+            <option value="info">正常</option>
+          </select>
+          <select value={eventType} onChange={(event) => setEventType(event.target.value)}>
+            <option value="">全部事件</option>
+            {eventTypes.map((value) => <option key={value} value={value}>{connectionEventLabels[value] || value}</option>)}
+          </select>
+          <button className="secondary-button" type="button" onClick={loadLogs} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
+          </button>
+        </div>
+
+        {logsError && <div className="page-message error"><AlertCircle size={18} />{logsError}</div>}
+        {!logsError && loading && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取连接日志</div>}
+        {!logsError && !loading && (
+          <div className="connection-log-table table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>级别</th>
+                  <th>事件</th>
+                  <th>学生 / 岗位</th>
+                  <th>连接状态</th>
+                  <th>ICE 状态</th>
+                  <th>会话</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {filteredLogs.map((item) => (
+                  <tr key={item.id} className={selected?.id === item.id ? 'selected' : ''}>
+                    <td>{item.createdAt}</td>
+                    <td><span className={`connection-level ${item.level}`}>{connectionLevelLabels[item.level] || item.level}</span></td>
+                    <td><strong>{connectionEventLabels[item.eventType] || item.eventType}</strong>{item.message && <small>{item.message}</small>}</td>
+                    <td><strong>{item.candidate}</strong><small>{item.targetRole}</small></td>
+                    <td>{item.connectionState}</td>
+                    <td>{item.iceConnectionState}</td>
+                    <td><CompactId value={item.sessionId} /></td>
+                    <td><button className="table-view-button" type="button" onClick={() => setSelected(item)}>详情</button></td>
+                  </tr>
+                ))}
+                {filteredLogs.length === 0 && <tr><td colSpan="8"><EmptyState text="当前筛选条件下没有连接日志" /></td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+
+      {selected && (
+        <SectionCard
+          title="连接事件详情"
+          icon={<Activity size={18} />}
+          action={<button className="icon-button" type="button" onClick={() => setSelected(null)} aria-label="关闭连接日志详情"><X size={15} /></button>}
+          className="connection-log-detail"
+        >
+          <div className="connection-detail-grid">
+            <div><span>事件</span><strong>{connectionEventLabels[selected.eventType] || selected.eventType}</strong></div>
+            <div><span>级别</span><strong>{connectionLevelLabels[selected.level] || selected.level}</strong></div>
+            <div><span>学生</span><strong>{selected.candidate}</strong></div>
+            <div><span>目标岗位</span><strong>{selected.targetRole}</strong></div>
+            <div><span>连接状态</span><strong>{selected.connectionState}</strong></div>
+            <div><span>ICE 连接</span><strong>{selected.iceConnectionState}</strong></div>
+            <div><span>ICE 收集</span><strong>{selected.iceGatheringState}</strong></div>
+            <div><span>数据通道</span><strong>{selected.dataChannelState}</strong></div>
+            <div><span>信令状态</span><strong>{selected.signalingState}</strong></div>
+            <div><span>服务端时间</span><strong>{selected.createdAt}</strong></div>
+          </div>
+          {selected.message && <div className="connection-detail-message"><span>事件信息</span><p>{selected.message}</p></div>}
+          <div className="connection-identifiers">
+            <span>面试 ID <CompactId value={selected.interviewId} /></span>
+            <span>连接会话 <CompactId value={selected.sessionId} /></span>
+          </div>
+          {Object.keys(selected.metadata || {}).length > 0 && (
+            <div className="connection-metadata">
+              <span>安全诊断字段</span>
+              {Object.entries(selected.metadata).map(([key, value]) => <code key={key}>{key}: {String(value)}</code>)}
+            </div>
+          )}
+        </SectionCard>
+      )}
+    </div>
+  );
+}
+
+const emptyCampusData = {
+  colleges: [],
+  programs: [],
+  classes: [],
+  students: [],
+  standardMajors: [],
+  jobRoles: [],
+  summary: { colleges: 0, programs: 0, classes: 0, students: 0, unassigned: 0, focus: 0 },
+};
+
+function OrganizationPage({ onView }) {
+  const [campus, setCampus] = useState(emptyCampusData);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState('');
+  const [selectedNode, setSelectedNode] = useState({ type: 'all', id: '' });
+  const [studentQuery, setStudentQuery] = useState('');
+  const [creator, setCreator] = useState('college');
+  const [collegeForm, setCollegeForm] = useState({ code: '', name: '' });
+  const [programForm, setProgramForm] = useState({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
+  const [classForm, setClassForm] = useState({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
+  const [mappingProgramId, setMappingProgramId] = useState('');
+  const [selectedJobIds, setSelectedJobIds] = useState([]);
+  const [importClassId, setImportClassId] = useState('');
+  const [importFile, setImportFile] = useState(null);
+
+  const loadCampus = async () => {
+    setLoading(true);
+    try {
+      const data = await adminRequest('/api/admin/campus/overview');
+      setCampus({ ...emptyCampusData, ...data, summary: { ...emptyCampusData.summary, ...(data.summary || {}) } });
+      setError('');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadCampus();
+  }, []);
+
+  useEffect(() => {
+    const selectedProgram = campus.programs.find((item) => item.id === mappingProgramId);
+    setSelectedJobIds((selectedProgram?.jobs || []).map((item) => item.job_role_id));
+  }, [campus.programs, mappingProgramId]);
+
+  const selectedLabel = useMemo(() => {
+    if (selectedNode.type === 'unassigned') return '未归班学生';
+    if (selectedNode.type === 'college') return campus.colleges.find((item) => item.id === selectedNode.id)?.name || '学院';
+    if (selectedNode.type === 'program') return campus.programs.find((item) => item.id === selectedNode.id)?.name || '专业';
+    if (selectedNode.type === 'class') return campus.classes.find((item) => item.id === selectedNode.id)?.name || '班级';
+    return '全部学生';
+  }, [campus, selectedNode]);
+
+  const filteredStudents = useMemo(() => {
+    const keyword = studentQuery.trim().toLowerCase();
+    return campus.students.filter((student) => {
+      const matchesNode = selectedNode.type === 'all'
+        || (selectedNode.type === 'unassigned' && !student.classId)
+        || (selectedNode.type === 'college' && student.collegeId === selectedNode.id)
+        || (selectedNode.type === 'program' && student.programId === selectedNode.id)
+        || (selectedNode.type === 'class' && student.classId === selectedNode.id);
+      const searchable = [student.name, student.email, student.studentNo, student.targetRole, student.program, student.className].join(' ').toLowerCase();
+      return matchesNode && (!keyword || searchable.includes(keyword));
+    });
+  }, [campus.students, selectedNode, studentQuery]);
+
+  const createOrganizationItem = async (event) => {
+    event.preventDefault();
+    const config = {
+      college: { path: '/api/admin/campus/colleges', body: collegeForm, label: '学院' },
+      program: { path: '/api/admin/campus/programs', body: programForm, label: '专业' },
+      class: { path: '/api/admin/campus/classes', body: classForm, label: '班级' },
+    }[creator];
+    setBusy(`create-${creator}`);
+    setError('');
+    setMessage('');
+    try {
+      await adminRequest(config.path, { method: 'POST', body: JSON.stringify(config.body) });
+      setCollegeForm({ code: '', name: '' });
+      setProgramForm({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
+      setClassForm({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
+      setMessage(`${config.label}创建成功`);
+      await loadCampus();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const updateStudent = async (student, updates) => {
+    setBusy(`student-${student.id}`);
+    setError('');
+    try {
+      await adminRequest(`/api/admin/campus/students/${encodeURIComponent(student.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      });
+      setMessage(updates.focus !== undefined ? (updates.focus ? '已标记为重点关注' : '已取消重点关注') : '学生归属已更新');
+      await loadCampus();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const saveProgramJobs = async () => {
+    if (!mappingProgramId) return;
+    setBusy('mapping');
+    setError('');
+    try {
+      await adminRequest(`/api/admin/campus/programs/${encodeURIComponent(mappingProgramId)}/jobs`, {
+        method: 'PUT',
+        body: JSON.stringify({ jobRoleIds: selectedJobIds }),
+      });
+      setMessage('专业推荐岗位已更新');
+      await loadCampus();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const importStudents = async (event) => {
+    event.preventDefault();
+    if (!importClassId || !importFile) return;
+    const formData = new FormData();
+    formData.append('file', importFile);
+    setBusy('import');
+    setError('');
+    try {
+      const result = await adminRequest(`/api/admin/campus/students/import?class_id=${encodeURIComponent(importClassId)}`, { method: 'POST', body: formData });
+      setMessage(`导入完成：成功归班 ${result.matched} 人，未匹配 ${result.unmatched?.length || 0} 人`);
+      setImportFile(null);
+      event.currentTarget.reset();
+      await loadCampus();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const openStudent = (student) => {
+    const asCandidate = {
+      ...student,
+      role: student.targetRole,
+      status: student.accountStatus,
+      averageScore: student.readiness,
+      lastLogin: student.lastLogin,
+    };
+    const context = filteredStudents.map((item) => ({
+      ...item,
+      role: item.targetRole,
+      status: item.accountStatus,
+      averageScore: item.readiness,
+      lastLogin: item.lastLogin,
+    }));
+    onView('candidate', asCandidate, context);
+  };
+
+  if (loading && campus.students.length === 0) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取组织与学生数据</div>;
+
+  return (
+    <div className="campus-page">
+      {(error || message) && <div className={`campus-feedback ${error ? 'error' : 'success'}`}>{error || message}</div>}
+
+      <section className="campus-summary-grid">
+        {[
+          ['学院', campus.summary.colleges, Building2],
+          ['专业', campus.summary.programs, GraduationCap],
+          ['学生', campus.summary.students, UsersRound],
+          ['需要关注', campus.summary.focus, AlertCircle],
+        ].map(([label, value, Icon]) => (
+          <article key={label}><Icon size={18} /><span>{label}</span><strong>{value}</strong></article>
+        ))}
+      </section>
+
+      <section className="campus-workspace">
+        <SectionCard title="组织结构" icon={<School size={18} />} className="campus-tree-card">
+          <div className="campus-tree">
+            <button type="button" className={selectedNode.type === 'all' ? 'active' : ''} onClick={() => setSelectedNode({ type: 'all', id: '' })}>
+              <span><UsersRound size={15} />全部学生</span><b>{campus.summary.students}</b>
+            </button>
+            <button type="button" className={selectedNode.type === 'unassigned' ? 'active warning' : 'warning'} onClick={() => setSelectedNode({ type: 'unassigned', id: '' })}>
+              <span><AlertCircle size={15} />未归班</span><b>{campus.summary.unassigned}</b>
+            </button>
+            {campus.colleges.map((college) => (
+              <div className="campus-college-node" key={college.id}>
+                <button type="button" className={selectedNode.type === 'college' && selectedNode.id === college.id ? 'active' : ''} onClick={() => setSelectedNode({ type: 'college', id: college.id })}>
+                  <span><Building2 size={15} />{college.name}</span><b>{college.studentCount}</b>
+                </button>
+                <div>
+                  {campus.programs.filter((program) => program.college_id === college.id).map((program) => (
+                    <div className="campus-program-node" key={program.id}>
+                      <button type="button" className={selectedNode.type === 'program' && selectedNode.id === program.id ? 'active' : ''} onClick={() => setSelectedNode({ type: 'program', id: program.id })}>
+                        <span><GraduationCap size={14} />{program.name}{program.direction ? ` · ${program.direction}` : ''}</span><b>{program.studentCount}</b>
+                      </button>
+                      <div>
+                        {campus.classes.filter((classItem) => classItem.program_id === program.id).map((classItem) => (
+                          <button type="button" key={classItem.id} className={selectedNode.type === 'class' && selectedNode.id === classItem.id ? 'active' : ''} onClick={() => setSelectedNode({ type: 'class', id: classItem.id })}>
+                            <span>{classItem.graduation_year ? `${classItem.graduation_year}届 · ` : ''}{classItem.name}</span><b>{classItem.studentCount}</b>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {campus.colleges.length === 0 && <EmptyState text="还没有组织结构，请先创建学院" />}
+          </div>
+        </SectionCard>
+
+        <SectionCard title={selectedLabel} icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
+          <div className="campus-student-toolbar">
+            <label><Search size={15} /><input value={studentQuery} onChange={(event) => setStudentQuery(event.target.value)} placeholder="搜索姓名、学号、邮箱或目标岗位" /></label>
+          </div>
+          <div className="table-wrap campus-student-table">
+            <table>
+              <thead><tr><th>学生</th><th>目标岗位</th><th>准备度</th><th>训练</th><th>成长状态</th><th>班级归属</th><th aria-label="关注" /></tr></thead>
+              <tbody>
+                {filteredStudents.length === 0 && <tr><td colSpan="7"><EmptyState text="当前范围没有学生" /></td></tr>}
+                {filteredStudents.map((student) => (
+                  <tr key={student.id} className="data-row" onClick={() => openStudent(student)}>
+                    <td><div className="student-identity"><strong>{student.name}</strong><span>{student.studentNo !== '-' ? student.studentNo : student.email}</span></div></td>
+                    <td>{student.targetRole}</td>
+                    <td><strong className={student.readiness < 60 && student.interviews > 0 ? 'score-alert' : ''}>{student.interviews ? `${student.readiness}分` : '-'}</strong></td>
+                    <td>{student.interviews} 次</td>
+                    <td><StatusBadge>{student.growthStatus}</StatusBadge></td>
+                    <td onClick={(event) => event.stopPropagation()}>
+                      <select value={student.classId || ''} disabled={busy === `student-${student.id}`} onChange={(event) => updateStudent(student, { classId: event.target.value })} aria-label={`调整 ${student.name} 的班级`}>
+                        <option value="">未归班</option>
+                        {campus.classes.map((classItem) => <option key={classItem.id} value={classItem.id}>{classItem.program_name} · {classItem.name}</option>)}
+                      </select>
+                    </td>
+                    <td onClick={(event) => event.stopPropagation()}>
+                      <button type="button" className={`focus-student-button ${student.focus ? 'active' : ''}`} disabled={busy === `student-${student.id}`} onClick={() => updateStudent(student, { focus: !student.focus })}>{student.focus ? '已关注' : '关注'}</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </SectionCard>
+      </section>
+
+      <section className="campus-config-grid">
+        <SectionCard title="组织配置" icon={<Plus size={18} />}>
+          <div className="campus-config-tabs">
+            {[['college', '添加学院'], ['program', '添加专业'], ['class', '添加班级']].map(([key, label]) => <button type="button" key={key} className={creator === key ? 'active' : ''} onClick={() => setCreator(key)}>{label}</button>)}
+          </div>
+          <form className="campus-create-form" onSubmit={createOrganizationItem}>
+            {creator === 'college' && (
+              <>
+                <label className="field-block"><span>学院编码</span><input value={collegeForm.code} onChange={(event) => setCollegeForm((current) => ({ ...current, code: event.target.value }))} placeholder="例如 CS" required /></label>
+                <label className="field-block"><span>学院名称</span><input value={collegeForm.name} onChange={(event) => setCollegeForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 计算机学院" required /></label>
+              </>
+            )}
+            {creator === 'program' && (
+              <>
+                <label className="field-block"><span>所属学院</span><select value={programForm.collegeId} onChange={(event) => setProgramForm((current) => ({ ...current, collegeId: event.target.value }))} required><option value="">请选择学院</option>{campus.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+                <label className="field-block"><span>标准专业</span><select value={programForm.standardMajorCode} onChange={(event) => { const major = campus.standardMajors.find((item) => item.code === event.target.value); setProgramForm((current) => ({ ...current, standardMajorCode: event.target.value, name: major?.name || current.name })); }}><option value="">自定义专业</option>{campus.standardMajors.map((item) => <option value={item.code} key={item.id}>{item.name} · {item.code}</option>)}</select></label>
+                <label className="field-block"><span>学校专业名称</span><input value={programForm.name} onChange={(event) => setProgramForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程" required /></label>
+                <label className="field-block"><span>培养方向</span><input value={programForm.direction} onChange={(event) => setProgramForm((current) => ({ ...current, direction: event.target.value }))} placeholder="例如 Java 开发" /></label>
+                <label className="field-block"><span>专业负责人</span><input value={programForm.coordinator} onChange={(event) => setProgramForm((current) => ({ ...current, coordinator: event.target.value }))} placeholder="姓名" /></label>
+              </>
+            )}
+            {creator === 'class' && (
+              <>
+                <label className="field-block"><span>所属专业</span><select value={classForm.programId} onChange={(event) => setClassForm((current) => ({ ...current, programId: event.target.value }))} required><option value="">请选择专业</option>{campus.programs.map((item) => <option value={item.id} key={item.id}>{item.college_name} · {item.name}</option>)}</select></label>
+                <label className="field-block"><span>班级名称</span><input value={classForm.name} onChange={(event) => setClassForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程1班" required /></label>
+                <label className="field-block"><span>毕业年份</span><input type="number" min="2000" max="2100" value={classForm.graduationYear} onChange={(event) => setClassForm((current) => ({ ...current, graduationYear: event.target.value }))} placeholder="2026" /></label>
+                <label className="field-block"><span>辅导员</span><input value={classForm.advisor} onChange={(event) => setClassForm((current) => ({ ...current, advisor: event.target.value }))} placeholder="姓名" /></label>
+                <label className="field-block"><span>邀请码（可选）</span><input value={classForm.inviteCode} onChange={(event) => setClassForm((current) => ({ ...current, inviteCode: event.target.value }))} placeholder="留空自动生成" /></label>
+              </>
+            )}
+            <button className="primary-button" type="submit" disabled={busy === `create-${creator}`}>{busy === `create-${creator}` ? '创建中…' : '确认创建'}</button>
+          </form>
+        </SectionCard>
+
+        <SectionCard title="专业推荐岗位" icon={<GraduationCap size={18} />}>
+          <div className="program-job-editor">
+            <label className="field-block"><span>选择专业</span><select value={mappingProgramId} onChange={(event) => setMappingProgramId(event.target.value)}><option value="">请选择专业</option>{campus.programs.map((item) => <option value={item.id} key={item.id}>{item.college_name} · {item.name}</option>)}</select></label>
+            {mappingProgramId && <div className="job-role-picker">{campus.jobRoles.map((job) => <label key={job.id} className={selectedJobIds.includes(job.id) ? 'selected' : ''}><input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={(event) => setSelectedJobIds((current) => event.target.checked ? [...current, job.id] : current.filter((id) => id !== job.id))} />{job.name}</label>)}</div>}
+            {mappingProgramId && <button className="primary-button" type="button" disabled={busy === 'mapping'} onClick={saveProgramJobs}>{busy === 'mapping' ? '保存中…' : '保存岗位关联'}</button>}
+            {!mappingProgramId && <EmptyState text="选择专业后配置推荐岗位" />}
+          </div>
+        </SectionCard>
+
+        <SectionCard title="批量归班" icon={<Upload size={18} />}>
+          <form className="campus-import-form" onSubmit={importStudents}>
+            <p>上传 UTF-8 CSV，至少包含“邮箱”列；可选“学号”列。已注册学生会加入目标班级，未注册学生会出现在结果提示中。</p>
+            <label className="field-block"><span>目标班级</span><select value={importClassId} onChange={(event) => setImportClassId(event.target.value)} required><option value="">请选择班级</option>{campus.classes.map((item) => <option value={item.id} key={item.id}>{item.program_name} · {item.name}</option>)}</select></label>
+            <label className="campus-file-field"><input type="file" accept=".csv,text/csv" onChange={(event) => setImportFile(event.target.files?.[0] || null)} required /><span>{importFile?.name || '选择学生 CSV 文件'}</span></label>
+            <button className="secondary-button" type="submit" disabled={busy === 'import'}><Upload size={15} />{busy === 'import' ? '导入中…' : '开始导入'}</button>
+          </form>
+        </SectionCard>
+      </section>
+    </div>
   );
 }
 
@@ -1577,19 +2312,57 @@ function SettingsPage({ data, onSettingsSaved }) {
   );
 }
 
+const pageDescriptions = {
+  dashboard: '集中处理今天最需要关注的任务',
+  interviews: '查看学生模拟训练进度与 AI 陪练运行情况',
+  reports: '抽检成长报告的准确性与建议质量',
+  organization: '维护学院、专业、班级和学生组织归属',
+  candidates: '查看学生训练记录与成长表现',
+  catalog: '维护目标岗位、专业方向与能力模型',
+  agents: '查看 AI 陪练角色及使用情况',
+  connectionLogs: '排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路',
+  settings: '管理服务配置、管理员与审计记录',
+};
+
+const searchableViews = new Set(['candidates', 'interviews', 'reports', 'agents']);
+
+function initialAdminView() {
+  const hashView = window.location.hash.replace(/^#\/?/, '').split('?')[0];
+  return navItems.some((item) => item.key === hashView) ? hashView : 'dashboard';
+}
+
 function AdminApp({ admin, onSignedOut }) {
-  const [activeView, setActiveView] = useState('dashboard');
+  const [activeView, setActiveView] = useState(initialAdminView);
   const [adminData, setAdminData] = useState(emptyAdminData);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [searchByView, setSearchByView] = useState({});
+  const [viewPreset, setViewPreset] = useState({ view: '', value: '' });
   const [detail, setDetail] = useState(null);
+  const [detailContext, setDetailContext] = useState({ type: '', rows: [], currentKey: '' });
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
+  const [notice, setNotice] = useState('');
   const visibleNavItems = useMemo(
     () => navItems.filter((item) => !item.permission || adminData.permissions?.[item.permission]),
     [adminData.permissions],
   );
   const activeItem = useMemo(() => visibleNavItems.find((item) => item.key === activeView), [activeView, visibleNavItems]);
+  const pendingReportCount = adminData.reports.filter((report) => report.reviewStatus === '待复核').length;
+  const runningInterviewCount = adminData.interviews.filter((interview) => interview.status === '进行中').length;
+  const currentQuery = searchByView[activeView] || '';
+
+  const setCurrentQuery = (value) => {
+    setSearchByView((current) => ({ ...current, [activeView]: value }));
+  };
+
+  const navigateTo = (view, filter = '') => {
+    setActiveView(view);
+    setViewPreset({ view, value: filter });
+    window.history.replaceState(null, '', `#/${view}`);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -1599,6 +2372,7 @@ function AdminApp({ admin, onSignedOut }) {
         if (mounted) {
           setAdminData({ ...emptyAdminData, ...data });
           setError('');
+          setLastUpdated(new Date());
         }
       })
       .catch((requestError) => {
@@ -1617,13 +2391,50 @@ function AdminApp({ admin, onSignedOut }) {
     };
   }, [onSignedOut]);
 
-  const openDetail = async (type, row) => {
+  useEffect(() => {
+    const syncViewFromHash = () => {
+      const nextView = initialAdminView();
+      if (visibleNavItems.some((item) => item.key === nextView)) setActiveView(nextView);
+    };
+    window.addEventListener('hashchange', syncViewFromHash);
+    return () => window.removeEventListener('hashchange', syncViewFromHash);
+  }, [visibleNavItems]);
+
+  useEffect(() => {
+    if (!loading && !visibleNavItems.some((item) => item.key === activeView)) navigateTo('dashboard');
+  }, [activeView, loading, visibleNavItems]);
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = window.setTimeout(() => setNotice(''), 2800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  const refreshSnapshot = async () => {
+    setRefreshing(true);
+    try {
+      const data = await adminRequest('/api/admin/snapshot');
+      setAdminData({ ...emptyAdminData, ...data });
+      setError('');
+      setLastUpdated(new Date());
+      setNotice('数据已刷新');
+    } catch (requestError) {
+      if (requestError.status === 401) onSignedOut(false);
+      else setError(requestError.message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const openDetail = async (type, row, contextRows = [row]) => {
     const paths = {
       candidate: `/api/admin/candidates/${encodeURIComponent(row.id)}`,
       interview: `/api/admin/interviews/${encodeURIComponent(row.id)}`,
       report: `/api/admin/reports/${encodeURIComponent(row.id)}`,
       agent: `/api/admin/agents/${encodeURIComponent(row.name)}`,
     };
+    const currentKey = type === 'agent' ? row.name : row.id;
+    setDetailContext({ type, rows: contextRows, currentKey });
     setDetail(formatDetail(type, {}, row));
     setDetailLoading(true);
     setDetailError('');
@@ -1644,6 +2455,26 @@ function AdminApp({ admin, onSignedOut }) {
     }));
   };
 
+  const closeDetail = () => {
+    setDetail(null);
+    setDetailContext({ type: '', rows: [], currentKey: '' });
+    setDetailError('');
+    setDetailLoading(false);
+  };
+
+  const detailIndex = detailContext.rows.findIndex((row) => (detailContext.type === 'agent' ? row.name : row.id) === detailContext.currentKey);
+  const detailPosition = {
+    current: detailIndex >= 0 ? detailIndex + 1 : 1,
+    total: detailContext.rows.length || 1,
+    hasPrevious: detailIndex > 0,
+    hasNext: detailIndex >= 0 && detailIndex < detailContext.rows.length - 1,
+  };
+
+  const moveDetail = (offset) => {
+    const nextRow = detailContext.rows[detailIndex + offset];
+    if (nextRow) openDetail(detailContext.type, nextRow, detailContext.rows);
+  };
+
   const reviewReport = async (status) => {
     if (!detail?.id) return;
     setDetailLoading(true);
@@ -1660,6 +2491,7 @@ function AdminApp({ admin, onSignedOut }) {
           ? { ...item, reviewStatus: status === 'approved' ? '已复核' : status === 'rejected' ? '复核未通过' : '待复核' }
           : item),
       }));
+      setNotice(status === 'approved' ? '报告已通过复核' : status === 'rejected' ? '报告已标记为未通过' : '报告已退回待复核');
     } catch (requestError) {
       setDetailError(requestError.message);
     } finally {
@@ -1668,15 +2500,24 @@ function AdminApp({ admin, onSignedOut }) {
   };
 
   const renderContent = () => {
-    if (loading) return <div className="page-message">正在读取独立管理端后端数据</div>;
-    if (error) return <div className="page-message error">{error}</div>;
+    if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
+    if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
     if (activeView === 'catalog') return <CatalogPage permissions={adminData.permissions || {}} />;
-    if (activeView === 'candidates') return <CandidatesPage data={adminData} onView={openDetail} />;
-    if (activeView === 'interviews') return <InterviewsPage data={adminData} onView={openDetail} />;
-    if (activeView === 'reports') return <ReportsPage data={adminData} onView={openDetail} />;
-    if (activeView === 'agents') return <AgentsPage data={adminData} onView={openDetail} />;
+    if (activeView === 'organization') return <OrganizationPage onView={openDetail} />;
+    const listProps = {
+      data: adminData,
+      onView: openDetail,
+      query: currentQuery,
+      onQueryChange: setCurrentQuery,
+      presetFilter: viewPreset.view === activeView ? viewPreset.value : '',
+    };
+    if (activeView === 'candidates') return <CandidatesPage {...listProps} />;
+    if (activeView === 'interviews') return <InterviewsPage {...listProps} />;
+    if (activeView === 'reports') return <ReportsPage {...listProps} />;
+    if (activeView === 'agents') return <AgentsPage {...listProps} />;
+    if (activeView === 'connectionLogs') return <ConnectionLogsPage />;
     if (activeView === 'settings') return <SettingsPage data={adminData} onSettingsSaved={handleSettingsSaved} />;
-    return <Dashboard data={adminData} />;
+    return <Dashboard data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
   };
 
   return (
@@ -1691,18 +2532,29 @@ function AdminApp({ admin, onSignedOut }) {
         </div>
 
         <nav className="admin-nav" aria-label="管理端导航">
-          {visibleNavItems.map((item) => {
-            const Icon = item.icon;
+          {['工作台', '学生成长', '训练内容', '系统'].map((group) => {
+            const groupItems = visibleNavItems.filter((item) => item.group === group);
+            if (groupItems.length === 0) return null;
             return (
-              <button
-                className={activeView === item.key ? 'active' : ''}
-                key={item.key}
-                type="button"
-                onClick={() => setActiveView(item.key)}
-              >
-                <Icon size={17} />
-                {item.label}
-              </button>
+              <section className="nav-group" key={group}>
+                <span>{group}</span>
+                {groupItems.map((item) => {
+                  const Icon = item.icon;
+                  const badge = item.key === 'reports' ? pendingReportCount : item.key === 'interviews' ? runningInterviewCount : 0;
+                  return (
+                    <button
+                      className={activeView === item.key ? 'active' : ''}
+                      key={item.key}
+                      type="button"
+                      onClick={() => navigateTo(item.key)}
+                    >
+                      <Icon size={17} />
+                      <span>{item.label}</span>
+                      {badge > 0 && <b>{badge}</b>}
+                    </button>
+                  );
+                })}
+              </section>
             );
           })}
         </nav>
@@ -1721,42 +2573,40 @@ function AdminApp({ admin, onSignedOut }) {
 
       <section className="admin-main">
         <header className="admin-topbar">
-          <div>
-            <p>Management Console</p>
-            <h1>{activeItem?.label || '总览'}</h1>
+          <div className="page-heading">
+            <p>Management Console / {activeItem?.group || '工作台'}</p>
+            <h1>{activeItem?.label || '工作台'}</h1>
+            <span>{pageDescriptions[activeView]}</span>
           </div>
-          <label className="admin-search">
-            <Search size={16} />
-            <input placeholder="搜索用户、面试、报告 ID" />
-          </label>
+          <div className="topbar-actions">
+            {searchableViews.has(activeView) && (
+              <label className="admin-search">
+                <Search size={16} />
+                <input value={currentQuery} onChange={(event) => setCurrentQuery(event.target.value)} placeholder={`搜索当前${activeItem?.label || '页面'}`} />
+                {currentQuery && <button type="button" onClick={() => setCurrentQuery('')} aria-label="清空搜索"><X size={14} /></button>}
+              </label>
+            )}
+            <span className={`topbar-connection ${error ? 'error' : ''}`} title={ADMIN_API_BASE_URL}>
+              <i />{error ? '连接异常' : '服务正常'}
+            </span>
+            <button className="icon-button" type="button" disabled={refreshing} onClick={refreshSnapshot} aria-label="刷新数据" title={lastUpdated ? `上次更新 ${lastUpdated.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '刷新数据'}>
+              <RefreshCw size={17} className={refreshing ? 'spin' : ''} />
+            </button>
+          </div>
         </header>
-
-        <section className="admin-hero">
-          <div>
-            <span>安全管理控制台</span>
-            <h2>管理端已启用独立登录与角色权限</h2>
-            <p>当前账号为{roleLabels[admin?.role] || admin?.role}，页面仅展示该角色允许访问的数据和操作。</p>
-          </div>
-          <div className="hero-status">
-            <Gauge size={22} />
-            <strong>{loading ? '连接中' : error ? '后端异常' : '真实后端'}</strong>
-            <small>{ADMIN_API_BASE_URL}</small>
-          </div>
-        </section>
 
         {renderContent()}
       </section>
-      <DetailModal
+      {notice && <div className="admin-toast" role="status"><CheckCircle2 size={17} />{notice}</div>}
+      <DetailDrawer
         detail={detail}
         loading={detailLoading}
         error={detailError}
         onReview={reviewReport}
         canReview={admin?.role === 'super_admin' || admin?.role === 'reviewer'}
-        onClose={() => {
-          setDetail(null);
-          setDetailError('');
-          setDetailLoading(false);
-        }}
+        onClose={closeDetail}
+        onMove={moveDetail}
+        position={detailPosition}
       />
     </main>
   );

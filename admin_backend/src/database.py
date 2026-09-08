@@ -209,9 +209,75 @@ def ensure_admin_schema() -> None:
               FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE SET NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS campus_colleges (
+              id TEXT PRIMARY KEY,
+              code TEXT NOT NULL UNIQUE,
+              name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS campus_programs (
+              id TEXT PRIMARY KEY,
+              college_id TEXT NOT NULL,
+              standard_major_code TEXT,
+              name TEXT NOT NULL,
+              direction TEXT,
+              coordinator TEXT,
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (college_id) REFERENCES campus_colleges(id) ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS campus_classes (
+              id TEXT PRIMARY KEY,
+              program_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              graduation_year INTEGER,
+              advisor TEXT,
+              invite_code TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS student_enrollments (
+              id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL UNIQUE,
+              class_id TEXT,
+              student_no TEXT,
+              status TEXT NOT NULL DEFAULT 'active',
+              focus_flag INTEGER NOT NULL DEFAULT 0,
+              note TEXT,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (class_id) REFERENCES campus_classes(id) ON DELETE SET NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS program_job_roles (
+              id TEXT PRIMARY KEY,
+              program_id TEXT NOT NULL,
+              job_role_id TEXT NOT NULL,
+              priority TEXT NOT NULL DEFAULT 'recommended',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(program_id, job_role_id),
+              FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_admin_sessions_user_id ON admin_sessions(admin_user_id)",
             "CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires_at ON admin_sessions(expires_at)",
             "CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_logs(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_campus_programs_college ON campus_programs(college_id)",
+            "CREATE INDEX IF NOT EXISTS idx_campus_classes_program ON campus_classes(program_id)",
+            "CREATE INDEX IF NOT EXISTS idx_student_enrollments_class ON student_enrollments(class_id)",
         ]
     else:
         statements = [
@@ -257,6 +323,73 @@ def ensure_admin_schema() -> None:
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               INDEX idx_admin_audit_created_at (created_at),
               CONSTRAINT fk_admin_audit_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS campus_colleges (
+              id VARCHAR(36) PRIMARY KEY,
+              code VARCHAR(64) NOT NULL UNIQUE,
+              name VARCHAR(160) NOT NULL,
+              status VARCHAR(24) NOT NULL DEFAULT 'active',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS campus_programs (
+              id VARCHAR(36) PRIMARY KEY,
+              college_id VARCHAR(36) NOT NULL,
+              standard_major_code VARCHAR(64),
+              name VARCHAR(160) NOT NULL,
+              direction VARCHAR(160),
+              coordinator VARCHAR(120),
+              status VARCHAR(24) NOT NULL DEFAULT 'active',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_campus_programs_college (college_id),
+              CONSTRAINT fk_campus_program_college FOREIGN KEY (college_id) REFERENCES campus_colleges(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS campus_classes (
+              id VARCHAR(36) PRIMARY KEY,
+              program_id VARCHAR(36) NOT NULL,
+              name VARCHAR(160) NOT NULL,
+              graduation_year INT,
+              advisor VARCHAR(120),
+              invite_code VARCHAR(40) NOT NULL UNIQUE,
+              status VARCHAR(24) NOT NULL DEFAULT 'active',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_campus_classes_program (program_id),
+              CONSTRAINT fk_campus_class_program FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS student_enrollments (
+              id VARCHAR(36) PRIMARY KEY,
+              user_id VARCHAR(36) NOT NULL UNIQUE,
+              class_id VARCHAR(36),
+              student_no VARCHAR(80),
+              status VARCHAR(24) NOT NULL DEFAULT 'active',
+              focus_flag TINYINT(1) NOT NULL DEFAULT 0,
+              note VARCHAR(1000),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_student_enrollments_class (class_id),
+              CONSTRAINT fk_student_enrollment_class FOREIGN KEY (class_id) REFERENCES campus_classes(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS program_job_roles (
+              id VARCHAR(36) PRIMARY KEY,
+              program_id VARCHAR(36) NOT NULL,
+              job_role_id VARCHAR(36) NOT NULL,
+              priority VARCHAR(24) NOT NULL DEFAULT 'recommended',
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE KEY uq_program_job_role (program_id, job_role_id),
+              INDEX idx_program_job_roles_program (program_id),
+              CONSTRAINT fk_program_job_role_program FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,
         ]

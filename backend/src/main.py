@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
@@ -3254,3 +3255,46 @@ def get_stats(user: dict = Depends(require_auth)):
 def get_dimensions(user: dict = Depends(require_auth)):
     refresh_user_skill_stats(user["id"])
     return {"dimensions": build_user_dimension_stats(user["id"])}
+
+# ==================== Alibaba Cloud RTC ====================
+
+from .rtc_token_service import generate_rtc_token
+
+
+class RTCTokenRequest(BaseModel):
+    channel_id: str
+    expires_in: int = 3600
+
+
+@app.post("/api/rtc/token")
+def api_rtc_token(
+    body: RTCTokenRequest,
+    user: dict = Depends(require_auth),
+):
+    channel_id = body.channel_id.strip()
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", channel_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid RTC channel_id",
+        )
+
+    expires_in = max(60, min(int(body.expires_in), 86400))
+
+    # RTC UserID 直接绑定当前登录用户，前端不能冒充其他用户
+    rtc_user_id = f"user-{user['id']}"
+
+    try:
+        result = generate_rtc_token(
+            channel_id=channel_id,
+            user_id=rtc_user_id,
+            expires_in=expires_in,
+        )
+    except Exception as exc:
+        print(f"[RTC] token generation failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate RTC token",
+        )
+
+    return result

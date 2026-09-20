@@ -95,3 +95,31 @@ AI Interview Agent 是一个面向招聘与人才评估场景的智能面试平�
 
 # 🏗 System Architecture
 
+- 候选人端：React + Vite，负责面试配置、实时通话和复盘展示。
+- 业务后端：FastAPI，负责身份、面试状态机、AI 调用、RTC 会话和报告生成。
+- 管理端：独立 FastAPI 服务，负责候选人、职业目录、连接日志和统计管理。
+- 数据层：MySQL 用于生产数据，SQLite 用于本地开发与自动化测试。
+
+
+## ☁️ Alibaba Cloud RTC
+
+“阿里云 RTC AI”模式使用 `dingrtc`、`dingrtc-aiagent` 以及阿里云
+`StartAgent` / `StopAgent` 接口。每场面试拥有唯一、持久化的 RTC 会话；启动、停止、重连、
+心跳超时和服务重启恢复均通过服务端状态机处理。
+
+最终字幕按 RTC `turn_id` 幂等写入正式面试消息，再进入单题评价、追问、面试官切换和报告链路。
+临时字幕只用于实时展示，不作为评分证据。结束面试时客户端会退出频道，并等待服务端 Agent 停止。
+
+在 `backend/.env` 中至少配置：
+
+```env
+RTC_APP_ID=
+RTC_APP_KEY=
+RTC_AI_AGENT_TEMPLATE_ID=
+ALIBABA_CLOUD_ACCESS_KEY_ID=
+ALIBABA_CLOUD_ACCESS_KEY_SECRET=
+```
+
+完整 RTC、会话回收和诊断日志选项见 `backend/.env.example`。所有密钥只保存在后端，
+浏览器仅获取与当前面试和用户绑定的短期音频 Token。
+

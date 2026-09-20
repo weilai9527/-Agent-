@@ -33,6 +33,23 @@ class AdminAuthTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
+    def insert_candidate_user(self, user_id: str, email: str, name: str) -> None:
+        """Keep admin tests independent from candidate-backend import order."""
+        columns = {
+            row[1]
+            for row in admin_main.db.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "password_hash" in columns:
+            admin_main.db.execute(
+                "INSERT INTO users (id, email, password_hash, name, status) VALUES (?, ?, ?, ?, ?)",
+                (user_id, email, "test-only-password-hash", name, "normal"),
+            ).close()
+            return
+        admin_main.db.execute(
+            "INSERT INTO users (id, email, name, status) VALUES (?, ?, ?, ?)",
+            (user_id, email, name, "normal"),
+        ).close()
+
     def login_super_admin(self) -> None:
         response = self.client.post(
             "/api/admin/auth/login",
@@ -208,14 +225,8 @@ class AdminAuthTests(unittest.TestCase):
             admin_main.db.execute(statement).close()
         first_id = str(uuid4())
         second_id = str(uuid4())
-        admin_main.db.execute(
-            "INSERT INTO users (id, email, name, status) VALUES (?, ?, ?, ?)",
-            (first_id, "campus-student-1@example.com", "Campus Student One", "normal"),
-        ).close()
-        admin_main.db.execute(
-            "INSERT INTO users (id, email, name, status) VALUES (?, ?, ?, ?)",
-            (second_id, "campus-student-2@example.com", "Campus Student Two", "normal"),
-        ).close()
+        self.insert_candidate_user(first_id, "campus-student-1@example.com", "Campus Student One")
+        self.insert_candidate_user(second_id, "campus-student-2@example.com", "Campus Student Two")
         admin_main.db.commit()
 
         assigned = self.client.patch(
@@ -326,10 +337,7 @@ class AdminAuthTests(unittest.TestCase):
         user_id = f"connection-user-{suffix}"
         interview_id = f"connection-interview-{suffix}"
         event_id = f"connection-event-{suffix}"
-        admin_main.db.execute(
-            "INSERT INTO users (id, email, name, status) VALUES (?, ?, ?, ?)",
-            (user_id, f"{suffix}@example.com", "Connection Test Student", "normal"),
-        ).close()
+        self.insert_candidate_user(user_id, f"{suffix}@example.com", "Connection Test Student")
         admin_main.db.execute(
             "INSERT INTO interview_sessions (id, user_id, target_role) VALUES (?, ?, ?)",
             (interview_id, user_id, "WebRTC Engineer"),

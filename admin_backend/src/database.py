@@ -28,6 +28,12 @@ class MySQLConfig:
 
 config = MySQLConfig()
 
+MYSQL_COLLATION = "utf8mb4_unicode_ci"
+MYSQL_CROSS_SCHEMA_COLUMNS = (
+    ("student_enrollments", "user_id"),
+    ("program_job_roles", "job_role_id"),
+)
+
 
 def _safe_identifier(value: str, label: str) -> str:
     if not re.match(r"^[A-Za-z0-9_]+$", value):
@@ -165,6 +171,34 @@ def get_database_path() -> str:
     return f"mysql://{config.user}@{config.host}:{config.port}/{config.database}"
 
 
+def ensure_mysql_cross_schema_collations() -> None:
+    """Align columns joined to tables owned by the candidate backend."""
+    if DB_ENGINE != "mysql":
+        return
+
+    for table_name, column_name in MYSQL_CROSS_SCHEMA_COLUMNS:
+        cursor = db.execute(
+            """
+            SELECT COLLATION_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
+            """,
+            (config.database, table_name, column_name),
+        )
+        try:
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+        if row and row.get("COLLATION_NAME") != MYSQL_COLLATION:
+            alter_cursor = db.execute(
+                f"ALTER TABLE `{table_name}` MODIFY COLUMN `{column_name}` "
+                f"VARCHAR(36) CHARACTER SET utf8mb4 COLLATE {MYSQL_COLLATION} NOT NULL"
+            )
+            alter_cursor.close()
+
+    db.commit()
+
+
 def ensure_admin_schema() -> None:
     if DB_ENGINE == "sqlite":
         statements = [
@@ -292,7 +326,7 @@ def ensure_admin_schema() -> None:
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               last_login_at TIMESTAMP NULL
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS admin_sessions (
@@ -306,7 +340,7 @@ def ensure_admin_schema() -> None:
               INDEX idx_admin_sessions_user_id (admin_user_id),
               INDEX idx_admin_sessions_expires_at (expires_at),
               CONSTRAINT fk_admin_sessions_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS admin_audit_logs (
@@ -323,7 +357,7 @@ def ensure_admin_schema() -> None:
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               INDEX idx_admin_audit_created_at (created_at),
               CONSTRAINT fk_admin_audit_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE SET NULL
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS campus_colleges (
@@ -333,7 +367,7 @@ def ensure_admin_schema() -> None:
               status VARCHAR(24) NOT NULL DEFAULT 'active',
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS campus_programs (
@@ -348,7 +382,7 @@ def ensure_admin_schema() -> None:
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               INDEX idx_campus_programs_college (college_id),
               CONSTRAINT fk_campus_program_college FOREIGN KEY (college_id) REFERENCES campus_colleges(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS campus_classes (
@@ -363,7 +397,7 @@ def ensure_admin_schema() -> None:
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               INDEX idx_campus_classes_program (program_id),
               CONSTRAINT fk_campus_class_program FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS student_enrollments (
@@ -378,7 +412,7 @@ def ensure_admin_schema() -> None:
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               INDEX idx_student_enrollments_class (class_id),
               CONSTRAINT fk_student_enrollment_class FOREIGN KEY (class_id) REFERENCES campus_classes(id) ON DELETE SET NULL
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS program_job_roles (
@@ -390,7 +424,7 @@ def ensure_admin_schema() -> None:
               UNIQUE KEY uq_program_job_role (program_id, job_role_id),
               INDEX idx_program_job_roles_program (program_id),
               CONSTRAINT fk_program_job_role_program FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
         ]
 
@@ -398,6 +432,8 @@ def ensure_admin_schema() -> None:
         cursor = db.execute(statement)
         cursor.close()
     db.commit()
+
+    ensure_mysql_cross_schema_collations()
 
     from shared.career_catalog import ensure_catalog_schema, seed_computer_pilot
 

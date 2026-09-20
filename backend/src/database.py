@@ -257,6 +257,12 @@ def _ensure_index(table_name: str, index_name: str, columns: str) -> None:
     _execute_schema(f"CREATE INDEX {index_name} ON {table_name} ({columns})")
 
 
+def _ensure_unique_index(table_name: str, index_name: str, columns: str) -> None:
+    if _index_exists(table_name, index_name):
+        return
+    _execute_schema(f"CREATE UNIQUE INDEX {index_name} ON {table_name} ({columns})")
+
+
 def _init_sqlite_db() -> None:
     db.executescript(
         """
@@ -358,10 +364,16 @@ def _init_sqlite_db() -> None:
           message_type TEXT NOT NULL,
           content TEXT NOT NULL,
           transcript_text TEXT,
+          source TEXT NOT NULL DEFAULT 'text',
+          source_ref TEXT,
+          reply_to_message_id TEXT,
+          round_agent_id TEXT,
           order_index INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE,
-          FOREIGN KEY (agent_id) REFERENCES interview_agents(id) ON DELETE SET NULL
+          FOREIGN KEY (agent_id) REFERENCES interview_agents(id) ON DELETE SET NULL,
+          FOREIGN KEY (reply_to_message_id) REFERENCES interview_messages(id) ON DELETE SET NULL,
+          FOREIGN KEY (round_agent_id) REFERENCES interview_agents(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS webrtc_diagnostic_events (
@@ -383,6 +395,49 @@ def _init_sqlite_db() -> None:
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS interview_rtc_sessions (
+          id TEXT PRIMARY KEY,
+          interview_id TEXT NOT NULL UNIQUE,
+          user_id TEXT NOT NULL,
+          channel_id TEXT NOT NULL UNIQUE,
+          candidate_user_id TEXT NOT NULL,
+          agent_user_id TEXT NOT NULL,
+          desired_state TEXT NOT NULL DEFAULT 'stopped',
+          state TEXT NOT NULL DEFAULT 'idle',
+          current_task_id TEXT,
+          revision INTEGER NOT NULL DEFAULT 0,
+          last_heartbeat_at TEXT,
+          token_expires_at TEXT,
+          next_retry_at TEXT,
+          start_attempts INTEGER NOT NULL DEFAULT 0,
+          stop_attempts INTEGER NOT NULL DEFAULT 0,
+          last_request_id TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          started_at TEXT,
+          stopped_at TEXT,
+          FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS rtc_agent_tasks (
+          task_id TEXT PRIMARY KEY,
+          rtc_session_id TEXT NOT NULL,
+          attempt_number INTEGER NOT NULL,
+          state TEXT NOT NULL DEFAULT 'starting',
+          start_request_id TEXT,
+          stop_request_id TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          started_at TEXT,
+          stop_requested_at TEXT,
+          stopped_at TEXT,
+          UNIQUE(rtc_session_id, attempt_number),
+          FOREIGN KEY (rtc_session_id) REFERENCES interview_rtc_sessions(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS interview_evaluations (
@@ -462,6 +517,11 @@ def _init_sqlite_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_password_reset_token_hash ON password_reset_tokens(token_hash);
         CREATE INDEX IF NOT EXISTS idx_interview_sessions_user_id ON interview_sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_interview_sessions_status ON interview_sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_interview_rtc_sessions_user_id ON interview_rtc_sessions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_interview_rtc_sessions_state ON interview_rtc_sessions(state);
+        CREATE INDEX IF NOT EXISTS idx_interview_rtc_sessions_retry ON interview_rtc_sessions(next_retry_at);
+        CREATE INDEX IF NOT EXISTS idx_rtc_agent_tasks_session_id ON rtc_agent_tasks(rtc_session_id);
+        CREATE INDEX IF NOT EXISTS idx_rtc_agent_tasks_state ON rtc_agent_tasks(state);
         CREATE INDEX IF NOT EXISTS idx_resume_analyses_user_id ON resume_analyses(user_id);
         CREATE INDEX IF NOT EXISTS idx_resume_analyses_source_hash ON resume_analyses(source_hash);
         CREATE INDEX IF NOT EXISTS idx_interview_agents_interview_id ON interview_agents(interview_id);
@@ -502,6 +562,21 @@ def _init_sqlite_db() -> None:
     for name, column_type in interview_columns:
         if name not in existing:
             db.execute(f"ALTER TABLE interview_sessions ADD COLUMN {name} {column_type}")
+    message_columns = [
+        ("source", "TEXT NOT NULL DEFAULT 'text'"),
+        ("source_ref", "TEXT"),
+        ("reply_to_message_id", "TEXT"),
+        ("round_agent_id", "TEXT"),
+    ]
+    existing = {row["name"] for row in db.execute("PRAGMA table_info(interview_messages)").fetchall()}
+    for name, column_type in message_columns:
+        if name not in existing:
+            db.execute(f"ALTER TABLE interview_messages ADD COLUMN {name} {column_type}")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_interview_messages_reply_to ON interview_messages(reply_to_message_id)")
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_interview_messages_source_ref "
+        "ON interview_messages(interview_id, source, source_ref)"
+    )
     generated_columns = [
         ("provider", "TEXT NOT NULL DEFAULT 'local'"),
         ("model", "TEXT NOT NULL DEFAULT 'rules-v1'"),
@@ -634,10 +709,62 @@ def init_db() -> None:
           message_type VARCHAR(40) NOT NULL,
           content MEDIUMTEXT NOT NULL,
           transcript_text MEDIUMTEXT,
+          source VARCHAR(40) NOT NULL DEFAULT 'text',
+          source_ref VARCHAR(128),
+          reply_to_message_id CHAR(36),
+          round_agent_id CHAR(36),
           order_index INT NOT NULL DEFAULT 0,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE,
-          FOREIGN KEY (agent_id) REFERENCES interview_agents(id) ON DELETE SET NULL
+          FOREIGN KEY (agent_id) REFERENCES interview_agents(id) ON DELETE SET NULL,
+          FOREIGN KEY (reply_to_message_id) REFERENCES interview_messages(id) ON DELETE SET NULL,
+          FOREIGN KEY (round_agent_id) REFERENCES interview_agents(id) ON DELETE SET NULL,
+          UNIQUE KEY uq_interview_messages_source_ref (interview_id, source, source_ref)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS interview_rtc_sessions (
+          id CHAR(36) PRIMARY KEY,
+          interview_id CHAR(36) NOT NULL UNIQUE,
+          user_id CHAR(36) NOT NULL,
+          channel_id VARCHAR(64) NOT NULL UNIQUE,
+          candidate_user_id VARCHAR(64) NOT NULL,
+          agent_user_id VARCHAR(64) NOT NULL,
+          desired_state VARCHAR(20) NOT NULL DEFAULT 'stopped',
+          state VARCHAR(32) NOT NULL DEFAULT 'idle',
+          current_task_id VARCHAR(64),
+          revision INT NOT NULL DEFAULT 0,
+          last_heartbeat_at DATETIME NULL,
+          token_expires_at DATETIME NULL,
+          next_retry_at DATETIME NULL,
+          start_attempts INT NOT NULL DEFAULT 0,
+          stop_attempts INT NOT NULL DEFAULT 0,
+          last_request_id VARCHAR(128),
+          last_error TEXT,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          started_at DATETIME NULL,
+          stopped_at DATETIME NULL,
+          FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS rtc_agent_tasks (
+          task_id VARCHAR(64) PRIMARY KEY,
+          rtc_session_id CHAR(36) NOT NULL,
+          attempt_number INT NOT NULL,
+          state VARCHAR(32) NOT NULL DEFAULT 'starting',
+          start_request_id VARCHAR(128),
+          stop_request_id VARCHAR(128),
+          last_error TEXT,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          started_at DATETIME NULL,
+          stop_requested_at DATETIME NULL,
+          stopped_at DATETIME NULL,
+          UNIQUE KEY uq_rtc_agent_tasks_attempt (rtc_session_id, attempt_number),
+          FOREIGN KEY (rtc_session_id) REFERENCES interview_rtc_sessions(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
         """
@@ -767,6 +894,16 @@ def init_db() -> None:
         if not _column_exists("interview_sessions", name):
             _execute_schema(f"ALTER TABLE interview_sessions ADD COLUMN {name} {column_type}")
 
+    message_columns = [
+        ("source", "VARCHAR(40) NOT NULL DEFAULT 'text'"),
+        ("source_ref", "VARCHAR(128) NULL"),
+        ("reply_to_message_id", "CHAR(36) NULL"),
+        ("round_agent_id", "CHAR(36) NULL"),
+    ]
+    for name, column_type in message_columns:
+        if not _column_exists("interview_messages", name):
+            _execute_schema(f"ALTER TABLE interview_messages ADD COLUMN {name} {column_type}")
+
     generated_columns = [
         ("provider", "VARCHAR(80) NOT NULL DEFAULT 'local'"),
         ("model", "VARCHAR(160) NOT NULL DEFAULT 'rules-v1'"),
@@ -789,11 +926,22 @@ def init_db() -> None:
     _ensure_index("password_reset_tokens", "idx_password_reset_token_hash", "token_hash")
     _ensure_index("interview_sessions", "idx_interview_sessions_user_id", "user_id")
     _ensure_index("interview_sessions", "idx_interview_sessions_status", "status")
+    _ensure_index("interview_rtc_sessions", "idx_interview_rtc_sessions_user_id", "user_id")
+    _ensure_index("interview_rtc_sessions", "idx_interview_rtc_sessions_state", "state")
+    _ensure_index("interview_rtc_sessions", "idx_interview_rtc_sessions_retry", "next_retry_at")
+    _ensure_index("rtc_agent_tasks", "idx_rtc_agent_tasks_session_id", "rtc_session_id")
+    _ensure_index("rtc_agent_tasks", "idx_rtc_agent_tasks_state", "state")
     _ensure_index("resume_analyses", "idx_resume_analyses_user_id", "user_id")
     _ensure_index("resume_analyses", "idx_resume_analyses_source_hash", "source_hash")
     _ensure_index("interview_agents", "idx_interview_agents_interview_id", "interview_id")
     _ensure_index("interview_messages", "idx_interview_messages_interview_id", "interview_id")
     _ensure_index("interview_messages", "idx_interview_messages_agent_id", "agent_id")
+    _ensure_index("interview_messages", "idx_interview_messages_reply_to", "reply_to_message_id")
+    _ensure_unique_index(
+        "interview_messages",
+        "uq_interview_messages_source_ref",
+        "interview_id, source, source_ref",
+    )
     _ensure_index("webrtc_diagnostic_events", "idx_webrtc_events_interview_id", "interview_id")
     _ensure_index("webrtc_diagnostic_events", "idx_webrtc_events_created_at", "created_at")
     _ensure_index("interview_evaluations", "idx_interview_evaluations_interview_id", "interview_id")

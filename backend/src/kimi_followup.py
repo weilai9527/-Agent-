@@ -183,7 +183,7 @@ def _format_recent_messages(messages: list[dict[str, Any]], limit: int = 10) -> 
     return "\n".join(lines) or "暂无历史对话。"
 
 
-def _format_resume_analysis(resume_analysis: dict[str, Any] | None) -> str:
+def format_resume_analysis(resume_analysis: dict[str, Any] | None) -> str:
     if not resume_analysis:
         return "暂无简历结构化摘要。"
     parts = [
@@ -204,6 +204,11 @@ def _format_resume_analysis(resume_analysis: dict[str, Any] | None) -> str:
     if isinstance(risks, list) and risks:
         parts.append("风险点：" + "、".join(str(item) for item in risks[:5]))
     return "\n".join(part for part in parts if part.strip())
+
+
+# Keep the internal name for the existing prompt builders while exposing one
+# canonical formatter to the realtime interview paths.
+_format_resume_analysis = format_resume_analysis
 
 
 def _extract_json_object(content: str) -> dict[str, Any]:

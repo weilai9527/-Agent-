@@ -754,6 +754,10 @@ button {
   cursor: pointer;
 }
 
+.report-back-action {
+  margin-bottom: 12px;
+}
+
 .setup-hero {
   display: flex;
   align-items: center;
@@ -798,7 +802,7 @@ button {
 
 .setup-grid {
   display: grid;
-  grid-template-columns: 0.92fr 1.08fr;
+  grid-template-columns: 1fr;
   gap: 16px;
   margin-bottom: 28px;
 }
@@ -808,6 +812,78 @@ button {
   grid-template-columns: repeat(2, 1fr);
   gap: 14px;
   padding: 18px;
+}
+
+.difficulty-presets {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.difficulty-card {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.difficulty-card:hover {
+  border-color: #91caff;
+}
+
+.difficulty-card.active {
+  border-color: #1677ff;
+  background: #f0f7ff;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.1);
+}
+
+.difficulty-card strong {
+  color: #111827;
+  font-size: 15px;
+}
+
+.difficulty-card.active strong {
+  color: #1677ff;
+}
+
+.difficulty-card span {
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.difficulty-card small {
+  color: #8a94a6;
+}
+
+.advanced-toggle {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.advanced-toggle-icon {
+  transition: transform 0.15s ease;
+}
+
+.advanced-toggle-icon.open {
+  transform: rotate(180deg);
+}
+
+.advanced-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  padding: 14px;
+  border: 1px dashed #d9e2ef;
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .option-group,
@@ -1142,6 +1218,67 @@ button {
   display: grid;
   gap: 14px;
   padding: 18px;
+}
+
+.resume-form-panel {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.resume-form-basic {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.resume-form-basic .brief-field {
+  grid-column: auto;
+}
+
+.resume-form-fields {
+  display: grid;
+  gap: 14px;
+}
+
+.resume-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.privacy-note-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #8c8c8c;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.brief-field select,
+.brief-field input {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid #d9e2ef;
+  border-radius: 6px;
+  color: #111827;
+  background: #ffffff;
+  outline: none;
+}
+
+.brief-field input:disabled {
+  color: #6b7280;
+  background: #f3f4f6;
+  cursor: not-allowed;
+}
+
+.brief-field select:focus,
+.brief-field input:focus {
+  border-color: #91caff;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.1);
 }
 
 .resume-upload-box {
@@ -3201,6 +3338,433 @@ h1 {
   font-size: 13px;
 }
 
+/* 职位技能&经验入口卡片 */
+.skill-entry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.skill-entry-grid .skill-entry-card {
+  margin-bottom: 0;
+}
+
+.skill-entry-full {
+  grid-column: 1 / -1;
+}
+
+.skill-entry-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.skill-entry-card:hover {
+  border-color: #1677ff;
+  box-shadow: 0 4px 16px rgba(22, 119, 255, 0.08);
+}
+
+.skill-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #111827;
+  font-size: 14px;
+}
+
+.skill-entry-head svg {
+  color: #1677ff;
+}
+
+.skill-entry-progress {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: #1677ff;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 职位技能&经验弹窗 */
+.skill-modal-mask {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.skill-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: 82vh;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.18);
+}
+
+.skill-modal-body {
+  flex: 1;
+  padding: 24px 24px 8px;
+  overflow-y: auto;
+}
+
+.skill-modal-body h3 {
+  margin: 0;
+  color: #111827;
+  font-size: 20px;
+}
+
+.skill-modal-desc {
+  margin: 10px 0 0;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.skill-modal-desc strong {
+  color: #1677ff;
+}
+
+.skill-question {
+  margin-top: 24px;
+}
+
+.skill-question h4 {
+  margin: 0 0 12px;
+  color: #111827;
+  font-size: 14px;
+}
+
+.skill-tag-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.language-entry {
+  margin-bottom: 0;
+}
+
+.skill-tag {
+  padding: 8px 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f7f8fa;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.skill-tag:hover {
+  border-color: #1677ff;
+  color: #1677ff;
+}
+
+.skill-tag.active {
+  border-color: #1677ff;
+  background: #eaf3ff;
+  color: #1677ff;
+}
+
+.skill-tag.muted.active {
+  border-color: #9ca3af;
+  background: #eef1f5;
+  color: #4b5563;
+}
+
+.skill-tag-custom {
+  display: inline-flex;
+  align-items: center;
+}
+
+.skill-tag-custom input {
+  width: 96px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #374151;
+  font: inherit;
+  font-size: 13px;
+}
+
+.skill-tag-custom input:focus {
+  border-color: #1677ff;
+  border-style: solid;
+  outline: none;
+}
+
+.skill-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  border-top: 1px solid #eef1f5;
+  background: #ffffff;
+}
+
+.skill-modal-footer span {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.skill-modal-footer .primary-action {
+  min-width: 180px;
+}
+
+/* 我的优势编辑弹窗 */
+.advantage-editor {
+  margin-top: 16px;
+}
+
+.advantage-editor textarea {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.advantage-editor textarea:focus {
+  border-color: #1677ff;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
+}
+
+.advantage-count {
+  display: block;
+  margin-top: 6px;
+  color: #9ca3af;
+  font-size: 12px;
+  text-align: right;
+}
+
+/* 编辑教育经历弹窗 */
+.education-editor {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.education-field {
+  display: grid;
+  gap: 6px;
+}
+
+.education-field span {
+  color: #374151;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.education-field input {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+}
+
+.education-field input::placeholder {
+  color: #9ca3af;
+}
+
+.education-field input:focus {
+  border-color: #1677ff;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
+}
+
+/* 编辑在校荣誉/职务弹窗 */
+.honors-editor {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.honors-module h4 {
+  margin: 0 0 8px;
+  color: #111827;
+  font-size: 14px;
+}
+
+.honors-module textarea {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.honors-module textarea:focus {
+  border-color: #1677ff;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
+}
+
+/* 项目经历弹窗 */
+.skill-modal-wide {
+  width: min(640px, 100%);
+}
+
+.project-entry-progress {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-end;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.project-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.project-item:hover {
+  border-color: #1677ff;
+}
+
+.project-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-item-head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-item-head-right {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.project-item-head-right span {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.project-item-time {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.project-item p {
+  margin: 0;
+  overflow: hidden;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-item-delete {
+  padding: 2px 8px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fff1f2;
+  color: #dc2626;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.project-item-delete:hover {
+  background: #fee2e2;
+}
+
+.project-empty {
+  margin: 18px 0 0;
+  color: #9ca3af;
+  font-size: 13px;
+  text-align: center;
+}
+
+.project-add {
+  width: 100%;
+  margin-top: 14px;
+}
+
+.project-editor {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.project-editor textarea {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.project-editor textarea:focus {
+  border-color: #1677ff;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
+}
+
 .stats-chart-empty span {
   max-width: 290px;
   color: #94a3b8;
@@ -3473,7 +4037,8 @@ h1 {
   .profile-split,
   .phone-hero,
   .phone-grid,
-  .history-item {
+  .history-item,
+  .resume-form-basic {
     grid-template-columns: 1fr;
   }
 

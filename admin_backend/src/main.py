@@ -1199,6 +1199,173 @@ async def import_campus_students(
     return {"matched": matched, "unmatched": unmatched[:100], "total": len(rows)}
 
 
+# ---------- 用户注册（学生登录白名单） ----------
+
+def _read_registration_rows(filename: str, content: bytes) -> list[dict[str, str]]:
+    """解析上传的 CSV / Excel 文件，返回统一的 dict 行列表。"""
+    lower = (filename or "").lower()
+    if lower.endswith((".xlsx", ".xlsm")):
+        try:
+            from openpyxl import load_workbook
+
+            sheet = load_workbook(io.BytesIO(content), read_only=True, data_only=True).active
+            rows = [["" if cell is None else str(cell).strip() for cell in row] for row in sheet.iter_rows(values_only=True)]
+        except Exception as exc:
+            raise error(400, "Excel 文件解析失败，请上传有效的 .xlsx 文件。") from exc
+        if not rows:
+            return []
+        headers = rows[0]
+        return [dict(zip(headers, row)) for row in rows[1:] if any(row)]
+    try:
+        decoded = content.decode("utf-8-sig")
+        return list(csv.DictReader(io.StringIO(decoded)))
+    except Exception as exc:
+        raise error(400, "请上传 UTF-8 编码的 CSV 文件或 .xlsx 文件。") from exc
+
+
+@app.post("/api/admin/student-registrations/import")
+async def import_student_registrations(
+    request: Request,
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_roles("super_admin", "operations")),
+):
+    """导入学生注册信息（学号 / 姓名），候选人端凭此登录。"""
+    validate_admin_origin(request)
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise error(400, "导入文件不能超过 5MB。")
+    rows = _read_registration_rows(file.filename or "", content)
+    if not rows:
+        raise error(400, "文件中没有可导入的数据行。")
+    if len(rows) > 5000:
+        raise error(400, "单次最多导入 5000 名学生。")
+
+    imported = 0
+    updated = 0
+    skipped: list[dict[str, str]] = []
+    try:
+        db.begin()
+        for index, row in enumerate(rows, start=2):
+            student_no = str(row.get("学号") or row.get("student_no") or "").strip()
+            name = str(row.get("姓名") or row.get("name") or "").strip()
+            if not student_no or not name:
+                skipped.append({"row": str(index), "studentNo": student_no, "name": name, "reason": "缺少学号或姓名"})
+                continue
+            existing = one("SELECT id, user_id FROM student_registrations WHERE student_no = ?", (student_no,))
+            if existing:
+                db.execute(
+                    "UPDATE student_registrations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (name, existing["id"]),
+                )
+                updated += 1
+            else:
+                db.execute(
+                    "INSERT INTO student_registrations (id, student_no, name, imported_by) VALUES (?, ?, ?, ?)",
+                    (str(uuid4()), student_no, name, str(admin.get("email") or "")),
+                )
+                imported += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "student_registrations.import", summary=f"导入学生注册信息：新增 {imported} 人，更新 {updated} 人，跳过 {len(skipped)} 行")
+    return {"imported": imported, "updated": updated, "skipped": skipped[:100], "total": len(rows)}
+
+
+@app.get("/api/admin/student-registrations")
+def list_student_registrations(admin: dict = Depends(require_roles("super_admin", "operations"))):
+    rows = all_rows(
+        """
+        SELECT id, student_no, name, user_id, imported_by, created_at, updated_at
+        FROM student_registrations
+        ORDER BY created_at DESC, student_no
+        """
+    )
+    return {
+        "registrations": [
+            {
+                "id": row["id"],
+                "studentNo": row["student_no"],
+                "name": row["name"],
+                "activated": bool(row["user_id"]),
+                "importedBy": row["imported_by"],
+                "createdAt": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.delete("/api/admin/student-registrations/{registration_id}")
+def delete_student_registration(request: Request, registration_id: str, admin: dict = Depends(require_roles("super_admin", "operations"))):
+    validate_admin_origin(request)
+    existing = one("SELECT id, student_no, name, user_id FROM student_registrations WHERE id = ?", (registration_id,))
+    if not existing:
+        raise error(404, "该注册信息不存在。")
+    db.execute("DELETE FROM student_registrations WHERE id = ?", (registration_id,))
+    db.commit()
+    record_audit(request, admin, "student_registrations.delete", target_type="student_registration", target_id=registration_id, summary=f"删除学生注册信息：{existing['name']}（{existing['student_no']}）")
+    return {"ok": True}
+
+
+@app.get("/api/admin/resume-form-settings")
+def get_resume_form_settings(admin: dict = Depends(require_admin)):
+    """读取候选人“填写简历”的学院/专业下拉配置。"""
+    row = one("SELECT colleges FROM resume_form_settings ORDER BY updated_at DESC LIMIT 1")
+    colleges = []
+    if row:
+        try:
+            colleges = json.loads(row["colleges"] or "[]")
+        except (TypeError, ValueError):
+            colleges = []
+    return {"colleges": colleges if isinstance(colleges, list) else []}
+
+
+@app.put("/api/admin/resume-form-settings")
+async def update_resume_form_settings(request: Request, admin: dict = Depends(require_roles("super_admin", "operations"))):
+    """保存候选人“填写简历”的学院/专业下拉配置。"""
+    validate_admin_origin(request)
+    body = await request.json()
+    colleges = body.get("colleges")
+    if not isinstance(colleges, list):
+        raise error(400, "学院配置格式不正确。")
+    if len(colleges) > 200:
+        raise error(400, "学院数量过多，请控制在 200 个以内。")
+    for college in colleges:
+        if not isinstance(college, dict) or not str(college.get("name") or "").strip():
+            raise error(400, "每个学院都必须有名称。")
+        majors = college.get("majors")
+        if majors is not None and not isinstance(majors, list):
+            raise error(400, "学院下的专业配置格式不正确。")
+        if majors and len(majors) > 500:
+            raise error(400, "单个学院的专业数量过多，请控制在 500 个以内。")
+        for major in majors or []:
+            if not isinstance(major, dict) or not str(major.get("name") or "").strip():
+                raise error(400, "每个专业都必须有名称。")
+
+    try:
+        db.begin()
+        db.execute("DELETE FROM resume_form_settings")
+        db.execute(
+            "INSERT INTO resume_form_settings (id, colleges, updated_by) VALUES (?, ?, ?)",
+            (str(uuid4()), json.dumps(colleges, ensure_ascii=False), str(admin.get("email") or "")),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    college_count = len(colleges)
+    major_count = sum(len(college.get("majors") or []) for college in colleges)
+    record_audit(
+        request,
+        admin,
+        "resume_form_settings.update",
+        target_type="resume_form_settings",
+        summary=f"更新填写简历设置：{college_count} 个学院，{major_count} 个专业",
+    )
+    return {"ok": True, "colleges": colleges}
+
+
 @app.get("/api/admin/health")
 def health():
     return {"ok": True, "authRequired": True, "databasePath": get_database_path()}

@@ -1867,25 +1867,46 @@ def auth_me(request: Request):
     return {"user": sanitize_user(find_user_by_session(request))}
 
 
-@app.post("/api/auth/register", status_code=201)
-async def auth_register(request: Request, response: Response, body: dict | None = None):
-    body = json_body(body)
-    email = normalize_email(body.get("email"))
-    password = str(body.get("password") or "")
-    name = str(body.get("name") or "").strip() or (email.split("@")[0] if "@" in email else "新用户")
-    if not is_valid_email(email):
-        raise error(400, "请输入有效邮箱。")
-    if len(password) < 8:
-        raise error(400, "密码至少需要 8 位。")
-    if len(name) > 60:
-        raise error(400, "昵称不能超过 60 个字符。")
-    if one("SELECT id FROM users WHERE email = ?", (email,)):
-        raise error(409, "这个邮箱已经注册。")
+@app.post("/api/auth/student-login")
+async def auth_student_login(request: Request, response: Response, body: dict | None = None):
+    """学生登录：学号 + 姓名，与管理端导入的注册白名单比对。
 
-    user_id = str(uuid4())
+    首次匹配成功时自动创建关联账号并绑定，之后沿用同一账号。
+    """
+    body = json_body(body)
+    student_no = str(body.get("studentNo") or "").strip()
+    name = str(body.get("name") or "").strip()
+    if not student_no or not name:
+        raise error(400, "请输入学号和姓名。")
+    if is_login_limited(request, student_no):
+        raise error(429, "登录尝试过于频繁，请稍后再试。")
+
+    registration = one(
+        "SELECT * FROM student_registrations WHERE student_no = ? AND name = ?",
+        (student_no, name),
+    )
+    if not registration:
+        record_failed_login(request, student_no)
+        raise error(401, "学号或姓名不匹配；如确认无误，请联系管理员导入你的信息。")
+
+    user_id = registration["user_id"]
     with db:
-        db.execute("INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)", (user_id, email, hash_password(password), name))
-        db.execute("INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)", (str(uuid4()), user_id, name))
+        if not user_id:
+            user_id = str(uuid4())
+            db.execute(
+                "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
+                (user_id, f"{student_no}@student.local", hash_password(create_token()), name),
+            )
+            db.execute("INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)", (str(uuid4()), user_id, name))
+            db.execute(
+                "UPDATE student_registrations SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (user_id, registration["id"]),
+            )
+        db.execute(
+            "UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (user_id,),
+        )
+    clear_failed_logins(request, student_no)
     create_session(response, user_id, request.headers.get("user-agent"))
     user = one("SELECT id, email, name, status, created_at, last_login_at FROM users WHERE id = ?", (user_id,))
     return {"user": sanitize_user(user)}
@@ -2131,6 +2152,131 @@ async def upload_resume_file(
         "char_count": len(saved_text),
         "original_char_count": len(text),
         "truncated": len(text) > len(saved_text),
+        "profile": find_profile_by_user_id(user["id"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 填写简历（候选人端“简历分析 → 填写简历”模块）
+# ---------------------------------------------------------------------------
+RESUME_FORM_FIELDS = [
+    ("college", "学院", 80),
+    ("major", "专业", 80),
+    ("professional_skills", "职业技能与经验", 4000),
+    ("advantages", "我的优势", 2000),
+    ("education", "教育经验", 2000),
+    ("honors", "在校荣誉/职务", 2000),
+    ("projects", "项目经历", 4000),
+    ("languages", "语言", 500),
+    ("works", "个人作品", 2000),
+    ("skills", "技能", 1000),
+    ("certificates", "证书", 2000),
+    ("bonus", "加分项", 1000),
+]
+RESUME_FORM_COLUMNS = ", ".join(field for field, _label, _limit in RESUME_FORM_FIELDS)
+
+
+def load_resume_form_settings() -> dict:
+    """读取管理端配置的学院/专业下拉选项。"""
+    row = one("SELECT colleges FROM resume_form_settings ORDER BY updated_at DESC LIMIT 1")
+    if not row:
+        return {"colleges": []}
+    try:
+        colleges = json.loads(row["colleges"] or "[]")
+    except (TypeError, ValueError):
+        colleges = []
+    return {"colleges": colleges if isinstance(colleges, list) else []}
+
+
+def build_resume_text_from_form(form: dict) -> str:
+    """把结构化填写的简历拼成分析用的简历正文。"""
+    parts = []
+    college = str(form.get("college") or "").strip()
+    major = str(form.get("major") or "").strip()
+    basic = "、".join(filter(None, [college, major]))
+    if basic:
+        parts.append(f"基本信息：{basic}")
+    for field, label, _limit in RESUME_FORM_FIELDS:
+        if field in ("college", "major"):
+            continue
+        value = str(form.get(field) or "").strip()
+        if value:
+            parts.append(f"{label}：{value}")
+    return "\n\n".join(parts)
+
+
+@app.get("/api/resume-form/settings")
+def get_resume_form_settings(user: dict = Depends(require_auth)):
+    """候选人端读取学院/专业下拉配置（管理端“填写简历设置”维护）。"""
+    return load_resume_form_settings()
+
+
+@app.get("/api/resume-form")
+def get_resume_form(user: dict = Depends(require_auth)):
+    """读取当前用户已填写的简历及自动回填的姓名、学号。"""
+    form = one(f"SELECT {RESUME_FORM_COLUMNS} FROM resume_forms WHERE user_id = ?", (user["id"],))
+    registration = one("SELECT student_no FROM student_registrations WHERE user_id = ?", (user["id"],))
+    return {
+        "form": form or {},
+        "name": user["name"],
+        "student_no": registration["student_no"] if registration else None,
+    }
+
+
+@app.put("/api/resume-form")
+def save_resume_form(body: dict | None = None, user: dict = Depends(require_auth)):
+    """保存填写简历内容，并同步刷新 profiles 里的分析素材。"""
+    payload = json_body(body)
+    form = {}
+    for field, _label, limit in RESUME_FORM_FIELDS:
+        value = str(payload.get(field) or "").strip()
+        if len(value) > limit:
+            raise error(400, f"字段“{_label}”内容过长，请控制在 {limit} 字以内。")
+        form[field] = value
+
+    existing = one("SELECT id FROM resume_forms WHERE user_id = ?", (user["id"],))
+    ensure_profile(user)
+    with db:
+        if existing:
+            db.execute(
+                f"""
+                UPDATE resume_forms
+                SET {", ".join(f"{field} = ?" for field, _label, _limit in RESUME_FORM_FIELDS)},
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+                """,
+                tuple(form[field] for field, _label, _limit in RESUME_FORM_FIELDS) + (user["id"],),
+            )
+        else:
+            db.execute(
+                f"""
+                INSERT INTO resume_forms (id, user_id, {RESUME_FORM_COLUMNS})
+                VALUES (?, ?, {", ".join("?" for _ in RESUME_FORM_FIELDS)})
+                """,
+                (str(uuid4()), user["id"]) + tuple(form[field] for field, _label, _limit in RESUME_FORM_FIELDS),
+            )
+        resume_text = build_resume_text_from_form(form)
+        db.execute(
+            """
+            UPDATE profiles
+            SET resume_text = ?, skills = ?, project_experience = ?, portfolio_links = ?,
+                education_level = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (
+                resume_text,
+                form["skills"],
+                form["projects"] or form["professional_skills"],
+                form["works"],
+                form["education"],
+                user["id"],
+            ),
+        )
+    saved = one(f"SELECT {RESUME_FORM_COLUMNS} FROM resume_forms WHERE user_id = ?", (user["id"],))
+    return {
+        "ok": True,
+        "form": saved or {},
+        "resume_text": resume_text,
         "profile": find_profile_by_user_id(user["id"]),
     }
 

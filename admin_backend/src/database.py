@@ -210,6 +210,17 @@ def ensure_admin_schema() -> None:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS student_registrations (
+              id TEXT PRIMARY KEY,
+              student_no TEXT NOT NULL UNIQUE,
+              name TEXT NOT NULL,
+              user_id TEXT,
+              imported_by TEXT,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS campus_colleges (
               id TEXT PRIMARY KEY,
               code TEXT NOT NULL UNIQUE,
@@ -278,6 +289,15 @@ def ensure_admin_schema() -> None:
             "CREATE INDEX IF NOT EXISTS idx_campus_programs_college ON campus_programs(college_id)",
             "CREATE INDEX IF NOT EXISTS idx_campus_classes_program ON campus_classes(program_id)",
             "CREATE INDEX IF NOT EXISTS idx_student_enrollments_class ON student_enrollments(class_id)",
+            """
+            CREATE TABLE IF NOT EXISTS resume_form_settings (
+              id TEXT PRIMARY KEY,
+              colleges TEXT NOT NULL,
+              updated_by TEXT,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
         ]
     else:
         statements = [
@@ -390,6 +410,15 @@ def ensure_admin_schema() -> None:
               UNIQUE KEY uq_program_job_role (program_id, job_role_id),
               INDEX idx_program_job_roles_program (program_id),
               CONSTRAINT fk_program_job_role_program FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS resume_form_settings (
+              id VARCHAR(36) PRIMARY KEY,
+              colleges TEXT NOT NULL,
+              updated_by VARCHAR(255),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,
         ]

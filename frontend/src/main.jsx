@@ -8,33 +8,39 @@ import {
   BriefcaseBusiness,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   CircleDot,
   Clock3,
   Download,
+  FolderOpen,
+  Languages,
   FileText,
+  GraduationCap,
   Headphones,
-  History,
   KeyRound,
   LockKeyhole,
   LogIn,
   LogOut,
-  Mail,
   Layers3,
   MessageSquareText,
   Mic,
   Phone,
   PhoneOff,
   Radio,
+  Plus,
   Save,
   Send,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Target,
   TrendingUp,
+  Trophy,
   Upload,
-  UserPlus,
   UserRound,
   Wrench,
+  X,
+  Zap,
 } from 'lucide-react';
 import './styles.css';
 
@@ -208,6 +214,55 @@ const setupOptions = {
   intensity: ['轻松', '标准', '严格'],
   styles: ['友好引导', '正常克制', '犀利追问', '沉默压迫感'],
 };
+
+// 难度快捷模板：每种难度就是一套预设的面试前配置。
+// 后续调整难度只需修改这里的 overrides，字段与 setupOptions 中的可选项一一对应。
+const difficultyPresets = [
+  {
+    key: 'easy',
+    label: '简单',
+    summary: '友好引导 · 八股基础 · 校招场景',
+    description: '适合首次模拟，先熟悉面试节奏',
+    overrides: {
+      level: '应届',
+      interviewType: '技术一面',
+      companyScene: '校招 HR 面',
+      focusArea: '八股基础',
+      intensity: '轻松',
+      style: '友好引导',
+    },
+  },
+  {
+    key: 'normal',
+    label: '普通',
+    summary: '标准强度 · 项目深挖 · 大厂风格',
+    description: '接近真实技术面试，适合日常训练',
+    overrides: {
+      level: '中级',
+      interviewType: '技术二面',
+      companyScene: '互联网大厂风格',
+      focusArea: '项目深挖',
+      intensity: '标准',
+      style: '犀利追问',
+    },
+  },
+  {
+    key: 'hard',
+    label: '困难',
+    summary: '严格追问 · 压力面试 · CTO 面',
+    description: '高压连续追问，挑战临场抗压',
+    overrides: {
+      level: '高级',
+      interviewType: '技术二面',
+      companyScene: '创业公司 CTO 面',
+      focusArea: '压力面试',
+      intensity: '严格',
+      style: '沉默压迫感',
+    },
+  },
+];
+
+const defaultDifficultyPreset = difficultyPresets.find((preset) => preset.key === 'normal') || difficultyPresets[0];
 
 function buildInterviewerProfile(form) {
   const role = String(form?.role || '').trim();
@@ -615,7 +670,6 @@ const recommendationLabels = {
 };
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
-const PASSWORD_RESET_ENABLED = import.meta.env.VITE_PASSWORD_RESET_ENABLED === 'true';
 const OPENAI_REALTIME_AUDIO_CONSTRAINTS = {
   echoCancellation: true,
   noiseSuppression: true,
@@ -1348,135 +1402,29 @@ function AuthInput({ icon, label, type = 'text', value, onChange, placeholder })
 }
 
 function LoginPage({ onAuthenticated }) {
-  const initialResetToken = PASSWORD_RESET_ENABLED
-    ? new URLSearchParams(window.location.search).get('reset_token') || ''
-    : '';
-  const [mode, setMode] = useState(initialResetToken ? 'reset-confirm' : 'login');
-  const [resetToken, setResetToken] = useState(initialResetToken);
-  const [resetTokenStatus, setResetTokenStatus] = useState(initialResetToken ? 'verifying' : 'idle');
   const [form, setForm] = useState({
-    email: '',
-    password: '',
-    confirmPassword: '',
+    studentNo: '',
+    name: '',
   });
-  const [authMessage, setAuthMessage] = useState('');
   const [authError, setAuthError] = useState('');
   const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    if (!resetToken || mode !== 'reset-confirm' || resetTokenStatus !== 'verifying') return;
-    let active = true;
-    apiRequest('/api/auth/password-reset/verify', {
-      method: 'POST',
-      body: JSON.stringify({ token: resetToken }),
-    })
-      .then(() => {
-        if (active) setResetTokenStatus('valid');
-      })
-      .catch((error) => {
-        if (!active) return;
-        setResetTokenStatus('invalid');
-        setAuthError(error.message);
-      });
-    return () => {
-      active = false;
-    };
-  }, [mode, resetToken, resetTokenStatus]);
 
   const updateForm = (key, value) => {
     setForm((current) => ({ ...current, [key]: value }));
   };
 
-  const removeResetTokenFromUrl = () => {
-    const url = new URL(window.location.href);
-    url.searchParams.delete('reset_token');
-    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
-  };
-
-  const switchMode = (nextMode) => {
-    setMode(nextMode);
-    setAuthMessage('');
-    setAuthError('');
-    if (nextMode !== 'reset-confirm' && resetToken) {
-      setResetToken('');
-      setResetTokenStatus('idle');
-      removeResetTokenFromUrl();
-    }
-  };
-
-  const isRegister = mode === 'register';
-  const isResetRequest = mode === 'reset';
-  const isResetConfirm = mode === 'reset-confirm';
-  const isReset = isResetRequest || isResetConfirm;
-  const title = isResetConfirm
-    ? '设置新的登录密码'
-    : isResetRequest
-      ? '重置登录密码'
-      : isRegister
-        ? '创建个人训练账号'
-        : '登录个人面试空间';
-  const subtitle = isResetConfirm
-    ? '重置链接只能使用一次；完成后，所有旧设备上的登录状态都会失效。'
-    : isResetRequest
-      ? '输入注册邮箱后，系统会发送一次性的密码重置链接。'
-      : '你的简历、模拟面试记录和复盘报告会保存在个人空间中，仅你可见。';
-
   const handleSubmit = async (event) => {
     event.preventDefault();
-    setAuthMessage('');
     setAuthError('');
-
-    if ((isRegister || isResetConfirm) && form.password !== form.confirmPassword) {
-      setAuthError('两次输入的密码不一致。');
-      return;
-    }
-
     setSubmitting(true);
-
     try {
-      if (isResetRequest) {
-        const data = await apiRequest('/api/auth/password-reset/request', {
-          method: 'POST',
-          body: JSON.stringify({ email: form.email }),
-        });
-        if (data.devResetToken) {
-          setResetToken(data.devResetToken);
-          setResetTokenStatus('valid');
-          setMode('reset-confirm');
-          setAuthMessage('开发环境已生成一次性重置凭证，请设置新密码。');
-          return;
-        }
-        setAuthMessage('如果邮箱存在，我们会发送密码重置链接。');
-        return;
-      }
-
-      if (isResetConfirm) {
-        const data = await apiRequest('/api/auth/password-reset/confirm', {
-          method: 'POST',
-          body: JSON.stringify({
-            token: resetToken,
-            password: form.password,
-            confirm_password: form.confirmPassword,
-          }),
-        });
-        setResetToken('');
-        setResetTokenStatus('idle');
-        setMode('login');
-        setForm((current) => ({ ...current, password: '', confirmPassword: '' }));
-        removeResetTokenFromUrl();
-        setAuthMessage(data.message || '密码已重置，请使用新密码登录。');
-        return;
-      }
-
-      const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
-      const data = await apiRequest(endpoint, {
+      const data = await apiRequest('/api/auth/student-login', {
         method: 'POST',
         body: JSON.stringify({
-          email: form.email,
-          password: form.password,
+          studentNo: form.studentNo,
+          name: form.name,
         }),
       });
-
       onAuthenticated(data.user);
     } catch (error) {
       setAuthError(error.message);
@@ -1503,7 +1451,7 @@ function LoginPage({ onAuthenticated }) {
             <p className="eyebrow">Private Interview Workspace</p>
             <h1>进入你的个人面试训练档案</h1>
             <p>
-              从登录开始建立清晰的数据边界：每位用户只能看到自己的简历、训练记录、AI 面试官配置和复盘报告。
+              使用学校统一导入的学籍信息登录：每位同学只能看到自己的简历、训练记录、AI 面试官配置和复盘报告。
             </p>
           </div>
 
@@ -1523,104 +1471,39 @@ function LoginPage({ onAuthenticated }) {
         <form className="auth-card" onSubmit={handleSubmit}>
           <div className="auth-card-head">
             <div className="auth-icon">
-              {isReset ? <KeyRound size={22} /> : isRegister ? <UserPlus size={22} /> : <LogIn size={22} />}
+              <LogIn size={22} />
             </div>
             <div>
-              <h2>{title}</h2>
-              <p>{subtitle}</p>
+              <h2>登录个人面试空间</h2>
+              <p>账号由管理员统一导入，无需注册；输入学号与姓名即可进入。</p>
             </div>
-          </div>
-
-          <div className="auth-tabs" aria-label="登录模式切换">
-            <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => switchMode('login')}>
-              登录
-            </button>
-            <button
-              type="button"
-              className={mode === 'register' ? 'active' : ''}
-              onClick={() => switchMode('register')}
-            >
-              注册
-            </button>
           </div>
 
           <div className="auth-form">
-            {!isResetConfirm && (
-              <AuthInput
-                icon={<Mail size={17} />}
-                label="邮箱"
-                type="email"
-                value={form.email}
-                onChange={(value) => updateForm('email', value)}
-                placeholder="name@example.com"
-              />
-            )}
-            {!isResetRequest && (
-              <AuthInput
-                icon={<LockKeyhole size={17} />}
-                label="密码"
-                type="password"
-                value={form.password}
-                onChange={(value) => updateForm('password', value)}
-                placeholder={isResetConfirm ? '输入至少 8 位的新密码' : '输入登录密码'}
-              />
-            )}
-            {(isRegister || isResetConfirm) && (
-              <AuthInput
-                icon={<LockKeyhole size={17} />}
-                label="确认密码"
-                type="password"
-                value={form.confirmPassword}
-                onChange={(value) => updateForm('confirmPassword', value)}
-                placeholder="再次输入密码"
-              />
-            )}
+            <AuthInput
+              icon={<GraduationCap size={17} />}
+              label="学号"
+              value={form.studentNo}
+              onChange={(value) => updateForm('studentNo', value)}
+              placeholder="请输入你的学号"
+            />
+            <AuthInput
+              icon={<UserRound size={17} />}
+              label="姓名"
+              value={form.name}
+              onChange={(value) => updateForm('name', value)}
+              placeholder="请输入与学籍一致的姓名"
+            />
           </div>
 
-          {!isReset && (
-            <div className="auth-options">
-              <label>
-                <input type="checkbox" defaultChecked />
-                保持登录状态
-              </label>
-              {PASSWORD_RESET_ENABLED && (
-                <button type="button" onClick={() => switchMode('reset')}>
-                  忘记密码
-                </button>
-              )}
-            </div>
-          )}
-
-          {isReset && (
-            <div className="auth-options">
-              <span>{isResetConfirm && resetTokenStatus === 'verifying' ? '正在校验重置链接...' : '记起密码了？'}</span>
-              <button type="button" onClick={() => switchMode('login')}>
-                返回登录
-              </button>
-            </div>
-          )}
-
           {authError && <p className="auth-alert error">{authError}</p>}
-          {authMessage && <p className="auth-alert success">{authMessage}</p>}
 
-          <button
-            className="auth-submit"
-            type="submit"
-            disabled={submitting || (isResetConfirm && resetTokenStatus !== 'valid')}
-          >
-            {submitting
-              ? '处理中...'
-              : isResetConfirm
-                ? '确认修改密码'
-                : isResetRequest
-                  ? '发送重置链接'
-                  : isRegister
-                    ? '创建账号并进入'
-                    : '登录并进入工作台'}
+          <button className="auth-submit" type="submit" disabled={submitting}>
+            {submitting ? '验证中...' : '登录并进入工作台'}
           </button>
 
           <p className="auth-notice">
-            当前已接入后端登录与 MySQL 数据库；密码使用加盐哈希保存，登录态通过 HttpOnly Cookie 维护。
+            首次登录会自动创建你的个人训练空间；如提示信息不匹配，请联系管理员确认你的学籍信息已导入。
           </p>
         </form>
       </section>
@@ -1631,13 +1514,13 @@ function LoginPage({ onAuthenticated }) {
 function ViewSwitch({ view, onChange }) {
   return (
     <div className="view-switch" aria-label="页面视图切换">
-      <button className={view === 'setup' ? 'active' : ''} onClick={() => onChange('setup')}>
-        <Layers3 size={15} />
-        面试配置
-      </button>
       <button className={view === 'resume' ? 'active' : ''} onClick={() => onChange('resume')}>
         <Upload size={15} />
         简历分析
+      </button>
+      <button className={view === 'setup' ? 'active' : ''} onClick={() => onChange('setup')}>
+        <Layers3 size={15} />
+        面试配置
       </button>
       <button className={view === 'phone' ? 'active' : ''} onClick={() => onChange('phone')}>
         <Phone size={15} />
@@ -1646,10 +1529,6 @@ function ViewSwitch({ view, onChange }) {
       <button className={view === 'report' ? 'active' : ''} onClick={() => onChange('report')}>
         <FileText size={15} />
         复盘报告
-      </button>
-      <button className={view === 'history' ? 'active' : ''} onClick={() => onChange('history')}>
-        <History size={15} />
-        历史记录
       </button>
       <button className={view === 'stats' ? 'active' : ''} onClick={() => onChange('stats')}>
         <TrendingUp size={15} />
@@ -1875,7 +1754,753 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
   );
 }
 
-function ResumeAnalysisPage({ onUseSetup }) {
+const RESUME_FORM_FIELDS = [
+  ['professional_skills', '职业技能与经验', '描述你的专业能力、岗位技能和相关实践经验'],
+  ['advantages', '我的优势', '你相比其他候选人的核心竞争力'],
+  ['education', '教育经验', '学校、学历、专业及主要课程或学习成果'],
+  ['honors', '在校荣誉/职务', '奖学金、荣誉称号、学生会或社团职务等'],
+  ['projects', '项目经历', '参与过的项目、职责、技术方案与成果数据'],
+  ['languages', '语言', '掌握的语言及熟练程度'],
+  ['works', '个人作品', '作品集、GitHub、博客或可展示的成果链接'],
+  ['skills', '技能', '技能关键词，例如：Python、MySQL、数据分析'],
+  ['certificates', '证书', '专业证书、语言证书或竞赛证书'],
+  ['bonus', '加分项', '其他能体现你优势的经历或特长'],
+];
+const EMPTY_RESUME_FORM = Object.fromEntries(RESUME_FORM_FIELDS.map(([field]) => [field, '']));
+
+/* ================= Resume form entry pickers ================= */
+
+function SkillModal({ title, description, onClose, footer, wide, children }) {
+  return (
+    <div className="skill-modal-mask" onClick={onClose}>
+      <div className={`skill-modal ${wide ? 'skill-modal-wide' : ''}`} onClick={(event) => event.stopPropagation()}>
+        <div className="skill-modal-body">
+          <h3>{title}</h3>
+          {description && <p className="skill-modal-desc">{description}</p>}
+          {children}
+        </div>
+        {footer && <div className="skill-modal-footer">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function EntryButton({ icon, title, progress, onClick }) {
+  return (
+    <button className="skill-entry-card skill-entry-full" type="button" onClick={onClick}>
+      <span className="skill-entry-head">{icon} {title}</span>
+      <span className="skill-entry-progress">{progress}</span>
+    </button>
+  );
+}
+
+function SkillTagButton({ label, active, muted, onClick }) {
+  return (
+    <button
+      type="button"
+      className={`skill-tag ${active ? 'active' : ''} ${muted ? 'muted' : ''}`}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
+}
+
+/* 已填写计数通用工具：返回 [是否已填, 展示文本] */
+function filledText(hasData, countText) {
+  return hasData ? countText : '未填写';
+}
+
+function SectionBlock({ title, children }) {
+  return (
+    <div className="skill-question">
+      <h4>{title}</h4>
+      {children}
+    </div>
+  );
+}
+
+/* ---------- 1. 职业技能与经验 ---------- */
+const ROLE_PRESETS = {
+  '前端': ['React', 'Vue', 'Angular', 'TypeScript', 'Webpack', 'Vite', '小程序', 'HTML/CSS', '前端性能优化'],
+  'Java': ['Java', 'Spring Boot', 'MySQL', 'Redis', 'MyBatis', '微服务', '分布式', 'JVM'],
+  'Python': ['Python', 'Django', 'Flask', 'FastAPI', 'Pandas', 'NumPy', '爬虫', '数据处理'],
+  '测试': ['功能测试', '接口测试', '自动化测试', 'Selenium', 'Postman', 'JMeter', '测试用例设计'],
+  '数据': ['SQL', '数据分析', 'Tableau', 'Power BI', '数据可视化', 'Excel', '统计学'],
+  '运维': ['Linux', 'Docker', 'Nginx', 'CI/CD', 'Shell', 'Kubernetes', '云服务'],
+  '产品': ['Axure', '需求分析', 'PRD', '用户调研', '原型设计', '竞品分析', '项目管理'],
+};
+const DEFAULT_PRESETS = ['团队协作', '沟通表达', '学习能力', '问题解决', '责任心', '抗压能力'];
+
+function ProfessionalSkillsPicker({ value, onChange, role }) {
+  const [open, setOpen] = useState(false);
+  const [skillTags, setSkillTags] = useState(() => parseTagList(value, '技能/工具'));
+  const [advantageTags, setAdvantageTags] = useState(() => parseTagList(value, '优势经验'));
+  const [customSkill, setCustomSkill] = useState('');
+  const [customAdvantage, setCustomAdvantage] = useState('');
+
+  const preset = Object.keys(ROLE_PRESETS).find((key) => String(role || '').includes(key));
+  const techPresets = preset ? ROLE_PRESETS[preset] : ['React', 'Vue', 'TypeScript', 'Node.js', 'Webpack', 'Vite'];
+
+  const toggleSkill = (label) => toggleTag(skillTags, setSkillTags, label);
+  const toggleAdvantage = (label) => toggleTag(advantageTags, setAdvantageTags, label);
+  const addSkill = () => { if (customSkill.trim()) { setSkillTags((tags) => [...tags.filter((t) => t !== '暂无'), customSkill.trim()]); setCustomSkill(''); } };
+  const addAdvantage = () => { if (customAdvantage.trim()) { setAdvantageTags((tags) => [...tags.filter((t) => t !== '暂无'), customAdvantage.trim()]); setCustomAdvantage(''); } };
+
+  const skillFilled = skillTags.length > 0;
+  const advantageFilled = advantageTags.length > 0;
+  const filled = [skillFilled, advantageFilled].filter(Boolean).length;
+
+  const handleSave = () => {
+    const lines = [];
+    if (skillTags.length) lines.push(`技能/工具：${skillTags.join('、')}`);
+    if (advantageTags.length) lines.push(`优势经验：${advantageTags.join('、')}`);
+    onChange(lines.join('\n'));
+    setOpen(false);
+  };
+
+  return (
+    <>
+      <EntryButton
+        icon={<Target size={18} />}
+        title="职业技能与经验"
+        progress={filled ? `已填写 ${filled}/2` : '未填写'}
+        onClick={() => setOpen(true)}
+      />
+      {open && (
+        <SkillModal
+          title="职业技能与经验"
+          description="选择或添加你的专业技能与个人优势，将用于岗位能力匹配分析。"
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              <span>{filled ? `已选择 ${filled} 个模块` : '尚未选择任何模块'}</span>
+              <button className="primary-action" type="button" onClick={handleSave}>保存</button>
+            </>
+          }
+        >
+          <SectionBlock title="技能/工具">
+            <div className="skill-tag-group">
+              {techPresets.map((tag) => (
+                <SkillTagButton key={tag} label={tag} active={skillTags.includes(tag)} onClick={() => toggleSkill(tag)} />
+              ))}
+              <SkillTagButton label="暂无" muted active={skillTags.includes('暂无')} onClick={() => toggleSkill('暂无')} />
+              <span className="skill-tag skill-tag-custom">
+                <input placeholder="自定义" value={customSkill} onChange={(e) => setCustomSkill(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSkill(); } }} />
+              </span>
+            </div>
+          </SectionBlock>
+          <SectionBlock title="优势经验">
+            <div className="skill-tag-group">
+              {DEFAULT_PRESETS.map((tag) => (
+                <SkillTagButton key={tag} label={tag} active={advantageTags.includes(tag)} onClick={() => toggleAdvantage(tag)} />
+              ))}
+              <SkillTagButton label="暂无" muted active={advantageTags.includes('暂无')} onClick={() => toggleAdvantage('暂无')} />
+              <span className="skill-tag skill-tag-custom">
+                <input placeholder="自定义优势" value={customAdvantage} onChange={(e) => setCustomAdvantage(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAdvantage(); } }} />
+              </span>
+            </div>
+          </SectionBlock>
+        </SkillModal>
+      )}
+    </>
+  );
+}
+
+/* ---------- 2. 我的优势 ---------- */
+function AdvantagePicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+  const count = draft.length;
+  return (
+    <>
+      <EntryButton
+        icon={<Award size={18} />}
+        title="我的优势"
+        progress={filledText(Boolean(value && value.trim()), `${count || value?.trim().length || 0}/2000`)}
+        onClick={() => { setDraft(value); setOpen(true); }}
+      />
+      {open && (
+        <SkillModal
+          title="我的优势"
+          description="简述你相比其他候选人的核心竞争力，例如项目成果、奖项背书、独特经历等。"
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              <span>{count}/2000</span>
+              <button className="primary-action" type="button" onClick={() => { onChange(draft); setOpen(false); }}>保存</button>
+            </>
+          }
+        >
+          <div className="advantage-editor">
+            <textarea rows={6} maxLength={2000} placeholder="描述你的核心竞争力，例如项目成果、奖项背书、独特经历等" value={draft} onChange={(e) => setDraft(e.target.value)} />
+          </div>
+        </SkillModal>
+      )}
+    </>
+  );
+}
+
+/* ---------- 3. 加分项 ---------- */
+function BonusPicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+  const count = draft.length;
+  return (
+    <>
+      <EntryButton
+        icon={<Sparkles size={18} />}
+        title="加分项"
+        progress={value && value.trim() ? '已填写' : '未填写'}
+        onClick={() => { setDraft(value); setOpen(true); }}
+      />
+      {open && (
+        <SkillModal
+          title="加分项"
+          description="其他能体现你优势的经历或特长，例如竞赛获奖、社团领导、公益实践、自媒体影响力等。"
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              <span>{count}/1000</span>
+              <button className="primary-action" type="button" onClick={() => { onChange(draft); setOpen(false); }}>保存</button>
+            </>
+          }
+        >
+          <div className="advantage-editor">
+            <textarea rows={6} maxLength={1000} placeholder="加分项内容" value={draft} onChange={(e) => setDraft(e.target.value)} />
+          </div>
+        </SkillModal>
+      )}
+    </>
+  );
+}
+
+/* ---------- 4. 教育经历 ---------- */
+function EducationPicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(() => parseEducation(value));
+  const filled = ['school', 'duration', 'major'].filter((k) => draft[k]).length;
+  const handleSave = () => {
+    const clean = {};
+    ['school', 'duration', 'major'].forEach((k) => { if (draft[k] && draft[k].trim()) clean[k] = draft[k].trim(); });
+    onChange(Object.entries(clean).map(([k, v]) => `${EDU_LABELS[k]}：${v}`).join(' / '));
+    setOpen(false);
+  };
+  return (
+    <>
+      <EntryButton
+        icon={<GraduationCap size={18} />}
+        title="教育经历"
+        progress={filled ? `已填写 ${filled}/3` : '未填写'}
+        onClick={() => { setDraft(parseEducation(value)); setOpen(true); }}
+      />
+      {open && (
+        <SkillModal
+          title="编辑教育经历"
+          description="填写学校、在校时间与专业，用于生成专业的岗位匹配。"
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              <span>{filled ? `已填写 ${filled}/3` : '尚未填写'}</span>
+              <button className="primary-action" type="button" onClick={handleSave}>保存</button>
+            </>
+          }
+        >
+          <div className="education-editor">
+            {['school', 'duration', 'major'].map((key) => (
+              <label className="education-field" key={key}>
+                <span>{EDU_LABELS[key]}</span>
+                <input
+                  value={draft[key]}
+                  placeholder={EDU_PLACEHOLDERS[key]}
+                  onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+                />
+              </label>
+            ))}
+          </div>
+        </SkillModal>
+      )}
+    </>
+  );
+}
+
+/* ---------- 5. 在校荣誉/职务 ---------- */
+function HonorsPicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [honor, setHonor] = useState('');
+  const [position, setPosition] = useState('');
+  const filled = [honor, position].filter(Boolean).length;
+  return (
+    <>
+      <EntryButton
+        icon={<Trophy size={18} />}
+        title="在校荣誉/职务"
+        progress={filled ? `已填写 ${filled}/2` : '未填写'}
+        onClick={() => { setHonor(parseHonor(value).honor); setPosition(parseHonor(value).position); setOpen(true); }}
+      />
+      {open && (
+        <SkillModal
+          title="在校荣誉/职务"
+          description="填写奖学金、荣誉称号，或学生会、社团等担任的职务。"
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              <span>{filled ? `已填写 ${filled}/2` : '尚未填写'}</span>
+              <button className="primary-action" type="button" onClick={() => {
+                const clean = [];
+                if (honor.trim()) clean.push(`校内荣誉：${honor.trim()}`);
+                if (position.trim()) clean.push(`校内职务：${position.trim()}`);
+                onChange(clean.join(' / '));
+                setOpen(false);
+              }}>保存</button>
+            </>
+          }
+        >
+          <div className="honors-editor">
+            <div className="honors-module">
+              <h4>校内荣誉</h4>
+              <textarea rows={3} placeholder="例如：国家奖学金、校级三好学生" value={honor} onChange={(e) => setHonor(e.target.value)} />
+            </div>
+            <div className="honors-module">
+              <h4>校内职务</h4>
+              <textarea rows={3} placeholder="例如：学生会主席、社团负责人" value={position} onChange={(e) => setPosition(e.target.value)} />
+            </div>
+          </div>
+        </SkillModal>
+      )}
+    </>
+  );
+}
+
+/* ---------- 通用：多项目列表弹窗 ---------- */
+function ProjectsPicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null); // null | {index, item}
+  const [items, setItems] = useState(() => parseProjects(value));
+  const addNew = () => setEditing({ index: -1, item: { name: '', time: '', belong: '', desc: '' } });
+  const handleSaveEntry = (item) => {
+    setItems((list) => {
+      if (editing.index >= 0) {
+        return list.map((it, i) => (i === editing.index ? item : it));
+      }
+      return [...list, item];
+    });
+    setEditing(null);
+  };
+  const handleSave = () => {
+    onChange(items.map(serializeProject).join('\n---\n'));
+    setOpen(false);
+  };
+  return (
+    <>
+      <EntryButton
+        icon={<Wrench size={18} />}
+        title="项目经历"
+        progress={`${items.length} 个项目`}
+        onClick={() => setOpen(true)}
+      />
+      {open && (
+        <SkillModal
+          title="项目经历"
+          description="添加参与过的项目，包括职责、技术方案与成果数据。"
+          wide
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              <span>已添加 {items.length} 个项目经历</span>
+              <button className="primary-action" type="button" onClick={handleSave}>保存</button>
+            </>
+          }
+        >
+          {items.length ? (
+            <div className="project-list">
+              {items.map((item, index) => (
+                <div className="project-item" key={index} onClick={() => setEditing({ index, item: { ...item } })} style={{ cursor: 'pointer' }}>
+                  <div className="project-item-head">
+                    <strong>{item.name || `项目 ${index + 1}`}</strong>
+                    <span className="project-item-head-right">
+                      <span>{item.time}</span>
+                      <button
+                        className="project-item-delete"
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setItems((list) => list.filter((_, i) => i !== index)); }}
+                      >删除</button>
+                    </span>
+                  </div>
+                  {item.belong && <span className="project-item-time">{item.belong}</span>}
+                  <p>{item.desc}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="project-empty">还没有项目经历，点击下方按钮添加。</p>
+          )}
+          <button className="secondary-action project-add" type="button" onClick={addNew}>
+            <Plus size={16} /> 添加项目
+          </button>
+        </SkillModal>
+      )}
+      {editing && (
+        <ProjectEditor
+          initial={editing.item}
+          editing={editing.index >= 0}
+          onCancel={() => setEditing(null)}
+          onSave={handleSaveEntry}
+        />
+      )}
+    </>
+  );
+}
+
+function ProjectEditor({ initial, editing, onCancel, onSave }) {
+  const [item, setItem] = useState({ ...initial });
+  const fields = [
+    { key: 'name', label: '项目名称' },
+    { key: 'time', label: '项目时间' },
+    { key: 'belong', label: '所属' },
+    { key: 'desc', label: '项目描述', textarea: true },
+  ];
+  return (
+    <SkillModal
+      title={editing ? '编辑项目' : '添加项目'}
+      wide
+      onClose={onCancel}
+      footer={
+        <>
+          <button className="secondary-action" type="button" onClick={onCancel}>取消</button>
+          <button className="primary-action" type="button" onClick={() => onSave(item)}>保存</button>
+        </>
+      }
+    >
+      <div className="project-editor">
+        {fields.map((f) => (
+          <label className="education-field" key={f.key}>
+            <span>{f.label}</span>
+            {f.textarea ? (
+              <textarea rows={4} value={item[f.key]} placeholder={`${f.label}示例`} onChange={(e) => setItem((it) => ({ ...it, [f.key]: e.target.value }))} />
+            ) : (
+              <input value={item[f.key]} placeholder={`${f.label}示例`} onChange={(e) => setItem((it) => ({ ...it, [f.key]: e.target.value }))} />
+            )}
+          </label>
+        ))}
+      </div>
+    </SkillModal>
+  );
+}
+
+/* ---------- 7. 语言 ---------- */
+const LANGUAGE_OPTIONS = ['英语', '日语', '韩语', '德语', '法语', '西班牙语', '俄语', '意大利语'];
+const PROFICIENCY_OPTIONS = ['简单沟通读写', '读写熟练', '听说读写流利'];
+const CERT_MAP = {
+  英语: ['大学英语四级（CET-4）', '大学英语六级（CET-6）', '雅思（IELTS）', '托福（TOEFL）', 'BEC'],
+  日语: ['日语N1', '日语N2', '日语N3'],
+  韩语: ['TOPIK高级', 'TOPIK中级'],
+  德语: ['德语欧标B2', '德语欧标C1'],
+  法语: ['法语欧标B1', '法语欧标B2'],
+  西班牙语: ['西语欧标B1', '西语欧标B2'],
+  俄语: ['俄语欧标B1', '俄语欧标B2'],
+  意大利语: ['意语欧标B1', '意语欧标B2'],
+};
+
+function LanguagePicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(() => parseLanguage(value));
+  const [showOptions, setShowOptions] = useState(false);
+  const filled = [draft.language, draft.proficiency, draft.cert].filter(Boolean).length;
+
+  const handleSave = () => {
+    const parts = [];
+    if (draft.language) parts.push(`语种：${draft.language}`);
+    if (draft.proficiency) parts.push(`熟练程度：${draft.proficiency}`);
+    if (draft.cert) parts.push(`证书：${draft.cert}`);
+    onChange(parts.join(' / '));
+    setOpen(false);
+  };
+
+  return (
+    <>
+      <EntryButton
+        icon={<Languages size={18} />}
+        title="语言"
+        progress={filled ? `已填写 ${filled}/3` : '未填写'}
+        onClick={() => { setDraft(parseLanguage(value)); setShowOptions(false); setOpen(true); }}
+      />
+      {open && (
+        <SkillModal
+          title="语言能力"
+          description="选择掌握的语言并填写熟练程度与相关证书。"
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              {filled < 3 && <span>可补充熟练程度与证书</span>}
+              <button className="primary-action" type="button" onClick={handleSave}>保存</button>
+            </>
+          }
+        >
+          <div className="education-editor">
+            <div className="skill-question">
+              <h4>掌握的语言</h4>
+              {!draft.language && (
+                <div className="skill-tag-group">
+                  {LANGUAGE_OPTIONS.map((lang) => (
+                    <SkillTagButton key={lang} label={lang} onClick={() => { setDraft((d) => ({ ...d, language: lang, proficiency: '', cert: '' })); setShowOptions(true); }} />
+                  ))}
+                </div>
+              )}
+              {draft.language && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <SkillTagButton label={draft.language} active />
+                  <button className="secondary-action" type="button" style={{ minWidth: 0 }} onClick={() => { setDraft((d) => ({ language: '', proficiency: '', cert: '' })); setShowOptions(false); }}>点击更换</button>
+                </div>
+              )}
+            </div>
+            {draft.language && (
+              <div className="skill-question">
+                <h4>熟练程度</h4>
+                <div className="skill-tag-group">
+                  {PROFICIENCY_OPTIONS.map((p) => (
+                    <SkillTagButton key={p} label={p} active={draft.proficiency === p} onClick={() => setDraft((d) => ({ ...d, proficiency: p }))} />
+                  ))}
+                </div>
+              </div>
+            )}
+            {draft.proficiency && (
+              <div className="skill-question">
+                <h4>证书</h4>
+                <div className="skill-tag-group">
+                  {(CERT_MAP[draft.language] || []).map((c) => (
+                    <SkillTagButton key={c} label={c} active={draft.cert === c} onClick={() => setDraft((d) => ({ ...d, cert: d.cert === c ? '' : c }))} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </SkillModal>
+      )}
+    </>
+  );
+}
+
+/* ---------- 8. 技能 ---------- */
+function GenericListPicker({ icon, title, fieldKey, itemFields, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [items, setItems] = useState(() => parseKeyValueList(value, itemFields));
+  const addNew = () => setEditing({ index: -1, item: Object.fromEntries(itemFields.map((f) => [f.key, ''])) });
+  const handleSaveEntry = (item) => {
+    setItems((list) => {
+      if (editing.index >= 0) return list.map((it, i) => (i === editing.index ? item : it));
+      return [...list, item];
+    });
+    setEditing(null);
+  };
+  const handleSave = () => {
+    onChange(items.map((it) => itemFields.map((f) => (it[f.key] ? `${f.label}：${it[f.key]}` : '')).filter(Boolean).join(' / ')).join('\n---\n'));
+    setOpen(false);
+  };
+  return (
+    <>
+      <EntryButton
+        icon={icon}
+        title={title}
+        progress={`${items.length} 项`}
+        onClick={() => setOpen(true)}
+      />
+      {open && (
+        <SkillModal
+          title={title}
+          wide
+          onClose={() => setOpen(false)}
+          footer={
+            <>
+              <span>已添加 {items.length} 项</span>
+              <button className="primary-action" type="button" onClick={handleSave}>保存</button>
+            </>
+          }
+        >
+          {items.length ? (
+            <div className="project-list">
+              {items.map((item, index) => (
+                <div className="project-item" key={index} onClick={() => setEditing({ index, item: { ...item } })} style={{ cursor: 'pointer' }}>
+                  <div className="project-item-head">
+                    <strong>{item[itemFields[0].key] || `${title} ${index + 1}`}</strong>
+                    <span className="project-item-head-right">
+                      <button className="project-item-delete" type="button" onClick={(e) => { e.stopPropagation(); setItems((list) => list.filter((_, i) => i !== index)); }}>删除</button>
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="project-empty">尚未添加，点击下方按钮添加。</p>
+          )}
+          <button className="secondary-action project-add" type="button" onClick={addNew}>
+            <Plus size={16} /> 添加
+          </button>
+        </SkillModal>
+      )}
+      {editing && (
+        <SkillModal
+          title={editing.index >= 0 ? `编辑${title}` : `添加${title}`}
+          wide
+          onClose={() => setEditing(null)}
+          footer={
+            <>
+              <button className="secondary-action" type="button" onClick={() => setEditing(null)}>取消</button>
+              <button className="primary-action" type="button" onClick={() => handleSaveEntry(editing.item)}>保存</button>
+            </>
+          }
+        >
+          <div className="project-editor">
+            {itemFields.map((f) => (
+              <label className="education-field" key={f.key}>
+                <span>{f.label}</span>
+                <input
+                  value={editing.item[f.key]}
+                  placeholder={`${f.label}示例`}
+                  onChange={(e) => setEditing((ed) => ({ ...ed, item: { ...ed.item, [f.key]: e.target.value } }))}
+                />
+              </label>
+            ))}
+          </div>
+        </SkillModal>
+      )}
+    </>
+  );
+}
+
+/* 简历表单 Picker 序列化工具 */
+const EDU_LABELS = { school: '学校', duration: '在校时间', major: '专业' };
+const EDU_PLACEHOLDERS = { school: '例如：上海交通大学', duration: '例如：2022.09 - 2026.06', major: '例如：软件工程' };
+
+function parseTagLine(text, key) {
+  const block = (text || '').split('\n').map((l) => l.trim()).find((l) => l.startsWith(`${key}：`));
+  if (!block) return [];
+  return block.slice(key.length + 1).split(/、|，/).map((s) => s.trim()).filter(Boolean);
+}
+
+function parseTagList(text, key) {
+  const value = parseTagLine(text, key);
+  if (!value.length) return [];
+  if (value.includes('暂无')) return ['暂无'];
+  return value;
+}
+
+function toggleTag(tags, setTags, label) {
+  setTags((current) => {
+    if (label === '暂无') return current.includes('暂无') ? [] : ['暂无'];
+    const withoutNone = current.filter((t) => t !== '暂无');
+    return withoutNone.includes(label) ? withoutNone : [...withoutNone, label];
+  });
+}
+
+function parseEducation(text) {
+  const out = { school: '', duration: '', major: '' };
+  (text || '').split(' / ').forEach((part) => {
+    const [key, value] = splitKV(part);
+    if (key) {
+      const field = Object.keys(EDU_LABELS).find((k) => EDU_LABELS[k] === key);
+      if (field) out[field] = (value || '').trim();
+    }
+  });
+  return out;
+}
+
+function splitKV(part) {
+  const idx = part.indexOf('：');
+  if (idx < 0) return ['', part];
+  return [part.slice(0, idx), part.slice(idx + 1)];
+}
+
+function parseHonor(text) {
+  let honor = '';
+  let position = '';
+  (text || '').split(' / ').forEach((part) => {
+    const [key, value] = splitKV(part);
+    if (key === '校内荣誉') honor = (value || '').trim();
+    if (key === '校内职务') position = (value || '').trim();
+  });
+  return { honor, position };
+}
+
+function parseProjects(text) {
+  return (text || '').split('\n---\n').map(parseProject).filter((p) => p.name || p.time || p.belong || p.desc);
+}
+
+function parseProject(block) {
+  const item = { name: '', time: '', belong: '', desc: '' };
+  const clean = (block || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const descLines = [];
+  clean.forEach((line) => {
+    const [key, value] = splitKV(line);
+    if (key === '项目名称') item.name = (value || '').trim();
+    else if (key === '项目时间') item.time = (value || '').trim();
+    else if (key === '所属') item.belong = (value || '').trim();
+    else if (key === '项目描述') item.desc = (value || '').trim();
+    else if (!key) descLines.push(line);
+  });
+  if (descLines.length && !item.desc) item.desc = descLines.join('\n');
+  return item;
+}
+
+function serializeProject(item) {
+  const lines = [];
+  if (item.name) lines.push(`项目名称：${item.name}`);
+  if (item.time) lines.push(`项目时间：${item.time}`);
+  if (item.belong) lines.push(`所属：${item.belong}`);
+  if (item.desc) lines.push(`项目描述：${item.desc}`);
+  return lines.join('\n');
+}
+
+function parseLanguage(text) {
+  const out = { language: '', proficiency: '', cert: '' };
+  (text || '').split(' / ').forEach((part) => {
+    const [key, value] = splitKV(part);
+    if (key === '语种') out.language = (value || '').trim();
+    if (key === '熟练程度') out.proficiency = (value || '').trim();
+    if (key === '证书') out.cert = (value || '').trim();
+  });
+  return out;
+}
+
+function parseKeyValueList(text, fields) {
+  return (text || '').split('\n---\n').map((block) => {
+    const item = Object.fromEntries(fields.map((f) => [f.key, '']));
+    (block || '').split('\n').forEach((line) => {
+      const [key, value] = splitKV(line.trim());
+      const field = fields.find((f) => f.label === key);
+      if (field) item[field.key] = (value || '').trim();
+    });
+    return item;
+  }).filter((it) => Object.values(it).some(Boolean));
+}
+
+function ResumeDownloader({ text, name }) {
+  const [ready, setReady] = useState(true);
+  const handleDownload = () => {
+    try {
+      const blob = new Blob([text || ''], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${name || '简历'}-简历.md`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } finally {
+      // noop
+    }
+  };
+  return (
+    <button className="primary-action" type="button" onClick={handleDownload} disabled={!ready || !text}>
+      <Download size={16} />
+      {ready ? '下载简历' : '准备中...'}
+    </button>
+  );
+}
+
+function ResumeAnalysisPage() {
   const [resumeText, setResumeText] = useState(
     '负责过中后台性能优化、低代码表单搭建和组件库治理，希望重点练习项目深挖与架构表达。'
   );
@@ -1889,7 +2514,10 @@ function ResumeAnalysisPage({ onUseSetup }) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [form, setForm] = useState(EMPTY_RESUME_FORM);
+  const [collegeOptions, setCollegeOptions] = useState([]);
+  const [studentInfo, setStudentInfo] = useState({ name: '', studentNo: '' });
+  const [savingForm, setSavingForm] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -1927,76 +2555,69 @@ function ResumeAnalysisPage({ onUseSetup }) {
         }
       });
 
+    apiRequest('/api/resume-form/settings')
+      .then((data) => {
+        if (mounted) setCollegeOptions(data.colleges || []);
+      })
+      .catch(() => {});
+
+    apiRequest('/api/resume-form')
+      .then((data) => {
+        if (!mounted) return;
+        if (data.form && Object.keys(data.form).length) {
+          setForm({ ...EMPTY_RESUME_FORM, ...data.form });
+        }
+        setStudentInfo({ name: data.name || '', studentNo: data.student_no || '' });
+      })
+      .catch(() => {});
+
     return () => {
       mounted = false;
     };
   }, []);
 
-  const handleFileChange = async (event) => {
-    const file = event.target.files?.[0];
-    setFileName(file?.name || '');
+  const handleFormChange = (field, value) => {
+    setForm((current) => {
+      if (field === 'college') {
+        const next = { ...current, college: value, major: '' };
+        const college = collegeOptions.find((item) => item.name === value);
+        if (college?.majors?.length === 1) next.major = college.majors[0].name;
+        return next;
+      }
+      return { ...current, [field]: value };
+    });
     setMessage('');
     setError('');
+  };
 
-    if (!file) {
-      setAnalyzed(false);
-      return;
-    }
-
-    const extension = file.name.split('.').pop()?.toLowerCase();
-    const readableTextExtensions = new Set(['txt', 'md', 'json']);
-
-    if (readableTextExtensions.has(extension)) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const nextText = String(reader.result || '').trim();
-        setResumeText(nextText);
-        setAnalysis(buildResumeAnalysis(nextText, file.name));
-        setStructuredAnalysis(null);
-        setAnalysisMeta(null);
-        setAnalyzed(true);
-        setMessage(`已读取 ${file.name}，并刷新分析结果。`);
-      };
-      reader.onerror = () => {
-        setError('文件读取失败，请重新选择文件或直接粘贴简历文本。');
-      };
-      reader.readAsText(file);
-      return;
-    }
-
-    setUploading(true);
+  const handleSaveForm = async () => {
+    setSavingForm(true);
+    setMessage('');
+    setError('');
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const response = await fetch(apiUrl('/api/profile/resume-upload'), {
-        method: 'POST',
-        credentials: 'include',
-        body: formData,
+      const data = await apiRequest('/api/resume-form', {
+        method: 'PUT',
+        body: JSON.stringify(form),
       });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.detail || data.error || '文件解析失败，请稍后再试。');
-      }
-
-      const nextText = String(data.text || '').trim();
-      if (!nextText) {
-        throw new Error('文件内容为空或未能提取到文本，请检查文件或直接粘贴简历文本。');
-      }
-
+      const savedForm = data.form || form;
+      setForm(savedForm);
+      const nextText = data.resume_text || resumeText;
       setResumeText(nextText);
-      setAnalysis(buildResumeAnalysis(nextText, file.name));
+      setFileName('');
+      setAnalysis(buildResumeAnalysis(nextText));
       setStructuredAnalysis(null);
       setAnalysisMeta(null);
-      setAnalyzed(true);
-      setProfile({ ...defaultProfile, ...(data.profile || profile || {}) });
-      setMessage(`已解析 ${file.name}（${data.char_count} 字符${data.truncated ? '，已保留前 12000 字符' : ''}），并刷新分析结果。`);
-    } catch (uploadError) {
-      setError(uploadError.message);
       setAnalyzed(false);
+      setMessage('简历已保存，点击“开始分析”可生成最新的岗位匹配与面试配置。');
+    } catch (requestError) {
+      setError(requestError.message);
     } finally {
-      setUploading(false);
+      setSavingForm(false);
     }
   };
+
+  const selectedCollege = collegeOptions.find((item) => item.name === form.college);
+  const majorOptions = selectedCollege?.majors || [];
 
   const handleAnalyze = async () => {
     setAnalyzing(true);
@@ -2074,16 +2695,8 @@ function ResumeAnalysisPage({ onUseSetup }) {
     <section className="resume-page">
       <div className="resume-hero">
         <div>
-          <p className="eyebrow">P0 Resume Intelligence</p>
-          <h1>简历上传与分析</h1>
-          <span>
-            先解析真实简历，再生成岗位匹配、亮点风险、高概率追问和推荐面试配置，让后续多 Agent 面试更贴近候选人经历。
-          </span>
+          <h1>简历填写与分析</h1>
         </div>
-        <button className="primary-action" onClick={handleAnalyze} disabled={analyzing || uploading}>
-          <Sparkles size={17} />
-          {analyzing ? '分析中' : '开始分析'}
-        </button>
       </div>
 
       {(message || error) && (
@@ -2105,28 +2718,82 @@ function ResumeAnalysisPage({ onUseSetup }) {
       )}
 
       <section className="resume-grid">
-        <Card title="上传或粘贴简历" icon={<Upload size={18} />}>
-          <div className="resume-input-panel">
-            <label className="resume-upload-box">
-              <Upload size={24} />
-              <strong>{uploading ? '解析中...' : fileName || '上传简历文件'}</strong>
-              <span>支持 txt、md、json、PDF、Word 文档；图片 OCR 需部署环境安装 Tesseract。</span>
-              <input type="file" accept=".txt,.md,.json,.pdf,.doc,.docx,.png,.jpg,.jpeg" onChange={handleFileChange} disabled={uploading} />
-            </label>
+        <Card title="填写简历" icon={<FileText size={18} />}>
+          <div className="resume-form-panel">
+            <div className="resume-form-basic">
+              <label className="brief-field">
+                <span>姓名</span>
+                <input value={studentInfo.name} disabled placeholder="登录后自动填写" />
+              </label>
+              <label className="brief-field">
+                <span>学号</span>
+                <input value={studentInfo.studentNo} disabled placeholder="登录后自动填写" />
+              </label>
+              <label className="brief-field">
+                <span>学院</span>
+                <select value={form.college} onChange={(event) => handleFormChange('college', event.target.value)}>
+                  <option value="">请选择学院</option>
+                  {collegeOptions.map((college) => (
+                    <option key={college.id || college.name} value={college.name}>{college.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="brief-field">
+                <span>专业</span>
+                <select
+                  value={form.major}
+                  onChange={(event) => handleFormChange('major', event.target.value)}
+                  disabled={!form.college}
+                >
+                  <option value="">{form.college ? '请选择专业' : '请先选择学院'}</option>
+                  {majorOptions.map((major) => (
+                    <option key={major.id || major.name} value={major.name}>{major.name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
 
-            <label className="brief-field">
-              <span>粘贴简历 / 项目简介</span>
-              <textarea value={resumeText} onChange={(event) => {
-                setResumeText(event.target.value);
-                setAnalyzed(false);
-                setMessage('');
-                setError('');
-              }} />
-            </label>
+            <div className="resume-form-fields">
+              <ProfessionalSkillsPicker value={form.professional_skills} role={profile?.target_role || analysis.targetRole} onChange={(value) => handleFormChange('professional_skills', value)} />
+              <AdvantagePicker value={form.advantages} onChange={(value) => handleFormChange('advantages', value)} />
+              <EducationPicker value={form.education} onChange={(value) => handleFormChange('education', value)} />
+              <BonusPicker value={form.bonus} onChange={(value) => handleFormChange('bonus', value)} />
+              <HonorsPicker value={form.honors} onChange={(value) => handleFormChange('honors', value)} />
+              <ProjectsPicker value={form.projects} onChange={(value) => handleFormChange('projects', value)} />
+              <LanguagePicker value={form.languages} onChange={(value) => handleFormChange('languages', value)} />
+              <GenericListPicker
+                icon={<Zap size={18} />}
+                title="技能"
+                itemFields={[{ key: 'skill', label: '技能' }, { key: 'level', label: '熟练程度' }]}
+                value={form.skills}
+                onChange={(value) => handleFormChange('skills', value)}
+              />
+              <GenericListPicker
+                icon={<FolderOpen size={18} />}
+                title="个人作品"
+                itemFields={[{ key: 'name', label: '作品集' }, { key: 'link', label: '作品链接' }]}
+                value={form.works}
+                onChange={(value) => handleFormChange('works', value)}
+              />
+              <GenericListPicker
+                icon={<ShieldCheck size={18} />}
+                title="证书"
+                itemFields={[{ key: 'name', label: '证书名称' }, { key: 'certNo', label: '证书编号' }]}
+                value={form.certificates}
+                onChange={(value) => handleFormChange('certificates', value)}
+              />
+            </div>
 
-            <div className="privacy-note">
-              <ShieldCheck size={16} />
-              <span>简历分析结果会用于生成本场面试官、追问路线和复盘维度，默认只在当前用户个人空间内可见。</span>
+            <div className="resume-form-actions">
+              <button className="primary-action" type="button" onClick={handleSaveForm} disabled={savingForm}>
+                <Save size={16} />
+                {savingForm ? '保存中...' : '保存简历'}
+              </button>
+              <ResumeDownloader text={resumeText} name={studentInfo.name || profile?.target_role || '简历'} />
+              <button className="primary-action" type="button" onClick={handleAnalyze} disabled={analyzing}>
+                <Sparkles size={16} />
+                {analyzing ? '分析中' : '开始分析'}
+              </button>
             </div>
           </div>
         </Card>
@@ -2155,7 +2822,7 @@ function ResumeAnalysisPage({ onUseSetup }) {
       </section>
 
       <section className="direction-panel">
-        <Card title="推荐就业方向（由学生确认）" icon={<Target size={18} />}>
+        <Card title="推荐就业方向" icon={<Target size={18} />}>
           {analysis.directions?.length ? (
             <div className="direction-grid">
               {analysis.directions.map((direction, index) => {
@@ -2216,66 +2883,8 @@ function ResumeAnalysisPage({ onUseSetup }) {
         </Card>
       </section>
 
-      <section className="analysis-grid">
-        <Card title="结构化解析" icon={<FileText size={18} />}>
-          <div className="parsed-list">
-            {analysis.parsedSections.map((item) => (
-              <div key={item.label}>
-                <strong>{item.label}</strong>
-                <span>{item.value}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <Card title="简历亮点" icon={<Award size={18} />}>
-          <InsightList items={analysis.highlights} tone="green" />
-        </Card>
-
-        <Card title="风险点与短板" icon={<AlertTriangle size={18} />}>
-          <InsightList items={analysis.risks} tone="amber" />
-        </Card>
-
-        <Card title="高概率面试题" icon={<MessageSquareText size={18} />}>
-          <InsightList items={analysis.questions} tone="blue" />
-        </Card>
-      </section>
-
-      <section className="resume-bottom-grid">
-        <Card title="简历优化建议" icon={<Wrench size={18} />}>
-          <InsightList items={analysis.suggestions} tone="blue" />
-        </Card>
-
-        <Card title="推荐面试配置" icon={<Layers3 size={18} />}>
-          <div className="recommended-setup">
-            {analysis.recommendedSetup.map((item) => (
-              <div key={item.label}>
-                <span>{item.label}</span>
-                <strong>{item.value}</strong>
-              </div>
-            ))}
-            <button className="primary-action" onClick={onUseSetup}>
-              生成本场面试配置
-            </button>
-          </div>
-        </Card>
-      </section>
-
       {!analyzed && <div className="resume-draft-note">简历内容已更新，点击“开始分析”刷新分析结果。</div>}
     </section>
-  );
-}
-
-function InsightList({ items, tone }) {
-  return (
-    <div className="insight-list">
-      {items.map((item, index) => (
-        <div className={`insight-item ${tone}`} key={item}>
-          <span>{String(index + 1).padStart(2, '0')}</span>
-          <p>{item}</p>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -2283,14 +2892,11 @@ function SetupPage({ onStart }) {
   const defaultBrief = '';
   const [form, setForm] = useState({
     role: '',
-    level: setupOptions.levels[2],
-    interviewType: setupOptions.interviewTypes[1],
-    companyScene: setupOptions.companyScenes[0],
-    focusArea: setupOptions.focusAreas[0],
-    intensity: setupOptions.intensity[1],
-    style: setupOptions.styles[2],
+    ...defaultDifficultyPreset.overrides,
     brief: defaultBrief,
   });
+  const [difficulty, setDifficulty] = useState(defaultDifficultyPreset.key);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
@@ -2346,6 +2952,16 @@ function SetupPage({ onStart }) {
 
   const updateForm = (key, value) => {
     setForm((current) => ({ ...current, [key]: value }));
+    // 手动修改模板覆盖的字段后，不再对应任何难度模板
+    if (key in defaultDifficultyPreset.overrides) {
+      setDifficulty(null);
+    }
+    setError('');
+  };
+
+  const applyDifficulty = (preset) => {
+    setDifficulty(preset.key);
+    setForm((current) => ({ ...current, ...preset.overrides }));
     setError('');
   };
 
@@ -2380,8 +2996,6 @@ function SetupPage({ onStart }) {
     }
   };
 
-  const interviewerProfile = buildInterviewerProfile(form);
-
   return (
     <section className="setup-page">
       <div className="setup-hero">
@@ -2403,6 +3017,25 @@ function SetupPage({ onStart }) {
       <section className="setup-grid">
         <Card title="面试前配置" icon={<Layers3 size={18} />}>
           <div className="setup-form">
+            <div className="difficulty-presets">
+              {difficultyPresets.map((preset) => {
+                const isActive = difficulty === preset.key;
+                return (
+                  <button
+                    key={preset.key}
+                    type="button"
+                    className={`difficulty-card${isActive ? ' active' : ''}`}
+                    aria-pressed={isActive}
+                    onClick={() => applyDifficulty(preset)}
+                  >
+                    <strong>{preset.label}</strong>
+                    <span>{preset.summary}</span>
+                    <small>{preset.description}</small>
+                  </button>
+                );
+              })}
+            </div>
+
             <div className="role-input-group">
               <label htmlFor="setup-target-role">目标岗位</label>
               <input
@@ -2439,99 +3072,74 @@ function SetupPage({ onStart }) {
               )}
               <small>推荐方向仅供参考，学生可以按真实求职意愿修改。</small>
             </div>
-            <OptionGroup
-              label="当前水平"
-              options={setupOptions.levels}
-              value={form.level}
-              onChange={(value) => updateForm('level', value)}
-            />
-            <OptionGroup
-              label="面试类型"
-              options={setupOptions.interviewTypes}
-              value={form.interviewType}
-              onChange={(value) => updateForm('interviewType', value)}
-            />
-            <OptionGroup
-              label="公司场景"
-              options={setupOptions.companyScenes}
-              value={form.companyScene}
-              onChange={(value) => updateForm('companyScene', value)}
-            />
-            <OptionGroup
-              label="练习重点"
-              options={setupOptions.focusAreas}
-              value={form.focusArea}
-              onChange={(value) => updateForm('focusArea', value)}
-            />
-            <OptionGroup
-              label="面试强度"
-              options={setupOptions.intensity}
-              value={form.intensity}
-              onChange={(value) => updateForm('intensity', value)}
-            />
-            <OptionGroup
-              label="面试官风格"
-              options={setupOptions.styles}
-              value={form.style}
-              onChange={(value) => updateForm('style', value)}
-            />
-            <label className="brief-field">
-              <span>简历 / 项目简介（最多 12,000 字）</span>
-              <textarea
-                value={form.brief}
-                maxLength={12000}
-                placeholder="可填写你的简历摘要、核心项目、希望重点练习的方向"
-                onChange={(event) => {
-                  briefTouchedRef.current = true;
-                  updateForm('brief', event.target.value);
-                }}
-              />
-              <small>{form.brief.length.toLocaleString()} / 12,000</small>
-            </label>
+
+            <button
+              type="button"
+              className="secondary-action advanced-toggle"
+              onClick={() => setShowAdvanced((current) => !current)}
+              aria-expanded={showAdvanced}
+            >
+              <Wrench size={15} />
+              {showAdvanced ? '收起高级配置' : '高级配置'}
+              <ChevronDown size={14} className={showAdvanced ? 'advanced-toggle-icon open' : 'advanced-toggle-icon'} />
+            </button>
+
+            {showAdvanced && (
+              <div className="advanced-panel">
+                <OptionGroup
+                  label="当前水平"
+                  options={setupOptions.levels}
+                  value={form.level}
+                  onChange={(value) => updateForm('level', value)}
+                />
+                <OptionGroup
+                  label="面试类型"
+                  options={setupOptions.interviewTypes}
+                  value={form.interviewType}
+                  onChange={(value) => updateForm('interviewType', value)}
+                />
+                <OptionGroup
+                  label="公司场景"
+                  options={setupOptions.companyScenes}
+                  value={form.companyScene}
+                  onChange={(value) => updateForm('companyScene', value)}
+                />
+                <OptionGroup
+                  label="练习重点"
+                  options={setupOptions.focusAreas}
+                  value={form.focusArea}
+                  onChange={(value) => updateForm('focusArea', value)}
+                />
+                <OptionGroup
+                  label="面试强度"
+                  options={setupOptions.intensity}
+                  value={form.intensity}
+                  onChange={(value) => updateForm('intensity', value)}
+                />
+                <OptionGroup
+                  label="面试官风格"
+                  options={setupOptions.styles}
+                  value={form.style}
+                  onChange={(value) => updateForm('style', value)}
+                />
+                <label className="brief-field">
+                  <span>简历 / 项目简介（最多 12,000 字）</span>
+                  <textarea
+                    value={form.brief}
+                    maxLength={12000}
+                    placeholder="可填写你的简历摘要、核心项目、希望重点练习的方向"
+                    onChange={(event) => {
+                      briefTouchedRef.current = true;
+                      updateForm('brief', event.target.value);
+                    }}
+                  />
+                  <small>{form.brief.length.toLocaleString()} / 12,000</small>
+                </label>
+              </div>
+            )}
           </div>
         </Card>
 
-        <Card title="本场面试官档案" icon={<Bot size={18} />}>
-          <div className="profile-card">
-            <div className="profile-head">
-              <AgentAvatar name="技术一面 Agent" active />
-              <div>
-                <strong>{interviewerProfile.title}</strong>
-                <span>{form.companyScene} · {form.interviewType} · {form.intensity}强度</span>
-              </div>
-            </div>
-
-            <div className="profile-section">
-              <span>面试目标</span>
-              <p>{interviewerProfile.goal}</p>
-            </div>
-            <div className="profile-section">
-              <span>提问策略</span>
-              <p>{interviewerProfile.strategy}</p>
-            </div>
-            <div className="profile-section">
-              <span>风险追问</span>
-              <p>{interviewerProfile.pressure}</p>
-            </div>
-
-            <div className="profile-split">
-              <div>
-                <span>面试结构</span>
-                {interviewerProfile.structure.map((item) => (
-                  <p key={item}>{item}</p>
-                ))}
-              </div>
-              <div>
-                <span>评分维度</span>
-                <div className="score-tags">
-                  {interviewerProfile.scoring.map((item) => (
-                    <StatusTag key={item} tone="blue">{item}</StatusTag>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </Card>
       </section>
     </section>
   );
@@ -4494,7 +5102,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   );
 }
 
-function ReportPage({ interviewId, user }) {
+function ReportPage({ interviewId, user, onBackToList }) {
   const [reportData, setReportData] = useState(null);
   const [loading, setLoading] = useState(Boolean(interviewId));
   const [error, setError] = useState('');
@@ -4575,6 +5183,11 @@ function ReportPage({ interviewId, user }) {
 
   return (
     <section className="report-page">
+      {onBackToList && (
+        <button type="button" className="secondary-action report-back-action" onClick={onBackToList}>
+          ← 返回历史记录
+        </button>
+      )}
       <header className="summary-panel">
         <div className="candidate-block">
           <div className="avatar">
@@ -5072,29 +5685,6 @@ function StatsPage({ onStartTraining, onOpenReport }) {
       </section>
 
       <section className="stats-lower-grid">
-        <Card title="本周提升计划" icon={<Sparkles size={18} />} action={<StatusTag tone="amber">建议先练 1 项</StatusTag>}>
-          <div className="training-plan-list">
-            {trainingTasks.length === 0 ? (
-              <div className="training-empty">
-                <strong>等待生成个性化计划</strong>
-                <span>完成一次面试后，系统会把短板转化为可执行训练任务。</span>
-              </div>
-            ) : trainingTasks.map((task, index) => (
-              <article className={index === 0 ? 'priority' : ''} key={task.key}>
-                <span className="training-step">0{index + 1}</span>
-                <div>
-                  <div className="training-title">
-                    <strong>{task.title}</strong>
-                    <StatusTag tone={index === 0 ? 'amber' : 'blue'}>{task.score}/100</StatusTag>
-                  </div>
-                  <p>{task.text}</p>
-                  <small>{index === 0 ? '建议今天完成 · 约 15 分钟' : '完成上一项后解锁'}</small>
-                </div>
-              </article>
-            ))}
-          </div>
-        </Card>
-
         <Card title="最近判断依据" icon={<FileText size={18} />} action={latestReport ? <StatusTag tone="blue">可追溯</StatusTag> : null}>
           <div className="evidence-panel">
             {reports[0] ? (
@@ -5141,10 +5731,9 @@ function StatsPage({ onStartTraining, onOpenReport }) {
 
 function App() {
   const [user, setUser] = useState(undefined);
-  const [view, setView] = useState('setup');
+  const [view, setView] = useState('resume');
   const [activeInterviewId, setActiveInterviewId] = useState('');
-  const [downloadingReport, setDownloadingReport] = useState(false);
-  const [downloadError, setDownloadError] = useState('');
+  const [reportMode, setReportMode] = useState('list');
 
   useEffect(() => {
     let mounted = true;
@@ -5179,7 +5768,7 @@ function App() {
   const handleLogout = async () => {
     await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
     setUser(null);
-    setView('setup');
+    setView('resume');
     setActiveInterviewId('');
   };
 
@@ -5190,30 +5779,15 @@ function App() {
 
   const handleOpenReport = (interviewId) => {
     setActiveInterviewId(interviewId);
+    setReportMode('detail');
     setView('report');
-    setDownloadError('');
   };
 
-  const canDownloadReport = view === 'report' && Boolean(activeInterviewId);
-
-  const handleDownloadReport = async () => {
-    if (!canDownloadReport || downloadingReport) return;
-    setDownloadingReport(true);
-    setDownloadError('');
-    try {
-      await apiRequest(`/api/interviews/${activeInterviewId}/report`);
-      const anchor = document.createElement('a');
-      anchor.href = apiUrl(`/api/interviews/${activeInterviewId}/report/download`);
-      anchor.download = '';
-      anchor.style.display = 'none';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-    } catch (requestError) {
-      setDownloadError(requestError.message || '报告下载失败，请稍后重试。');
-    } finally {
-      setDownloadingReport(false);
+  const handleViewChange = (nextView) => {
+    if (nextView === 'report') {
+      setReportMode('list');
     }
+    setView(nextView);
   };
 
   if (user === undefined) {
@@ -5243,9 +5817,8 @@ function App() {
           </div>
           <div>
             <strong>AI Interview Intelligence</strong>
-            <span>多 Agent 面试评估系统</span>
           </div>
-          <ViewSwitch view={view} onChange={setView} />
+          <ViewSwitch view={view} onChange={handleViewChange} />
           <button
             className={`topbar-account ${view === 'profile' ? 'active' : ''}`}
             type="button"
@@ -5255,25 +5828,13 @@ function App() {
             <UserRound size={16} />
             <span>{user.name}</span>
           </button>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label={downloadingReport ? '正在下载报告' : '下载报告'}
-            title={canDownloadReport ? '下载 Markdown 报告' : '请先打开一份报告'}
-            onClick={handleDownloadReport}
-            disabled={!canDownloadReport || downloadingReport}
-          >
-            <Download size={18} />
-          </button>
           <button className="icon-button" aria-label="退出登录" onClick={handleLogout}>
             <LogOut size={18} />
           </button>
         </div>
 
-        {downloadError && <div className="profile-message error" role="alert">{downloadError}</div>}
-
         {view === 'setup' && <SetupPage onStart={handleStartInterview} />}
-        {view === 'resume' && <ResumeAnalysisPage onUseSetup={() => setView('setup')} />}
+        {view === 'resume' && <ResumeAnalysisPage />}
         {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
         {view === 'phone' && (
           <PhoneInterviewPage
@@ -5282,8 +5843,13 @@ function App() {
             onBackToSetup={() => setView('setup')}
           />
         )}
-        {view === 'report' && <ReportPage interviewId={activeInterviewId} user={user} />}
-        {view === 'history' && <HistoryPage onOpenReport={handleOpenReport} />}
+        {view === 'report' && (
+          reportMode === 'detail' && activeInterviewId ? (
+            <ReportPage interviewId={activeInterviewId} user={user} onBackToList={() => setReportMode('list')} />
+          ) : (
+            <HistoryPage onOpenReport={handleOpenReport} />
+          )
+        )}
         {view === 'stats' && <StatsPage onStartTraining={() => setView('setup')} onOpenReport={handleOpenReport} />}
       </div>
     </main>

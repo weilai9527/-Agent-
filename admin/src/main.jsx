@@ -24,12 +24,15 @@ import {
   Plus,
   RefreshCw,
   Rocket,
+  Save,
   Search,
   School,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   UserCog,
+  UserPlus,
   UsersRound,
   Upload,
   Wifi,
@@ -108,6 +111,8 @@ const navItems = [
   { key: 'interviews', label: '训练记录', icon: ClipboardList, permission: 'canViewInterviews', group: '工作台' },
   { key: 'reports', label: '报告质检', icon: FileText, permission: 'canViewReports', group: '工作台' },
   { key: 'organization', label: '组织与学生', icon: School, permission: 'canManageCampus', group: '学生成长' },
+  { key: 'registrations', label: '用户注册', icon: UserPlus, permission: 'canManageCampus', group: '学生成长' },
+  { key: 'resumeFormSettings', label: '填写简历设置', icon: GraduationCap, permission: 'canManageCampus', group: '学生成长' },
   { key: 'candidates', label: '学生成长', icon: UsersRound, permission: 'canViewCandidates', group: '学生成长' },
   { key: 'catalog', label: '岗位与能力', icon: BookOpen, permission: 'canViewCatalog', group: '训练内容' },
   { key: 'agents', label: 'AI 陪练角色', icon: Bot, permission: 'canViewAgents', group: '训练内容' },
@@ -796,6 +801,339 @@ const connectionLevelLabels = {
   warning: '警告',
   error: '错误',
 };
+
+function RegistrationsPage() {
+  const [registrations, setRegistrations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [query, setQuery] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const [deletingId, setDeletingId] = useState('');
+
+  const loadRegistrations = async () => {
+    setLoading(true);
+    setPageError('');
+    try {
+      const data = await adminRequest('/api/admin/student-registrations');
+      setRegistrations(data.registrations || []);
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadRegistrations();
+  }, []);
+
+  const handleImport = async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    setPageError('');
+    setNotice('');
+    setImportResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const data = await adminRequest('/api/admin/student-registrations/import', {
+        method: 'POST',
+        body: formData,
+      });
+      setImportResult(data);
+      setNotice(`导入完成：新增 ${data.imported} 人，更新 ${data.updated} 人，跳过 ${data.skipped.length} 行`);
+      await loadRegistrations();
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleDelete = async (item) => {
+    if (!window.confirm(`确认删除 ${item.name}（${item.studentNo}）的注册信息？该学生将无法再登录候选人端。`)) return;
+    setDeletingId(item.id);
+    setPageError('');
+    setNotice('');
+    try {
+      await adminRequest(`/api/admin/student-registrations/${item.id}`, { method: 'DELETE' });
+      setNotice(`已删除 ${item.name}（${item.studentNo}）的注册信息`);
+      setRegistrations((current) => current.filter((entry) => entry.id !== item.id));
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setDeletingId('');
+    }
+  };
+
+  const filtered = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return registrations;
+    return registrations.filter((item) => [item.studentNo, item.name, item.importedBy]
+      .join(' ').toLowerCase().includes(keyword));
+  }, [registrations, query]);
+
+  const activatedCount = useMemo(() => registrations.filter((item) => item.activated).length, [registrations]);
+
+  return (
+    <div className="registrations-page">
+      <section className="connection-log-summary">
+        <article><span>已导入学生</span><strong>{registrations.length}</strong></article>
+        <article><span>已激活账号</span><strong>{activatedCount}</strong></article>
+        <article><span>待激活</span><strong>{registrations.length - activatedCount}</strong></article>
+      </section>
+
+      <SectionCard
+        title="用户注册"
+        icon={<UserPlus size={18} />}
+        action={<span className="record-count">候选人端凭学号 + 姓名登录</span>}
+      >
+        <div className="connection-log-toolbar">
+          <label>
+            <Search size={15} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学号或姓名" />
+          </label>
+          <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
+            <Upload size={15} className={importing ? 'spin' : ''} />
+            {importing ? '正在导入…' : '导入文档（CSV / Excel）'}
+            <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleImport} disabled={importing} hidden />
+          </label>
+          <button className="secondary-button" type="button" onClick={loadRegistrations} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
+          </button>
+        </div>
+
+        <p className="form-hint">文档需包含「学号」「姓名」两列（支持中文或 student_no / name 列名），候选人端凭学号与姓名登录。</p>
+
+        {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
+        {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
+
+        {importResult && importResult.skipped.length > 0 && (
+          <div className="page-message warning">
+            <AlertCircle size={18} />
+            <div>
+              <strong>以下 {importResult.skipped.length} 行被跳过：</strong>
+              <ul>
+                {importResult.skipped.map((item) => (
+                  <li key={item.row}>第 {item.row} 行 {item.name || item.studentNo || '（空行）'}：{item.reason}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {!pageError && loading && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取注册信息</div>}
+        {!pageError && !loading && filtered.length === 0 && (
+          <div className="page-message">{query ? '没有匹配的注册信息。' : '尚未导入学生注册信息，请先导入文档。'}</div>
+        )}
+        {!pageError && !loading && filtered.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>学号</th>
+                  <th>姓名</th>
+                  <th>状态</th>
+                  <th>导入人</th>
+                  <th>导入时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.studentNo}</td>
+                    <td>{item.name}</td>
+                    <td><span className={`status-badge ${item.activated ? 'green' : 'gray'}`}>{item.activated ? '已激活' : '待激活'}</span></td>
+                    <td>{item.importedBy || '-'}</td>
+                    <td>{item.createdAt ? item.createdAt.slice(0, 19).replace('T', ' ') : '-'}</td>
+                    <td>
+                      <button
+                        className="secondary-button danger"
+                        type="button"
+                        disabled={deletingId === item.id}
+                        onClick={() => handleDelete(item)}
+                      >
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+    </div>
+  );
+}
+
+function ResumeFormSettingsPage() {
+  const [colleges, setColleges] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const loadSettings = async () => {
+    setLoading(true);
+    setPageError('');
+    try {
+      const data = await adminRequest('/api/admin/resume-form-settings');
+      setColleges(data.colleges || []);
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSettings();
+  }, []);
+
+  const newId = () => `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const addCollege = () => {
+    setColleges((current) => [...current, { id: newId(), name: '', majors: [] }]);
+  };
+
+  const updateCollegeName = (id, name) => {
+    setColleges((current) => current.map((college) => (college.id === id ? { ...college, name } : college)));
+  };
+
+  const removeCollege = (id) => {
+    if (!window.confirm('确认删除该学院及其下所有专业？')) return;
+    setColleges((current) => current.filter((college) => college.id !== id));
+  };
+
+  const addMajor = (collegeId) => {
+    setColleges((current) => current.map((college) => (college.id === collegeId
+      ? { ...college, majors: [...college.majors, { id: newId(), name: '' }] }
+      : college)));
+  };
+
+  const updateMajorName = (collegeId, majorId, name) => {
+    setColleges((current) => current.map((college) => (college.id === collegeId
+      ? { ...college, majors: college.majors.map((major) => (major.id === majorId ? { ...major, name } : major)) }
+      : college)));
+  };
+
+  const removeMajor = (collegeId, majorId) => {
+    setColleges((current) => current.map((college) => (college.id === collegeId
+      ? { ...college, majors: college.majors.filter((major) => major.id !== majorId) }
+      : college)));
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setPageError('');
+    setNotice('');
+    try {
+      const data = await adminRequest('/api/admin/resume-form-settings', {
+        method: 'PUT',
+        body: JSON.stringify({ colleges }),
+      });
+      setColleges(data.colleges || colleges);
+      setNotice('已保存填写简历的学院 / 专业配置，候选人端下拉选项已更新');
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const majorCount = colleges.reduce((sum, college) => sum + (college.majors || []).length, 0);
+
+  return (
+    <div className="registrations-page">
+      <section className="connection-log-summary">
+        <article><span>学院</span><strong>{colleges.length}</strong></article>
+        <article><span>专业</span><strong>{majorCount}</strong></article>
+      </section>
+
+      <SectionCard
+        title="填写简历设置"
+        icon={<GraduationCap size={18} />}
+        action={<span className="record-count">候选人端“简历分析 → 填写简历”的学院 / 专业下拉来源</span>}
+      >
+        <div className="connection-log-toolbar">
+          <button className="secondary-button" type="button" onClick={addCollege}>
+            <Plus size={15} />添加学院
+          </button>
+          <button className="secondary-button" type="button" onClick={loadSettings} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
+          </button>
+          <button className="primary-action admin-save-button" type="button" onClick={handleSave} disabled={saving}>
+            <Save size={15} className={saving ? 'spin' : ''} />
+            {saving ? '保存中…' : '保存配置'}
+          </button>
+        </div>
+
+        <p className="form-hint">
+          配置候选人填写简历时的学院与专业下拉选项。候选人登录后可在“简历分析 → 填写简历”中选择。
+        </p>
+
+        {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
+        {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
+
+        {!pageError && loading && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取配置</div>}
+        {!pageError && !loading && colleges.length === 0 && (
+          <div className="page-message">还没有配置学院，点击“添加学院”开始设置。</div>
+        )}
+
+        <div className="resume-settings-grid">
+          {colleges.map((college) => (
+            <article className="resume-settings-college" key={college.id}>
+              <div className="resume-settings-college-head">
+                <label className="field-block">
+                  <span>学院名称</span>
+                  <input
+                    value={college.name}
+                    onChange={(event) => updateCollegeName(college.id, event.target.value)}
+                    placeholder="例如：计算机学院"
+                  />
+                </label>
+                <button className="icon-button danger" type="button" title="删除学院" onClick={() => removeCollege(college.id)}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+
+              <div className="resume-settings-majors">
+                <div className="resume-settings-majors-head">
+                  <span>专业</span>
+                  <button className="secondary-button" type="button" onClick={() => addMajor(college.id)}>
+                    <Plus size={14} />添加专业
+                  </button>
+                </div>
+                {college.majors.length === 0 && <p className="form-hint">暂未添加专业。</p>}
+                {college.majors.map((major) => (
+                  <div className="resume-settings-major" key={major.id}>
+                    <label className="field-block">
+                      <span>专业名称</span>
+                      <input
+                        value={major.name}
+                        onChange={(event) => updateMajorName(college.id, major.id, event.target.value)}
+                        placeholder="例如：软件工程"
+                      />
+                    </label>
+                    <button className="icon-button danger" type="button" title="删除专业" onClick={() => removeMajor(college.id, major.id)}>
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
 
 function ConnectionLogsPage() {
   const [payload, setPayload] = useState({
@@ -2317,6 +2655,8 @@ const pageDescriptions = {
   interviews: '查看学生模拟训练进度与 AI 陪练运行情况',
   reports: '抽检成长报告的准确性与建议质量',
   organization: '维护学院、专业、班级和学生组织归属',
+  registrations: '导入学生注册信息，候选人端凭学号与姓名登录',
+  resumeFormSettings: '配置候选人填写简历的学院 / 专业下拉选项',
   candidates: '查看学生训练记录与成长表现',
   catalog: '维护目标岗位、专业方向与能力模型',
   agents: '查看 AI 陪练角色及使用情况',
@@ -2504,6 +2844,8 @@ function AdminApp({ admin, onSignedOut }) {
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
     if (activeView === 'catalog') return <CatalogPage permissions={adminData.permissions || {}} />;
     if (activeView === 'organization') return <OrganizationPage onView={openDetail} />;
+    if (activeView === 'registrations') return <RegistrationsPage />;
+    if (activeView === 'resumeFormSettings') return <ResumeFormSettingsPage />;
     const listProps = {
       data: adminData,
       onView: openDetail,

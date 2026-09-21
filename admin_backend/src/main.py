@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
@@ -36,7 +36,6 @@ from shared.career_catalog import (
     create_catalog_entity,
     create_version,
     delete_catalog_entity,
-    has_permission,
     import_catalog_excel,
     list_job_suggestions,
     list_versions,
@@ -53,7 +52,20 @@ PROJECT_DIR = Path(__file__).resolve().parents[2]
 USER_BACKEND_ENV_PATH = PROJECT_DIR / "backend" / ".env"
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = int(os.environ.get("ADMIN_SESSION_MAX_AGE", str(60 * 60 * 8)))
-ADMIN_ROLES = {"super_admin", "operations", "reviewer"}
+# 超级管理员账号定义在代码中（可用环境变量覆盖），不存入数据库由界面创建/删除。
+MASTER_ADMIN_EMAIL = normalize_email(os.environ.get("ADMIN_MASTER_EMAIL", "admin@ai.local"))
+MASTER_ADMIN_PASSWORD = os.environ.get("ADMIN_MASTER_PASSWORD", "Admin@2026!Master")
+MASTER_ADMIN_NAME = (os.environ.get("ADMIN_MASTER_NAME", "超级管理员") or "超级管理员").strip()[:80] or "超级管理员"
+# 固定权限点集合：下级管理员的权限通过这些权限点授予，角色名仅作展示标签。
+ALL_PERMISSIONS = (
+    "manageCatalog",
+    "manageStudents",
+    "manageOrganization",
+    "manageModelConfig",
+    "viewInterviews",
+    "viewReports",
+    "viewConnectionLogs",
+)
 LOGIN_WINDOW_SECONDS = 15 * 60
 MAX_LOGIN_ATTEMPTS = 8
 login_attempts: dict[str, dict[str, int | float]] = {}
@@ -112,7 +124,8 @@ def find_admin_by_session(request: Request) -> dict | None:
         return None
     return one(
         """
-        SELECT users.id, users.email, users.name, users.role, users.status, users.last_login_at
+        SELECT users.id, users.email, users.name, users.role, users.status,
+               users.permissions, users.student_scope, users.last_login_at
         FROM admin_sessions AS sessions
         JOIN admin_users AS users ON users.id = sessions.admin_user_id
         WHERE sessions.token_hash = ?
@@ -130,21 +143,120 @@ def require_admin(request: Request) -> dict:
     return admin
 
 
-def require_roles(*roles: str):
-    allowed = set(roles)
+def is_super_admin(admin: dict) -> bool:
+    """只有代码中定义的主管理员账号是超级管理员，避免自由文本角色越权。"""
+    return str(admin.get("email") or "").lower() == MASTER_ADMIN_EMAIL
+
+
+def admin_permissions(admin: dict) -> set[str]:
+    raw = admin.get("permissions")
+    if isinstance(raw, list):
+        return {str(item) for item in raw if item}
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return set()
+        return {str(item) for item in data if item} if isinstance(data, list) else set()
+    return set()
+
+
+def admin_student_scope(admin: dict) -> list[dict[str, str]] | None:
+    """返回管理员的学生数据范围；None 表示不受限（超级管理员），[] 表示无任何范围。"""
+    if is_super_admin(admin):
+        return None
+    raw = admin.get("student_scope")
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        return data if isinstance(data, list) else []
+    return []
+
+
+def scope_allows(scope: list[dict[str, str]] | None, college_id: str | None, program_id: str | None, class_id: str | None) -> bool:
+    if scope is None:
+        return True
+    if not scope:
+        return False
+    for entry in scope:
+        if entry.get("college") and entry["college"] != college_id:
+            continue
+        if entry.get("program") and entry["program"] != program_id:
+            continue
+        if entry.get("class") and entry["class"] != class_id:
+            continue
+        return True
+    return False
+
+
+def _ensure_class_in_scope(admin: dict, class_id: str) -> None:
+    """超级管理员不受限；普通管理员操作的班级必须落在其数据范围内。"""
+    scope = admin_student_scope(admin)
+    if scope is None:
+        return
+    row = one(
+        """
+        SELECT classes.id AS class_id, classes.program_id AS program_id,
+               programs.college_id AS college_id
+        FROM campus_classes AS classes
+        JOIN campus_programs AS programs ON programs.id = classes.program_id
+        WHERE classes.id = ?
+        """,
+        (class_id,),
+    )
+    if not row or not scope_allows(scope, row.get("college_id"), row.get("program_id"), class_id):
+        raise error(403, "该班级不在你管理的数据范围内。")
+
+
+def _ensure_student_in_scope(admin: dict, user_id: str) -> None:
+    """超级管理员不受限；普通管理员只能操作其数据范围内的学生。"""
+    scope = admin_student_scope(admin)
+    if scope is None:
+        return
+    row = one(
+        """
+        SELECT classes.id AS class_id, classes.program_id AS program_id,
+               programs.college_id AS college_id
+        FROM student_enrollments AS enrollments
+        LEFT JOIN campus_classes AS classes ON classes.id = enrollments.class_id
+        LEFT JOIN campus_programs AS programs ON programs.id = classes.program_id
+        WHERE enrollments.user_id = ?
+        """,
+        (user_id,),
+    )
+    college_id = row.get("college_id") if row else None
+    program_id = row.get("program_id") if row else None
+    class_id = row.get("class_id") if row else None
+    if not class_id or not scope_allows(scope, college_id, program_id, class_id):
+        raise error(403, "该学生不在你管理的数据范围内。")
+
+
+def require_super_admin(admin: dict = Depends(require_admin)) -> dict:
+    if not is_super_admin(admin):
+        raise error(403, "该操作仅限超级管理员执行。")
+    return admin
+
+
+def require_permission(*perms: str):
+    """依赖注入：超级管理员放行；普通管理员需持有任意一个权限点。"""
+    allowed = set(perms)
 
     def dependency(admin: dict = Depends(require_admin)) -> dict:
-        if admin.get("role") not in allowed:
+        if not is_super_admin(admin) and (not allowed or admin_permissions(admin).isdisjoint(allowed)):
             raise error(403, "当前管理员没有执行该操作的权限。")
         return admin
 
     return dependency
 
 
-def require_catalog_permission(permission: str):
+def require_catalog_permission(_permission: str):
     def dependency(admin: dict = Depends(require_admin)) -> dict:
-        if not has_permission(db, str(admin.get("role") or ""), permission):
-            raise error(403, "当前管理员没有执行该目录操作的权限。")
+        if not is_super_admin(admin) and "manageCatalog" not in admin_permissions(admin):
+            raise error(403, "当前管理员没有岗位知识库管理权限。")
         return admin
 
     return dependency
@@ -250,24 +362,31 @@ def clear_failed_logins(request: Request, email: str) -> None:
     login_attempts.pop(login_attempt_key(request, email), None)
 
 
-def bootstrap_admin_from_env() -> None:
-    email = normalize_email(os.environ.get("ADMIN_BOOTSTRAP_EMAIL"))
-    password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD", "")
-    name = os.environ.get("ADMIN_BOOTSTRAP_NAME", "系统管理员").strip() or "系统管理员"
-    role = os.environ.get("ADMIN_BOOTSTRAP_ROLE", "super_admin").strip()
-    if not email and not password:
-        return
-    if not is_valid_email(email) or len(password) < 12 or role not in ADMIN_ROLES:
-        raise RuntimeError("管理员初始化配置无效：邮箱需有效、密码至少 12 位且角色必须合法。")
+def bootstrap_master_admin() -> None:
+    """启动时确保代码定义的主管理员存在：角色固定为 super_admin，权限点为全量。"""
+    email = MASTER_ADMIN_EMAIL
+    if not is_valid_email(email) or len(MASTER_ADMIN_PASSWORD) < 12:
+        raise RuntimeError("主管理员配置无效：邮箱需有效且密码至少 12 位。")
+    permissions = json.dumps(list(ALL_PERMISSIONS))
     existing = one("SELECT id FROM admin_users WHERE email = ?", (email,))
     if existing:
+        db.execute(
+            """
+            UPDATE admin_users
+            SET name = ?, role = 'super_admin', status = 'normal',
+                password_hash = ?, permissions = ?, student_scope = NULL
+            WHERE email = ?
+            """,
+            (MASTER_ADMIN_NAME, hash_password(MASTER_ADMIN_PASSWORD), permissions, email),
+        )
+        db.commit()
         return
     db.execute(
         """
-        INSERT INTO admin_users (id, email, password_hash, name, role, status)
-        VALUES (?, ?, ?, ?, ?, 'normal')
+        INSERT INTO admin_users (id, email, password_hash, name, role, status, permissions, student_scope)
+        VALUES (?, ?, ?, ?, 'super_admin', 'normal', ?, NULL)
         """,
-        (str(uuid4()), email, hash_password(password), name[:80], role),
+        (str(uuid4()), email, hash_password(MASTER_ADMIN_PASSWORD), MASTER_ADMIN_NAME, permissions),
     )
     db.commit()
 
@@ -299,7 +418,7 @@ def list_audit_logs(limit: int = 50) -> list[dict[str, Any]]:
 def list_admin_accounts() -> list[dict[str, Any]]:
     users = all_rows(
         """
-        SELECT id, email, name, role, status, created_at, updated_at, last_login_at
+        SELECT id, email, name, role, status, permissions, student_scope, created_at, updated_at, last_login_at
         FROM admin_users ORDER BY created_at ASC
         """
     )
@@ -307,7 +426,7 @@ def list_admin_accounts() -> list[dict[str, Any]]:
 
 
 ensure_admin_schema()
-bootstrap_admin_from_env()
+bootstrap_master_admin()
 
 
 def count_value(sql: str, params: tuple = ()) -> int:
@@ -699,10 +818,15 @@ def list_candidates() -> list[dict[str, Any]]:
                users.counselor, users.student_status, users.must_change_password,
                users.temp_password_encrypted, users.status, users.created_at, users.last_login_at,
                profiles.target_role,
+               enrollments.class_id AS class_id, classes.program_id AS program_id,
+               programs.college_id AS college_id,
                COALESCE(interview_counts.interviews, 0) AS interviews,
                COALESCE(report_scores.average_score, 0) AS average_score
         FROM users
         LEFT JOIN profiles ON profiles.user_id = users.id
+        LEFT JOIN student_enrollments AS enrollments ON enrollments.user_id = users.id
+        LEFT JOIN campus_classes AS classes ON classes.id = enrollments.class_id
+        LEFT JOIN campus_programs AS programs ON programs.id = classes.program_id
         LEFT JOIN (
           SELECT user_id, COUNT(*) AS interviews
           FROM interview_sessions
@@ -716,27 +840,46 @@ def list_candidates() -> list[dict[str, Any]]:
         ORDER BY users.updated_at DESC, users.created_at DESC
         LIMIT 5000
         """
-    )
-    return [
+    ) 
+result = []
+
+for row in rows:
+    if scope is not None and not scope_allows(
+        scope,
+        row.get("college_id"),
+        row.get("program_id"),
+        row.get("class_id"),
+    ):
+        continue
+
+    result.append(
         {
             "id": row["id"],
             "name": row["name"],
             "email": row["email"],
             "studentNo": row.get("student_no") or "-",
-            "admissionYear": student_admission_year(row.get("student_no")) or "-",
+            "admissionYear": student_admission_year(row.get("student_no") or ""),
             "college": row.get("college") or "-",
             "className": row.get("class_name") or "-",
             "counselor": row.get("counselor") or "-",
             "role": row.get("target_role") or "未填写",
             "status": status_label(row.get("status")),
-            "activationStatus": "待首次改密" if row.get("must_change_password") else ("已激活" if row.get("student_no") else "待绑定学号"),
-            "canViewTemporaryPassword": bool(row.get("must_change_password") and row.get("temp_password_encrypted")),
+            "activationStatus": (
+                "准备改密"
+                if row.get("must_change_password")
+                else ("已激活" if row.get("student_no") else "待绑定学号")
+            ),
+            "canViewTemporaryPassword": bool(
+                row.get("must_change_password")
+                and row.get("temp_password_encrypted")
+            ),
             "interviews": int(row.get("interviews") or 0),
             "averageScore": round(float(row.get("average_score") or 0), 1),
             "lastLogin": str(row.get("last_login_at") or "-"),
         }
-        for row in rows
-    ]
+    )
+
+return result
 
 
 def get_candidate_detail(candidate_id: str) -> dict[str, Any]:
@@ -1148,7 +1291,7 @@ def list_campus_students() -> list[dict[str, Any]]:
     return result
 
 
-def campus_overview_data() -> dict[str, Any]:
+def campus_overview_data(scope: list[dict[str, str]] | None = None) -> dict[str, Any]:
     colleges = all_rows("SELECT id, code, name, status, created_at FROM campus_colleges ORDER BY name")
     programs = all_rows(
         """
@@ -1182,6 +1325,12 @@ def campus_overview_data() -> dict[str, Any]:
         students = list_campus_students()
     except Exception:
         students = []
+    if scope is not None:
+        students = [
+            item
+            for item in students
+            if scope_allows(scope, item.get("collegeId"), item.get("programId"), item.get("classId"))
+        ]
 
     program_counts: dict[str, int] = {}
     class_counts: dict[str, int] = {}
@@ -1267,12 +1416,12 @@ def build_metrics(reports: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 
 @app.get("/api/admin/campus/overview")
-def campus_overview(_admin: dict = Depends(require_roles("super_admin", "operations"))):
-    return campus_overview_data()
+def campus_overview(admin: dict = Depends(require_permission("manageStudents"))):
+    return campus_overview_data(scope=admin_student_scope(admin))
 
 
 @app.post("/api/admin/campus/colleges", status_code=201)
-async def create_campus_college(request: Request, admin: dict = Depends(require_roles("super_admin", "operations"))):
+async def create_campus_college(request: Request, admin: dict = Depends(require_permission("manageOrganization"))):
     validate_admin_origin(request)
     body = await request.json()
     code = _required_text(body, "code", "学院编码", 64).upper()
@@ -1290,7 +1439,7 @@ async def create_campus_college(request: Request, admin: dict = Depends(require_
 
 
 @app.post("/api/admin/campus/programs", status_code=201)
-async def create_campus_program(request: Request, admin: dict = Depends(require_roles("super_admin", "operations"))):
+async def create_campus_program(request: Request, admin: dict = Depends(require_permission("manageOrganization"))):
     validate_admin_origin(request)
     body = await request.json()
     college_id = _required_text(body, "collegeId", "所属学院", 36)
@@ -1319,7 +1468,7 @@ async def create_campus_program(request: Request, admin: dict = Depends(require_
 
 
 @app.post("/api/admin/campus/classes", status_code=201)
-async def create_campus_class(request: Request, admin: dict = Depends(require_roles("super_admin", "operations"))):
+async def create_campus_class(request: Request, admin: dict = Depends(require_permission("manageOrganization"))):
     validate_admin_origin(request)
     body = await request.json()
     program_id = _required_text(body, "programId", "所属专业", 36)
@@ -1351,7 +1500,7 @@ async def create_campus_class(request: Request, admin: dict = Depends(require_ro
 
 
 @app.put("/api/admin/campus/programs/{program_id}/jobs")
-async def replace_program_jobs(request: Request, program_id: str, admin: dict = Depends(require_roles("super_admin", "operations"))):
+async def replace_program_jobs(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
     validate_admin_origin(request)
     if not one("SELECT id FROM campus_programs WHERE id = ?", (program_id,)):
         raise error(404, "专业不存在。")
@@ -1385,13 +1534,16 @@ async def replace_program_jobs(request: Request, program_id: str, admin: dict = 
 
 
 @app.patch("/api/admin/campus/students/{user_id}")
-async def update_campus_student(request: Request, user_id: str, admin: dict = Depends(require_roles("super_admin", "operations"))):
+async def update_campus_student(request: Request, user_id: str, admin: dict = Depends(require_permission("manageStudents"))):
     validate_admin_origin(request)
+    _ensure_student_in_scope(admin, user_id)
     body = await request.json()
     existing = one("SELECT * FROM student_enrollments WHERE user_id = ?", (user_id,)) or {}
     class_id = body.get("classId", existing.get("class_id"))
     if class_id == "":
         class_id = None
+    if class_id:
+        _ensure_class_in_scope(admin, class_id)
     status = str(body.get("status", existing.get("status") or "active"))
     if status not in {"active", "inactive"}:
         raise error(400, "学生归属状态不正确。")
@@ -1412,11 +1564,12 @@ async def import_campus_students(
     request: Request,
     class_id: str,
     file: UploadFile = File(...),
-    admin: dict = Depends(require_roles("super_admin", "operations")),
+    admin: dict = Depends(require_permission("manageStudents")),
 ):
     validate_admin_origin(request)
     if not one("SELECT id FROM campus_classes WHERE id = ?", (class_id,)):
         raise error(404, "目标班级不存在。")
+    _ensure_class_in_scope(admin, class_id)
     content = await file.read()
     if len(content) > 2 * 1024 * 1024:
         raise error(400, "导入文件不能超过 2MB。")
@@ -1451,6 +1604,395 @@ async def import_campus_students(
         matched += 1
     record_audit(request, admin, "campus.students.import", target_type="campus_class", target_id=class_id, summary=f"批量归班成功 {matched} 人，未匹配 {len(unmatched)} 人")
     return {"matched": matched, "unmatched": unmatched[:100], "total": len(rows)}
+
+
+# ---------- 用户注册（学生登录白名单） ----------
+
+def _read_registration_rows(filename: str, content: bytes) -> list[dict[str, str]]:
+    """解析上传的 CSV / Excel 文件，返回统一的 dict 行列表。"""
+    lower = (filename or "").lower()
+    if lower.endswith((".xlsx", ".xlsm")):
+        try:
+            from openpyxl import load_workbook
+
+            sheet = load_workbook(io.BytesIO(content), read_only=True, data_only=True).active
+            rows = [["" if cell is None else str(cell).strip() for cell in row] for row in sheet.iter_rows(values_only=True)]
+        except Exception as exc:
+            raise error(400, "Excel 文件解析失败，请上传有效的 .xlsx 文件。") from exc
+        if not rows:
+            return []
+        headers = rows[0]
+        return [dict(zip(headers, row)) for row in rows[1:] if any(row)]
+    try:
+        decoded = content.decode("utf-8-sig")
+        return list(csv.DictReader(io.StringIO(decoded)))
+    except Exception as exc:
+        raise error(400, "请上传 UTF-8 编码的 CSV 文件或 .xlsx 文件。") from exc
+
+
+@app.post("/api/admin/student-registrations/import")
+async def import_student_registrations(
+    request: Request,
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_permission("manageStudents")),
+):
+    """导入学生注册信息（学号 / 姓名），候选人端凭此登录。"""
+    validate_admin_origin(request)
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise error(400, "导入文件不能超过 5MB。")
+    rows = _read_registration_rows(file.filename or "", content)
+    if not rows:
+        raise error(400, "文件中没有可导入的数据行。")
+    if len(rows) > 5000:
+        raise error(400, "单次最多导入 5000 名学生。")
+
+    imported = 0
+    updated = 0
+    skipped: list[dict[str, str]] = []
+    try:
+        db.begin()
+        for index, row in enumerate(rows, start=2):
+            student_no = str(row.get("学号") or row.get("student_no") or "").strip()
+            name = str(row.get("姓名") or row.get("name") or "").strip()
+            if not student_no or not name:
+                skipped.append({"row": str(index), "studentNo": student_no, "name": name, "reason": "缺少学号或姓名"})
+                continue
+            existing = one("SELECT id, user_id FROM student_registrations WHERE student_no = ?", (student_no,))
+            if existing:
+                db.execute(
+                    "UPDATE student_registrations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (name, existing["id"]),
+                )
+                updated += 1
+            else:
+                db.execute(
+                    "INSERT INTO student_registrations (id, student_no, name, imported_by) VALUES (?, ?, ?, ?)",
+                    (str(uuid4()), student_no, name, str(admin.get("email") or "")),
+                )
+                imported += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "student_registrations.import", summary=f"导入学生注册信息：新增 {imported} 人，更新 {updated} 人，跳过 {len(skipped)} 行")
+    return {"imported": imported, "updated": updated, "skipped": skipped[:100], "total": len(rows)}
+
+
+@app.get("/api/admin/student-registrations")
+def list_student_registrations(admin: dict = Depends(require_permission("manageStudents"))):
+    rows = all_rows(
+        """
+        SELECT id, student_no, name, user_id, imported_by, created_at, updated_at
+        FROM student_registrations
+        ORDER BY created_at DESC, student_no
+        """
+    )
+    return {
+        "registrations": [
+            {
+                "id": row["id"],
+                "studentNo": row["student_no"],
+                "name": row["name"],
+                "activated": bool(row["user_id"]),
+                "importedBy": row["imported_by"],
+                "createdAt": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.delete("/api/admin/student-registrations/{registration_id}")
+def delete_student_registration(request: Request, registration_id: str, admin: dict = Depends(require_permission("manageStudents"))):
+    validate_admin_origin(request)
+    existing = one("SELECT id, student_no, name, user_id FROM student_registrations WHERE id = ?", (registration_id,))
+    if not existing:
+        raise error(404, "该注册信息不存在。")
+    db.execute("DELETE FROM student_registrations WHERE id = ?", (registration_id,))
+    db.commit()
+    record_audit(request, admin, "student_registrations.delete", target_type="student_registration", target_id=registration_id, summary=f"删除学生注册信息：{existing['name']}（{existing['student_no']}）")
+    return {"ok": True}
+
+
+# ---------- 组织（组织结构一览 + 一键生成） ----------
+
+@app.get("/api/admin/organization/structure")
+def organization_structure(_admin: dict = Depends(require_admin)):
+    """组织结构一览：学院 → 专业 → 班级（含学生数统计）。供组织管理与权限范围选择使用。"""
+    data = campus_overview_data()
+    return {
+        "colleges": data["colleges"],
+        "programs": data["programs"],
+        "classes": data["classes"],
+        "standardMajors": data["standardMajors"],
+        "summary": data["summary"],
+    }
+
+
+def _organization_diff(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """比对导入行中的 学院 / 专业 / 班级 与现有结构，返回新增部分。"""
+    existing_colleges = {row["name"] for row in all_rows("SELECT name FROM campus_colleges")}
+    existing_programs = {
+        (row["college_name"], row["name"])
+        for row in all_rows(
+            """
+            SELECT colleges.name AS college_name, programs.name
+            FROM campus_programs AS programs
+            JOIN campus_colleges AS colleges ON colleges.id = programs.college_id
+            """
+        )
+    }
+    existing_classes = {
+        (row["program_name"], row["name"])
+        for row in all_rows(
+            """
+            SELECT programs.name AS program_name, classes.name
+            FROM campus_classes AS classes
+            JOIN campus_programs AS programs ON programs.id = classes.program_id
+            """
+        )
+    }
+    new_colleges: set[str] = set()
+    new_programs: set[tuple[str, str]] = set()
+    new_classes: set[tuple[str, str]] = set()
+    for item in rows:
+        college = item["college"]
+        program = item["program"]
+        class_name = item["class_name"]
+        if not college:
+            continue
+        if college not in existing_colleges:
+            new_colleges.add(college)
+        if program and (college, program) not in existing_programs:
+            new_programs.add((college, program))
+        if program and class_name and (program, class_name) not in existing_classes:
+            new_classes.add((program, class_name))
+    return {
+        "newColleges": sorted(new_colleges),
+        "newPrograms": sorted(f"{college} / {program}" for college, program in new_programs),
+        "newClasses": sorted(f"{program} / {class_name}" for program, class_name in new_classes),
+    }
+
+
+@app.post("/api/admin/organization/import")
+async def import_organization_structure(
+    request: Request,
+    file: UploadFile = File(...),
+    apply: bool = Query(False, description="是否直接应用结构变更（默认仅预览）"),
+    admin: dict = Depends(require_permission("manageOrganization")),
+):
+    """从用户注册导入表一键生成组织结构。
+
+    表格需包含「姓名」「学号」「学院」「专业」「班级」列。导入时：
+    1) 注册/更新学生（候选人端凭学号 + 姓名登录）；
+    2) 依据 学院 / 专业 / 班级 自动创建不存在的组织结构并归班；
+    3) 检测到新的组织结构时，先返回预览（requiresConfirmation），
+       由前端弹窗确认后再以 apply=1 实际写入。
+    """
+    validate_admin_origin(request)
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise error(400, "导入文件不能超过 5MB。")
+    rows = _read_registration_rows(file.filename or "", content)
+    if not rows:
+        raise error(400, "文件中没有可导入的数据行。")
+    if len(rows) > 5000:
+        raise error(400, "单次最多导入 5000 名学生。")
+
+    parsed: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for index, row in enumerate(rows, start=2):
+        student_no = str(row.get("学号") or row.get("student_no") or "").strip()
+        name = str(row.get("姓名") or row.get("name") or "").strip()
+        if not student_no or not name:
+            skipped.append({"row": str(index), "studentNo": student_no, "name": name, "reason": "缺少学号或姓名"})
+            continue
+        parsed.append(
+            {
+                "row": str(index),
+                "student_no": student_no,
+                "name": name,
+                "college": str(row.get("学院") or row.get("college") or "").strip(),
+                "program": str(row.get("专业") or row.get("major") or "").strip(),
+                "class_name": str(row.get("班级") or row.get("class") or "").strip(),
+            }
+        )
+
+    diff = _organization_diff(parsed)
+    has_new = bool(diff["newColleges"] or diff["newPrograms"] or diff["newClasses"])
+    if not apply and has_new:
+        return {
+            "applied": False,
+            "requiresConfirmation": True,
+            **diff,
+            "total": len(rows),
+            "valid": len(parsed),
+            "skipped": skipped[:100],
+        }
+
+    try:
+        db.begin()
+        college_ids: dict[str, str] = {row["name"]: row["id"] for row in all_rows("SELECT id, name FROM campus_colleges")}
+        program_ids: dict[tuple[str, str], str] = {
+            (row["college_id"], row["name"]): row["id"] for row in all_rows("SELECT id, college_id, name FROM campus_programs")
+        }
+        class_ids: dict[tuple[str, str], str] = {
+            (row["program_id"], row["name"]): row["id"] for row in all_rows("SELECT id, program_id, name FROM campus_classes")
+        }
+        registered = 0
+        updated_reg = 0
+        new_colleges_created = 0
+        new_programs_created = 0
+        new_classes_created = 0
+        assigned = 0
+        for item in parsed:
+            student_no = item["student_no"]
+            existing_reg = one("SELECT id FROM student_registrations WHERE student_no = ?", (student_no,))
+            if existing_reg:
+                db.execute(
+                    "UPDATE student_registrations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (item["name"], existing_reg["id"]),
+                )
+                updated_reg += 1
+            else:
+                db.execute(
+                    "INSERT INTO student_registrations (id, student_no, name, imported_by) VALUES (?, ?, ?, ?)",
+                    (str(uuid4()), student_no, item["name"], str(admin.get("email") or "")),
+                )
+                registered += 1
+
+            college = item["college"]
+            if not college:
+                continue
+            college_id = college_ids.get(college)
+            if not college_id:
+                college_id = str(uuid4())
+                db.execute(
+                    "INSERT INTO campus_colleges (id, code, name, status) VALUES (?, ?, ?, 'active')",
+                    (college_id, f"ORG-{uuid4().hex[:10]}", college),
+                )
+                college_ids[college] = college_id
+                new_colleges_created += 1
+            program = item["program"]
+            if not program:
+                continue
+            program_id = program_ids.get((college_id, program))
+            if not program_id:
+                program_id = str(uuid4())
+                db.execute(
+                    "INSERT INTO campus_programs (id, college_id, name, status) VALUES (?, ?, ?, 'active')",
+                    (program_id, college_id, program),
+                )
+                program_ids[(college_id, program)] = program_id
+                new_programs_created += 1
+            class_name = item["class_name"]
+            if not class_name:
+                continue
+            class_id = class_ids.get((program_id, class_name))
+            if not class_id:
+                class_id = str(uuid4())
+                db.execute(
+                    "INSERT INTO campus_classes (id, program_id, name, invite_code, status) VALUES (?, ?, ?, ?, 'active')",
+                    (class_id, program_id, class_name, f"CAMPUS-{uuid4().hex[:10]}"),
+                )
+                class_ids[(program_id, class_name)] = class_id
+                new_classes_created += 1
+
+            reg = one("SELECT user_id FROM student_registrations WHERE student_no = ?", (student_no,))
+            if reg and reg["user_id"] and one("SELECT id FROM users WHERE id = ?", (reg["user_id"],)):
+                upsert_student_enrollment(
+                    reg["user_id"],
+                    class_id=class_id,
+                    student_no=student_no,
+                    status="active",
+                    focus_flag=False,
+                    note="",
+                )
+                assigned += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(
+        request,
+        admin,
+        "organization.import",
+        summary=(
+            f"一键生成组织结构：新增学院 {new_colleges_created} 个、专业 {new_programs_created} 个、班级 {new_classes_created} 个，"
+            f"注册学生 {registered} 人、更新 {updated_reg} 人、归班 {assigned} 人"
+        ),
+    )
+    return {
+        "applied": True,
+        "registered": registered,
+        "updated": updated_reg,
+        "newCollegesCreated": new_colleges_created,
+        "newProgramsCreated": new_programs_created,
+        "newClassesCreated": new_classes_created,
+        "assigned": assigned,
+        "total": len(rows),
+        "valid": len(parsed),
+        "skipped": skipped[:100],
+    }
+
+
+@app.get("/api/admin/resume-form-settings")
+def get_resume_form_settings(admin: dict = Depends(require_admin)):
+    """读取候选人“填写简历”的学院/专业下拉配置。"""
+    row = one("SELECT colleges FROM resume_form_settings ORDER BY updated_at DESC LIMIT 1")
+    colleges = []
+    if row:
+        try:
+            colleges = json.loads(row["colleges"] or "[]")
+        except (TypeError, ValueError):
+            colleges = []
+    return {"colleges": colleges if isinstance(colleges, list) else []}
+
+
+@app.put("/api/admin/resume-form-settings")
+async def update_resume_form_settings(request: Request, admin: dict = Depends(require_super_admin)):
+    """保存候选人“填写简历”的学院/专业下拉配置。"""
+    validate_admin_origin(request)
+    body = await request.json()
+    colleges = body.get("colleges")
+    if not isinstance(colleges, list):
+        raise error(400, "学院配置格式不正确。")
+    if len(colleges) > 200:
+        raise error(400, "学院数量过多，请控制在 200 个以内。")
+    for college in colleges:
+        if not isinstance(college, dict) or not str(college.get("name") or "").strip():
+            raise error(400, "每个学院都必须有名称。")
+        majors = college.get("majors")
+        if majors is not None and not isinstance(majors, list):
+            raise error(400, "学院下的专业配置格式不正确。")
+        if majors and len(majors) > 500:
+            raise error(400, "单个学院的专业数量过多，请控制在 500 个以内。")
+        for major in majors or []:
+            if not isinstance(major, dict) or not str(major.get("name") or "").strip():
+                raise error(400, "每个专业都必须有名称。")
+
+    try:
+        db.begin()
+        db.execute("DELETE FROM resume_form_settings")
+        db.execute(
+            "INSERT INTO resume_form_settings (id, colleges, updated_by) VALUES (?, ?, ?)",
+            (str(uuid4()), json.dumps(colleges, ensure_ascii=False), str(admin.get("email") or "")),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    college_count = len(colleges)
+    major_count = sum(len(college.get("majors") or []) for college in colleges)
+    record_audit(
+        request,
+        admin,
+        "resume_form_settings.update",
+        target_type="resume_form_settings",
+        summary=f"更新填写简历设置：{college_count} 个学院，{major_count} 个专业",
+    )
+    return {"ok": True, "colleges": colleges}
 
 
 @app.get("/api/admin/health")
@@ -1698,9 +2240,11 @@ async def admin_login(request: Request, response: Response):
         raise error(400, "请输入有效的管理员邮箱和密码。")
     if is_login_limited(request, email):
         raise error(429, "登录尝试过于频繁，请稍后再试。")
+    if email == MASTER_ADMIN_EMAIL:
+        bootstrap_master_admin()  # 代码定义的主管理员账号始终可用
     admin = one(
         """
-        SELECT id, email, password_hash, name, role, status, last_login_at
+        SELECT id, email, password_hash, name, role, status, permissions, student_scope, last_login_at
         FROM admin_users WHERE email = ?
         """,
         (email,),
@@ -1722,7 +2266,7 @@ async def admin_login(request: Request, response: Response):
     db.commit()
     create_admin_session(response, request, admin["id"])
     current_admin = one(
-        "SELECT id, email, name, role, status, last_login_at FROM admin_users WHERE id = ?",
+        "SELECT id, email, name, role, status, permissions, student_scope, last_login_at FROM admin_users WHERE id = ?",
         (admin["id"],),
     )
     record_audit(request, current_admin, "admin.login", target_type="admin_user", target_id=admin["id"], summary="管理员登录成功")
@@ -1752,7 +2296,7 @@ def admin_connection_logs(
     event_type: str = "",
     query: str = "",
     limit: int = 300,
-    _admin: dict = Depends(require_roles("super_admin", "operations", "reviewer")),
+    _admin: dict = Depends(require_admin),
 ):
     normalized_level = level.strip().lower()
     if normalized_level and normalized_level not in {"info", "warning", "error"}:
@@ -1775,31 +2319,38 @@ def admin_connection_logs(
 def snapshot(admin: dict = Depends(require_admin)):
     try:
         reports = list_reports()
-        role = admin.get("role")
-        can_operate = role in {"super_admin", "operations"}
-        is_super_admin = role == "super_admin"
+        is_super = is_super_admin(admin)
+        perms = set(ALL_PERMISSIONS) if is_super else admin_permissions(admin)
+        can_students = "manageStudents" in perms
+        can_interviews = "viewInterviews" in perms
+        can_reports = "viewReports" in perms
+        can_model = "manageModelConfig" in perms
+        can_catalog = "manageCatalog" in perms
+        scope = admin_student_scope(admin)
         return {
             "metrics": build_metrics(reports),
-            "candidates": list_candidates() if can_operate else [],
-            "interviews": list_interviews() if can_operate else [],
-            "reports": reports,
-            "agents": list_agent_templates() if can_operate else [],
-            "auditLogs": list_audit_logs(30) if is_super_admin else [],
-            "adminUsers": list_admin_accounts() if is_super_admin else [],
-            "settings": build_settings() if is_super_admin else {},
+            "candidates": list_candidates(scope=scope) if can_students else [],
+            "interviews": list_interviews() if can_interviews else [],
+            "reports": reports if can_reports else [],
+            "agents": list_agent_templates() if can_model else [],
+            "auditLogs": list_audit_logs(30) if is_super else [],
+            "adminUsers": list_admin_accounts() if is_super else [],
+            "settings": build_settings() if is_super else {},
             "permissions": {
-                "canViewCandidates": can_operate,
-                "canViewInterviews": can_operate,
-                "canViewReports": True,
-                "canViewAgents": can_operate,
+                "canViewCandidates": can_students or can_interviews,
+                "canViewInterviews": can_interviews,
+                "canViewReports": can_reports,
+                "canViewAgents": can_model,
                 "canViewConnectionLogs": True,
-                "canManageCampus": can_operate,
-                "canManageSettings": is_super_admin,
-                "canViewAudit": is_super_admin,
-                "canViewCatalog": has_permission(db, str(role or ""), "read"),
-                "canWriteCatalog": has_permission(db, str(role or ""), "write"),
-                "canImportCatalog": has_permission(db, str(role or ""), "import"),
-                "canPublishCatalog": has_permission(db, str(role or ""), "publish"),
+                "canManageStudents": can_students,
+                "canManageOrganization": "manageOrganization" in perms,
+                "canManageCampus": can_students or "manageOrganization" in perms,
+                "canManageSettings": is_super,
+                "canViewAudit": is_super,
+                "canViewCatalog": can_catalog,
+                "canWriteCatalog": can_catalog,
+                "canImportCatalog": can_catalog,
+                "canPublishCatalog": can_catalog,
             },
             "admin": sanitize_admin(admin),
         }
@@ -1965,28 +2516,28 @@ def reset_student_password(
 
 
 @app.get("/api/admin/candidates/{candidate_id}")
-def candidate_detail(request: Request, candidate_id: str, admin: dict = Depends(require_roles("super_admin", "operations"))):
+def candidate_detail(request: Request, candidate_id: str, admin: dict = Depends(require_permission("viewInterviews", "manageStudents"))):
     result = {"candidate": get_candidate_detail(candidate_id)}
     record_audit(request, admin, "candidate.view", target_type="candidate", target_id=candidate_id, summary="查看候选人详情")
     return result
 
 
 @app.get("/api/admin/interviews/{interview_id}")
-def interview_detail(request: Request, interview_id: str, admin: dict = Depends(require_roles("super_admin", "operations"))):
+def interview_detail(request: Request, interview_id: str, admin: dict = Depends(require_permission("viewInterviews"))):
     result = get_interview_detail(interview_id)
     record_audit(request, admin, "interview.view", target_type="interview", target_id=interview_id, summary="查看面试详情")
     return result
 
 
 @app.get("/api/admin/reports/{report_id}")
-def report_detail(request: Request, report_id: str, admin: dict = Depends(require_roles("super_admin", "operations", "reviewer"))):
+def report_detail(request: Request, report_id: str, admin: dict = Depends(require_permission("viewReports"))):
     result = {"report": get_report_detail(report_id)}
     record_audit(request, admin, "report.view", target_type="report", target_id=report_id, summary="查看面试报告")
     return result
 
 
 @app.patch("/api/admin/reports/{report_id}/review")
-async def review_report(request: Request, report_id: str, admin: dict = Depends(require_roles("super_admin", "reviewer"))):
+async def review_report(request: Request, report_id: str, admin: dict = Depends(require_permission("viewReports"))):
     validate_admin_origin(request)
     body = await request.json()
     status = str(body.get("status") or "").strip()
@@ -2014,63 +2565,250 @@ async def review_report(request: Request, report_id: str, admin: dict = Depends(
 
 
 @app.get("/api/admin/agents/{agent_name}")
-def agent_detail(agent_name: str, _admin: dict = Depends(require_roles("super_admin", "operations"))):
+def agent_detail(agent_name: str, _admin: dict = Depends(require_permission("manageModelConfig"))):
     return get_agent_detail(agent_name)
 
 
 @app.get("/api/admin/users")
-def list_admin_users(_admin: dict = Depends(require_roles("super_admin"))):
+def list_admin_users(_admin: dict = Depends(require_super_admin)):
     return {"admins": list_admin_accounts()}
 
 
+def _validate_permissions(values: Any) -> list[str]:
+    if not values:
+        return []
+    if not isinstance(values, list):
+        raise error(400, "权限列表格式不正确。")
+    result: list[str] = []
+    for item in values:
+        key = str(item or "").strip()
+        if key not in ALL_PERMISSIONS:
+            raise error(400, f"包含未知权限点：{key}")
+        if key not in result:
+            result.append(key)
+    return result
+
+
+def _validate_scope(values: Any) -> list[dict[str, str]]:
+    if not values:
+        return []
+    if not isinstance(values, list) or len(values) > 500:
+        raise error(400, "数据范围格式不正确。")
+    normalized: list[dict[str, str]] = []
+    for entry in values:
+        if not isinstance(entry, dict):
+            raise error(400, "数据范围格式不正确。")
+        college = str(entry.get("college") or "").strip()
+        program = str(entry.get("program") or "").strip()
+        class_id = str(entry.get("class") or "").strip()
+        if not college or not one("SELECT id FROM campus_colleges WHERE id = ?", (college,)):
+            raise error(400, "数据范围包含不存在的学院。")
+        if program and not one("SELECT id FROM campus_programs WHERE id = ?", (program,)):
+            raise error(400, "数据范围包含不存在的专业。")
+        if class_id and not one("SELECT id FROM campus_classes WHERE id = ?", (class_id,)):
+            raise error(400, "数据范围包含不存在的班级。")
+        normalized.append({"college": college, "program": program, "class": class_id})
+    return normalized
+
+
+def _merge_scope(scope_a: list[dict[str, str]], scope_b: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[tuple[str, str, str]] = set()
+    result: list[dict[str, str]] = []
+    for entry in list(scope_a) + list(scope_b):
+        key = (entry.get("college") or "", entry.get("program") or "", entry.get("class") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"college": entry.get("college") or "", "program": entry.get("program") or "", "class": entry.get("class") or ""})
+    return result
+
+
 @app.post("/api/admin/users", status_code=201)
-async def create_admin_user(request: Request, admin: dict = Depends(require_roles("super_admin"))):
+async def create_admin_user(request: Request, admin: dict = Depends(require_super_admin)):
     validate_admin_origin(request)
     body = await request.json()
     email = normalize_email(body.get("email"))
     password = str(body.get("password") or "")
     name = str(body.get("name") or "").strip()
-    role = str(body.get("role") or "reviewer").strip()
-    if not is_valid_email(email) or len(password) < 12 or not name or len(name) > 80 or role not in ADMIN_ROLES:
-        raise error(400, "管理员邮箱、姓名、角色或密码不符合要求；密码至少 12 位。")
+    role = str(body.get("role") or "管理员").strip()[:80] or "管理员"
+    permissions = _validate_permissions(body.get("permissions"))
+    scope = _validate_scope(body.get("studentScope") or body.get("student_scope"))
+    if not is_valid_email(email) or len(password) < 12 or not name or len(name) > 80:
+        raise error(400, "管理员邮箱、姓名或密码不符合要求；密码至少 12 位。")
+    if email == MASTER_ADMIN_EMAIL:
+        raise error(400, "主管理员账号由代码定义，不能重复创建。")
     if one("SELECT id FROM admin_users WHERE email = ?", (email,)):
         raise error(409, "该管理员邮箱已经存在。")
     admin_id = str(uuid4())
     db.execute(
-        "INSERT INTO admin_users (id, email, password_hash, name, role, status) VALUES (?, ?, ?, ?, ?, 'normal')",
-        (admin_id, email, hash_password(password), name, role),
+        """
+        INSERT INTO admin_users (id, email, password_hash, name, role, status, permissions, student_scope)
+        VALUES (?, ?, ?, ?, ?, 'normal', ?, ?)
+        """,
+        (admin_id, email, hash_password(password), name, role, json.dumps(permissions), json.dumps(scope) if scope else None),
     )
     db.commit()
-    record_audit(request, admin, "admin_user.create", target_type="admin_user", target_id=admin_id, summary=f"创建管理员 {email}，角色 {role}")
-    created = one("SELECT id, email, name, role, status, last_login_at FROM admin_users WHERE id = ?", (admin_id,))
+    record_audit(
+        request,
+        admin,
+        "admin_user.create",
+        target_type="admin_user",
+        target_id=admin_id,
+        summary=f"创建管理员 {email}，角色 {role}，权限 {','.join(permissions) or '无'}",
+    )
+    created = one("SELECT id, email, name, role, status, permissions, student_scope, last_login_at FROM admin_users WHERE id = ?", (admin_id,))
     return {"admin": sanitize_admin(created)}
 
 
 @app.patch("/api/admin/users/{admin_id}")
-async def update_admin_user(request: Request, admin_id: str, admin: dict = Depends(require_roles("super_admin"))):
+async def update_admin_user(request: Request, admin_id: str, admin: dict = Depends(require_super_admin)):
     validate_admin_origin(request)
-    target = one("SELECT id, email, name, role, status FROM admin_users WHERE id = ?", (admin_id,))
+    target = one("SELECT id, email, name, role, status, permissions, student_scope FROM admin_users WHERE id = ?", (admin_id,))
     if not target:
         raise error(404, "管理员不存在。")
+    if str(target.get("email") or "").lower() == MASTER_ADMIN_EMAIL:
+        raise error(400, "主管理员账号由代码定义，不能修改或禁用。")
     body = await request.json()
-    role = str(body.get("role") or target["role"]).strip()
     status = str(body.get("status") or target["status"]).strip()
     name = str(body.get("name") or target["name"]).strip()
-    if role not in ADMIN_ROLES or status not in {"normal", "disabled"} or not name or len(name) > 80:
-        raise error(400, "管理员姓名、角色或状态不合法。")
+    role = str(body.get("role") or target.get("role") or "管理员").strip()[:80] or "管理员"
+    if status not in {"normal", "disabled"} or not name or len(name) > 80:
+        raise error(400, "管理员姓名或状态不合法。")
+    if "permissions" in body:
+        permissions = _validate_permissions(body.get("permissions"))
+    else:
+        permissions = sorted(admin_permissions(target))
+    if "studentScope" in body or "student_scope" in body:
+        scope = _validate_scope(body.get("studentScope") or body.get("student_scope"))
+    else:
+        scope = admin_student_scope(target) or []
     if admin_id == admin["id"] and status != "normal":
         raise error(400, "不能禁用当前登录的管理员账号。")
-    db.execute("UPDATE admin_users SET name = ?, role = ?, status = ? WHERE id = ?", (name, role, status, admin_id))
+    db.execute(
+        "UPDATE admin_users SET name = ?, role = ?, status = ?, permissions = ?, student_scope = ? WHERE id = ?",
+        (name, role, status, json.dumps(permissions), json.dumps(scope) if scope else None, admin_id),
+    )
     if status == "disabled":
         db.execute("DELETE FROM admin_sessions WHERE admin_user_id = ?", (admin_id,))
     db.commit()
-    record_audit(request, admin, "admin_user.update", target_type="admin_user", target_id=admin_id, summary=f"更新管理员 {target['email']}：role={role}, status={status}")
-    updated = one("SELECT id, email, name, role, status, last_login_at FROM admin_users WHERE id = ?", (admin_id,))
+    record_audit(
+        request,
+        admin,
+        "admin_user.update",
+        target_type="admin_user",
+        target_id=admin_id,
+        summary=f"更新管理员 {target['email']}：status={status}，权限 {','.join(permissions) or '无'}",
+    )
+    updated = one("SELECT id, email, name, role, status, permissions, student_scope, last_login_at FROM admin_users WHERE id = ?", (admin_id,))
     return {"admin": sanitize_admin(updated)}
 
 
+def _permission_request_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "requesterEmail": row["requester_email"],
+        "requesterName": row.get("requester_name") or "",
+        "permissions": json.loads(row.get("permissions") or "[]"),
+        "studentScope": json.loads(row.get("student_scope") or "[]"),
+        "reason": row.get("reason") or "",
+        "status": row.get("status"),
+        "reviewedBy": row.get("reviewed_by"),
+        "reviewedAt": str(row.get("reviewed_at") or "-"),
+        "createdAt": str(row.get("created_at") or "-"),
+    }
+
+
+def get_permission_request(request_id: str) -> dict[str, Any] | None:
+    row = one("SELECT * FROM admin_permission_requests WHERE id = ?", (request_id,))
+    return _permission_request_payload(row) if row else None
+
+
+@app.post("/api/admin/permission-requests", status_code=201)
+async def create_permission_request(request: Request, admin: dict = Depends(require_admin)):
+    validate_admin_origin(request)
+    body = await request.json()
+    permissions = _validate_permissions(body.get("permissions"))
+    scope = _validate_scope(body.get("studentScope") or body.get("student_scope"))
+    reason = str(body.get("reason") or "").strip()[:500]
+    if not permissions and not scope:
+        raise error(400, "请选择需要申请的权限或数据范围。")
+    if one(
+        "SELECT id FROM admin_permission_requests WHERE admin_user_id = ? AND status = 'pending'",
+        (admin["id"],),
+    ):
+        raise error(409, "已存在待审核的权限申请，请等待超级管理员处理。")
+    req_id = str(uuid4())
+    db.execute(
+        """
+        INSERT INTO admin_permission_requests
+        (id, admin_user_id, requester_email, requester_name, permissions, student_scope, reason, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+        """,
+        (req_id, admin["id"], admin["email"], admin.get("name") or "", json.dumps(permissions), json.dumps(scope) if scope else None, reason or None),
+    )
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "permission_request.create",
+        target_type="permission_request",
+        target_id=req_id,
+        summary=f"申请权限 {','.join(permissions) or '无'} 与数据范围",
+    )
+    return {"request": get_permission_request(req_id)}
+
+
+@app.get("/api/admin/permission-requests")
+def list_permission_requests(admin: dict = Depends(require_admin)):
+    if is_super_admin(admin):
+        rows = all_rows("SELECT * FROM admin_permission_requests ORDER BY created_at DESC LIMIT 200")
+    else:
+        rows = all_rows(
+            "SELECT * FROM admin_permission_requests WHERE admin_user_id = ? ORDER BY created_at DESC LIMIT 100",
+            (admin["id"],),
+        )
+    return {"requests": [_permission_request_payload(row) for row in rows]}
+
+
+@app.patch("/api/admin/permission-requests/{request_id}")
+async def review_permission_request(request: Request, request_id: str, admin: dict = Depends(require_super_admin)):
+    validate_admin_origin(request)
+    body = await request.json()
+    action = str(body.get("action") or "").strip()
+    if action not in {"approve", "reject"}:
+        raise error(400, "审核动作必须是 approve 或 reject。")
+    target = one("SELECT * FROM admin_permission_requests WHERE id = ?", (request_id,))
+    if not target:
+        raise error(404, "权限申请不存在。")
+    if target.get("status") != "pending":
+        raise error(400, "该申请已处理，不能重复审核。")
+    if action == "approve":
+        current = one("SELECT permissions, student_scope FROM admin_users WHERE id = ?", (target["admin_user_id"],))
+        if current:
+            merged_perms = sorted(set(admin_permissions(current)) | set(json.loads(target["permissions"] or "[]")))
+            merged_scope = _merge_scope(admin_student_scope(current) or [], json.loads(target["student_scope"] or "[]"))
+            db.execute(
+                "UPDATE admin_users SET permissions = ?, student_scope = ? WHERE id = ?",
+                (json.dumps(merged_perms), json.dumps(merged_scope) if merged_scope else None, target["admin_user_id"]),
+            )
+        db.execute(
+            "UPDATE admin_permission_requests SET status = 'approved', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (admin["email"], request_id),
+        )
+        db.commit()
+        record_audit(request, admin, "permission_request.approve", target_type="permission_request", target_id=request_id, summary=f"通过 {target['requester_email']} 的权限申请")
+        return {"request": get_permission_request(request_id)}
+    db.execute(
+        "UPDATE admin_permission_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (admin["email"], request_id),
+    )
+    db.commit()
+    record_audit(request, admin, "permission_request.reject", target_type="permission_request", target_id=request_id, summary=f"驳回 {target['requester_email']} 的权限申请")
+    return {"request": get_permission_request(request_id)}
+
+
 @app.patch("/api/admin/settings")
-async def update_settings(request: Request, admin: dict = Depends(require_roles("super_admin"))):
+async def update_settings(request: Request, admin: dict = Depends(require_super_admin)):
     validate_admin_origin(request)
     body = await request.json()
     allowed_fields = {
@@ -2141,7 +2879,7 @@ async def update_settings(request: Request, admin: dict = Depends(require_roles(
 
 
 @app.post("/api/admin/settings/report-providers/test")
-def test_report_providers(request: Request, admin: dict = Depends(require_roles("super_admin"))):
+def test_report_providers(request: Request, admin: dict = Depends(require_super_admin)):
     validate_admin_origin(request)
     from backend.src.provider_diagnostics import diagnose_report_providers
 

@@ -249,8 +249,10 @@ def ensure_admin_schema() -> None:
               email TEXT NOT NULL UNIQUE,
               password_hash TEXT NOT NULL,
               name TEXT NOT NULL,
-              role TEXT NOT NULL DEFAULT 'reviewer',
+              role TEXT NOT NULL DEFAULT '管理员',
               status TEXT NOT NULL DEFAULT 'normal',
+              permissions TEXT NOT NULL DEFAULT '[]',
+              student_scope TEXT,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               last_login_at TIMESTAMP
@@ -282,6 +284,33 @@ def ensure_admin_schema() -> None:
               success INTEGER NOT NULL DEFAULT 1,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE SET NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS admin_permission_requests (
+              id TEXT PRIMARY KEY,
+              admin_user_id TEXT NOT NULL,
+              requester_email TEXT NOT NULL,
+              requester_name TEXT,
+              permissions TEXT NOT NULL DEFAULT '[]',
+              student_scope TEXT,
+              reason TEXT,
+              status TEXT NOT NULL DEFAULT 'pending',
+              reviewed_by TEXT,
+              reviewed_at TIMESTAMP,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS student_registrations (
+              id TEXT PRIMARY KEY,
+              student_no TEXT NOT NULL UNIQUE,
+              name TEXT NOT NULL,
+              user_id TEXT,
+              imported_by TEXT,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """,
             """
@@ -353,6 +382,15 @@ def ensure_admin_schema() -> None:
             "CREATE INDEX IF NOT EXISTS idx_campus_programs_college ON campus_programs(college_id)",
             "CREATE INDEX IF NOT EXISTS idx_campus_classes_program ON campus_classes(program_id)",
             "CREATE INDEX IF NOT EXISTS idx_student_enrollments_class ON student_enrollments(class_id)",
+            """
+            CREATE TABLE IF NOT EXISTS resume_form_settings (
+              id TEXT PRIMARY KEY,
+              colleges TEXT NOT NULL,
+              updated_by TEXT,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
         ]
     else:
         statements = [
@@ -362,8 +400,10 @@ def ensure_admin_schema() -> None:
               email VARCHAR(255) NOT NULL UNIQUE,
               password_hash VARCHAR(255) NOT NULL,
               name VARCHAR(80) NOT NULL,
-              role VARCHAR(32) NOT NULL DEFAULT 'reviewer',
+              role VARCHAR(80) NOT NULL DEFAULT '管理员',
               status VARCHAR(32) NOT NULL DEFAULT 'normal',
+              permissions TEXT NULL,
+              student_scope TEXT NULL,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
               last_login_at TIMESTAMP NULL
@@ -399,6 +439,23 @@ def ensure_admin_schema() -> None:
               INDEX idx_admin_audit_created_at (created_at),
               CONSTRAINT fk_admin_audit_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE SET NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS admin_permission_requests (
+              id VARCHAR(36) PRIMARY KEY,
+              admin_user_id VARCHAR(36) NOT NULL,
+              requester_email VARCHAR(255) NOT NULL,
+              requester_name VARCHAR(80),
+              permissions TEXT NOT NULL,
+              student_scope TEXT,
+              reason VARCHAR(1000),
+              status VARCHAR(24) NOT NULL DEFAULT 'pending',
+              reviewed_by VARCHAR(255),
+              reviewed_at TIMESTAMP NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              INDEX idx_admin_perm_requests_user (admin_user_id),
+              CONSTRAINT fk_admin_perm_request_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,
             """
             CREATE TABLE IF NOT EXISTS campus_colleges (
@@ -467,6 +524,15 @@ def ensure_admin_schema() -> None:
               CONSTRAINT fk_program_job_role_program FOREIGN KEY (program_id) REFERENCES campus_programs(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
+            """
+            CREATE TABLE IF NOT EXISTS resume_form_settings (
+              id VARCHAR(36) PRIMARY KEY,
+              colleges TEXT NOT NULL,
+              updated_by VARCHAR(255),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
         ]
 
     for statement in statements:
@@ -474,6 +540,7 @@ def ensure_admin_schema() -> None:
         cursor.close()
     db.commit()
 
+    _migrate_admin_users()
     # Student accounts live in the candidate backend's users table.  The admin
     # service also applies these additive migrations so either service can be
     # started first during deployment.
@@ -520,3 +587,32 @@ def ensure_admin_schema() -> None:
 
     ensure_catalog_schema(db, DB_ENGINE)
     seed_computer_pilot(db)
+
+
+def _migrate_admin_users() -> None:
+    """兼容升级：为 admin_users 补充权限列；仅在首次迁移时清空旧的角色制管理员账号。
+
+    新权限模型下，历史角色（reviewer / operations）不再参与权限判断，
+    管理端启动后只会保留代码中定义的主管理员，其余账号由主管理员重新创建。
+    """
+    if DB_ENGINE == "sqlite":
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(admin_users)").fetchall()}
+        if "permissions" not in columns:
+            db.execute("ALTER TABLE admin_users ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]'")
+        if "student_scope" not in columns:
+            db.execute("ALTER TABLE admin_users ADD COLUMN student_scope TEXT")
+        missing = [column for column in ("permissions", "student_scope") if column not in columns]
+    else:
+        rows = all_rows(
+            """
+            SELECT COLUMN_NAME FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'admin_users'
+            """
+        )
+        existing = {str(row.get("COLUMN_NAME") or "") for row in rows}
+        missing = [column for column in ("permissions", "student_scope") if column not in existing]
+        for column in missing:
+            db.execute(f"ALTER TABLE admin_users ADD COLUMN {column} TEXT NULL")
+    if missing:
+        db.execute("DELETE FROM admin_users")
+        db.commit()

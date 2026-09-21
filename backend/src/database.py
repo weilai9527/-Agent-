@@ -525,6 +525,50 @@ def _init_sqlite_db() -> None:
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
+        -- 学生注册白名单：由管理端导入（学号 + 姓名），候选人端据此登录
+        CREATE TABLE IF NOT EXISTS student_registrations (
+          id TEXT PRIMARY KEY,
+          student_no TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          user_id TEXT,
+          imported_by TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_student_registrations_name ON student_registrations(name);
+
+        -- 候选人填写的简历（“简历分析 → 填写简历”模块）
+        CREATE TABLE IF NOT EXISTS resume_forms (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL UNIQUE,
+          college TEXT,
+          major TEXT,
+          professional_skills TEXT,
+          advantages TEXT,
+          education TEXT,
+          honors TEXT,
+          projects TEXT,
+          languages TEXT,
+          works TEXT,
+          skills TEXT,
+          certificates TEXT,
+          bonus TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        -- 填写简历的学院/专业下拉配置：由管理端“填写简历设置”维护，候选人端只读
+        CREATE TABLE IF NOT EXISTS resume_form_settings (
+          id TEXT PRIMARY KEY,
+          colleges TEXT NOT NULL,
+          updated_by TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
         CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_password_reset_token_hash ON password_reset_tokens(token_hash);
@@ -908,6 +952,48 @@ def init_db() -> None:
           recent_training_focus VARCHAR(160),
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS student_registrations (
+          id CHAR(36) PRIMARY KEY,
+          student_no VARCHAR(64) NOT NULL UNIQUE,
+          name VARCHAR(120) NOT NULL,
+          user_id CHAR(36) NULL,
+          imported_by VARCHAR(120),
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS resume_forms (
+          id CHAR(36) PRIMARY KEY,
+          user_id CHAR(36) NOT NULL UNIQUE,
+          college VARCHAR(160),
+          major VARCHAR(160),
+          professional_skills MEDIUMTEXT,
+          advantages MEDIUMTEXT,
+          education MEDIUMTEXT,
+          honors MEDIUMTEXT,
+          projects MEDIUMTEXT,
+          languages VARCHAR(500),
+          works MEDIUMTEXT,
+          skills MEDIUMTEXT,
+          certificates MEDIUMTEXT,
+          bonus MEDIUMTEXT,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS resume_form_settings (
+          id CHAR(36) PRIMARY KEY,
+          colleges TEXT NOT NULL,
+          updated_by VARCHAR(255),
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
     ]

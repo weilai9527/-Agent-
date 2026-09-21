@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 from pathlib import Path
 import re
@@ -129,5 +130,7 @@ def sanitize_admin(admin: dict | None) -> dict | None:
         "name": admin.get("name"),
         "role": admin.get("role"),
         "status": admin.get("status"),
+        "permissions": _json_list(admin.get("permissions")),
+        "student_scope": _json_list(admin.get("student_scope")),
         "last_login_at": admin.get("last_login_at"),
     }

@@ -14,6 +14,8 @@ import {
   CheckCircle2,
   ClipboardList,
   Copy,
+  Download,
+  Eye,
   FileText,
   Filter,
   GraduationCap,
@@ -101,6 +103,26 @@ async function adminRequest(path, options = {}) {
     throw requestError;
   }
   return data;
+}
+
+async function adminDownload(path, fallbackFilename) {
+  const response = await fetch(adminApiUrl(path), { credentials: 'include' });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const requestError = new Error(data.error || data.detail || '文件下载失败。');
+    requestError.status = response.status;
+    throw requestError;
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const matchedFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  const anchor = document.createElement('a');
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = matchedFilename || fallbackFilename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(anchor.href);
 }
 
 const navItems = [
@@ -394,7 +416,7 @@ function DataWorkspace({
           </select>
           {hasFilters && <button type="button" className="clear-filter" onClick={resetFilters}>清空筛选</button>}
         </div>
-        <span className="data-scope-note">当前数据源最多返回最近 50 条记录</span>
+        <span className="data-scope-note">列表内容来自当前管理端数据范围</span>
       </div>
       <AdminTable columns={columns} rows={visibleRows} allRows={filteredRows} onView={onView} sort={sort} onSort={handleSort} />
       <footer className="table-pagination">
@@ -417,7 +439,7 @@ function DataWorkspace({
   );
 }
 
-function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, onMove, position }) {
+function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, onMove, position, onRevealTemporaryPassword, onResetStudentPassword }) {
   const isOpen = Boolean(detail || loading || error);
 
   useEffect(() => {
@@ -496,6 +518,23 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
             </div>
           </footer>
         )}
+        {detail?.type === 'candidate' && !error && (
+          <footer className="detail-actions student-password-actions">
+            <span>
+              {detail.temporaryPassword
+                ? <>当前临时密码：<code>{detail.temporaryPassword}</code></>
+                : detail.mustChangePassword
+                  ? '学生首次登录后必须修改临时密码'
+                  : '该学生已完成首次改密，临时密码不可查看'}
+            </span>
+            <div>
+              {detail.canViewTemporaryPassword && (
+                <button type="button" disabled={loading} onClick={onRevealTemporaryPassword}><Eye size={15} />查看临时密码</button>
+              )}
+              <button type="button" className="danger" disabled={loading} onClick={onResetStudentPassword}><KeyRound size={15} />重置临时密码</button>
+            </div>
+          </footer>
+        )}
       </section>
     </div>
   );
@@ -514,13 +553,17 @@ function formatDetail(type, payload, fallbackRow) {
       type: 'candidate',
       id: item.id || fallbackRow.id,
       title: `学生 · ${item.name || item.nickname || fallbackRow.name}`,
+      mustChangePassword: Boolean(item.must_change_password ?? fallbackRow.canViewTemporaryPassword),
+      canViewTemporaryPassword: Boolean(item.can_view_temp_password ?? fallbackRow.canViewTemporaryPassword),
       rows: [
-        { label: '邮箱', value: item.email },
+        { label: '学号', value: item.student_no || item.studentNo },
+        { label: '学院', value: item.college },
+        { label: '班级', value: item.class_name || item.className },
+        { label: '辅导员', value: item.counselor },
+        { label: '学生状态', value: item.student_status },
         { label: '状态', value: item.status },
+        { label: '激活状态', value: (item.must_change_password ?? fallbackRow.canViewTemporaryPassword) ? '待首次改密' : ((item.student_no || item.studentNo) ? '已激活' : '待绑定学号') },
         { label: '目标岗位', value: item.target_role || item.role },
-        { label: '经验水平', value: item.experience_level },
-        { label: '目标城市', value: item.target_city },
-        { label: '期望薪资', value: item.expected_salary },
         { label: '最后登录', value: item.last_login_at || item.lastLogin },
       ],
       blocks: [
@@ -705,17 +748,147 @@ function Dashboard({ data, admin, onNavigate, onView }) {
   );
 }
 
-function CandidatesPage({ data, onView, query, onQueryChange, presetFilter }) {
+function CandidatesPage({ data, onView, query, onQueryChange, presetFilter, onAccountsChanged }) {
+  const [studentFile, setStudentFile] = useState(null);
+  const [selectedCounselor, setSelectedCounselor] = useState('');
+  const [selectedClassName, setSelectedClassName] = useState('');
+  const [selectedAdmissionYear, setSelectedAdmissionYear] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [accountMessage, setAccountMessage] = useState('');
+  const [accountError, setAccountError] = useState('');
+  const counselors = useMemo(
+    () => [...new Set(data.candidates.map((item) => item.counselor).filter((value) => value && value !== '-'))].sort((a, b) => a.localeCompare(b, 'zh-CN')),
+    [data.candidates],
+  );
+  const classNames = useMemo(
+    () => [...new Set(data.candidates.map((item) => item.className).filter((value) => value && value !== '-'))].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })),
+    [data.candidates],
+  );
+  const admissionYears = useMemo(
+    () => [...new Set(data.candidates.map((item) => item.admissionYear).filter((value) => /^20\d{2}$/.test(value)))].sort((a, b) => b.localeCompare(a)),
+    [data.candidates],
+  );
+  const filteredCandidates = useMemo(
+    () => data.candidates.filter((item) => (
+      (!selectedCounselor || item.counselor === selectedCounselor)
+      && (!selectedClassName || item.className === selectedClassName)
+      && (!selectedAdmissionYear || item.admissionYear === selectedAdmissionYear)
+    )),
+    [data.candidates, selectedCounselor, selectedClassName, selectedAdmissionYear],
+  );
+
+  const importAccounts = async (event) => {
+    event.preventDefault();
+    if (!studentFile) return;
+    const formElement = event.currentTarget;
+    setImporting(true);
+    setAccountError('');
+    setAccountMessage('');
+    try {
+      const body = new FormData();
+      body.append('file', studentFile);
+      const payload = await adminRequest('/api/admin/student-accounts/import', { method: 'POST', body });
+      const result = payload.result || {};
+      setAccountMessage(`导入完成：新增 ${result.created || 0}，更新 ${result.updated || 0}，跳过 ${result.skipped || 0}。${result.errors?.length ? ` ${result.errors.slice(0, 3).join('；')}` : ''}`);
+      setStudentFile(null);
+      formElement.reset();
+      await onAccountsChanged?.();
+    } catch (requestError) {
+      setAccountError(requestError.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const exportAccounts = async () => {
+    setExporting(true);
+    setAccountError('');
+    try {
+      const parameters = new URLSearchParams();
+      if (selectedCounselor) parameters.set('counselor', selectedCounselor);
+      if (selectedClassName) parameters.set('class_name', selectedClassName);
+      if (selectedAdmissionYear) parameters.set('admission_year', selectedAdmissionYear);
+      const suffix = parameters.size ? `?${parameters.toString()}` : '';
+      await adminDownload(`/api/admin/student-accounts/export${suffix}`, '学生临时密码.xlsx');
+      const selectedRanges = [selectedAdmissionYear && `${selectedAdmissionYear} 学年`, selectedClassName, selectedCounselor].filter(Boolean);
+      setAccountMessage(selectedRanges.length ? `已按“${selectedRanges.join(' / ')}”导出待激活学生。` : '已导出全部待激活学生临时密码。');
+    } catch (requestError) {
+      setAccountError(requestError.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const columns = [
-    { key: 'name', label: '候选人' },
-    { key: 'email', label: '邮箱', className: 'wide-cell' },
-    { key: 'role', label: '目标岗位' },
+    { key: 'studentNo', label: '学号' },
+    { key: 'admissionYear', label: '学年' },
+    { key: 'name', label: '学生' },
+    { key: 'college', label: '学院' },
+    { key: 'className', label: '班级' },
+    { key: 'counselor', label: '辅导员' },
     { key: 'status', label: '状态', render: (row) => <StatusBadge>{row.status}</StatusBadge> },
-    { key: 'interviews', label: '面试数' },
-    { key: 'averageScore', label: '均分' },
+    { key: 'activationStatus', label: '激活状态', render: (row) => <StatusBadge>{row.activationStatus}</StatusBadge> },
     { key: 'lastLogin', label: '最后登录' },
   ];
-  return <DataWorkspace title="学生成长列表" icon={<UsersRound size={18} />} columns={columns} rows={data.candidates} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部账号状态" presetFilter={presetFilter} onView={(row, rows) => onView('candidate', row, rows)} />;
+  return (
+    <div className="student-account-page">
+      <SectionCard title="学生账号导入与发放" icon={<KeyRound size={18} />} className="student-account-tools">
+        <div className="student-account-grid">
+          <form onSubmit={importAccounts}>
+            <strong>导入学校学生名单</strong>
+            <p>上传包含“学院、学号、姓名、性别、班级、辅导员、账号状态、学生状态、注册时间、修改时间”的 .xlsx 文件。新学生会自动获得唯一随机临时密码。</p>
+            <label className="field-block">
+              <span>学生名单 Excel</span>
+              <input type="file" accept=".xlsx" onChange={(event) => setStudentFile(event.target.files?.[0] || null)} required />
+            </label>
+            <button className="primary-button" type="submit" disabled={importing || !studentFile}>
+              <Upload size={16} /> {importing ? '正在导入...' : '导入并创建账号'}
+            </button>
+          </form>
+          <div>
+            <strong>导出临时密码表</strong>
+            <p>只导出尚未完成首次改密的学生。可按辅导员分别生成，文件已设置为横向打印。</p>
+            <label className="field-block">
+              <span>辅导员范围</span>
+              <select value={selectedCounselor} onChange={(event) => setSelectedCounselor(event.target.value)}>
+                <option value="">全部辅导员</option>
+                {counselors.map((counselor) => <option value={counselor} key={counselor}>{counselor}</option>)}
+              </select>
+            </label>
+            <label className="field-block">
+              <span>班级范围</span>
+              <select value={selectedClassName} onChange={(event) => setSelectedClassName(event.target.value)}>
+                <option value="">全部班级</option>
+                {classNames.map((className) => <option value={className} key={className}>{className}</option>)}
+              </select>
+            </label>
+            <label className="field-block">
+              <span>学年范围</span>
+              <select value={selectedAdmissionYear} onChange={(event) => setSelectedAdmissionYear(event.target.value)}>
+                <option value="">全部学年</option>
+                {admissionYears.map((year) => <option value={year} key={year}>{year} 学年</option>)}
+              </select>
+            </label>
+            <button className="secondary-button" type="button" onClick={exportAccounts} disabled={exporting}>
+              <Download size={16} /> {exporting ? '正在生成...' : '导出 Excel'}
+            </button>
+          </div>
+        </div>
+        {accountMessage && <p className="account-tool-message success">{accountMessage}</p>}
+        {accountError && <p className="account-tool-message error">{accountError}</p>}
+      </SectionCard>
+      <div className="student-roster-filters" aria-label="学生分类筛选">
+        <strong>分类筛选</strong>
+        <label><span>学年</span><select value={selectedAdmissionYear} onChange={(event) => setSelectedAdmissionYear(event.target.value)}><option value="">全部学年</option>{admissionYears.map((year) => <option value={year} key={year}>{year} 学年</option>)}</select></label>
+        <label><span>班级</span><select value={selectedClassName} onChange={(event) => setSelectedClassName(event.target.value)}><option value="">全部班级</option>{classNames.map((className) => <option value={className} key={className}>{className}</option>)}</select></label>
+        <label><span>辅导员</span><select value={selectedCounselor} onChange={(event) => setSelectedCounselor(event.target.value)}><option value="">全部辅导员</option>{counselors.map((counselor) => <option value={counselor} key={counselor}>{counselor}</option>)}</select></label>
+        {(selectedAdmissionYear || selectedClassName || selectedCounselor) && <button type="button" onClick={() => { setSelectedAdmissionYear(''); setSelectedClassName(''); setSelectedCounselor(''); }}>清空分类</button>}
+        <small>{filteredCandidates.length} / {data.candidates.length} 名学生</small>
+      </div>
+      <DataWorkspace title="学生账号列表" icon={<UsersRound size={18} />} columns={columns} rows={filteredCandidates} query={query} onQueryChange={onQueryChange} filterKey="activationStatus" filterLabel="全部激活状态" presetFilter={presetFilter} onView={(row, rows) => onView('candidate', row, rows)} />
+    </div>
+  );
 }
 
 function InterviewsPage({ data, onView, query, onQueryChange, presetFilter }) {
@@ -2499,6 +2672,43 @@ function AdminApp({ admin, onSignedOut }) {
     }
   };
 
+  const revealTemporaryPassword = async () => {
+    if (!detail?.id) return;
+    setDetailLoading(true);
+    setDetailError('');
+    try {
+      const payload = await adminRequest(`/api/admin/student-accounts/${encodeURIComponent(detail.id)}/temporary-password`);
+      setDetail((current) => ({ ...current, temporaryPassword: payload.temporaryPassword }));
+    } catch (requestError) {
+      setDetailError(requestError.message);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const resetStudentPassword = async () => {
+    if (!detail?.id || !window.confirm('重置后学生当前密码和全部登录状态都会失效，确定继续吗？')) return;
+    setDetailLoading(true);
+    setDetailError('');
+    try {
+      const payload = await adminRequest(`/api/admin/student-accounts/${encodeURIComponent(detail.id)}/reset-password`, { method: 'POST' });
+      setDetail((current) => ({
+        ...current,
+        mustChangePassword: true,
+        canViewTemporaryPassword: true,
+        temporaryPassword: payload.temporaryPassword,
+        rows: current.rows.map((row) => row.label === '激活状态' ? { ...row, value: '待首次改密' } : row),
+      }));
+      setNotice('已生成新的临时密码并撤销学生原有登录状态');
+      const data = await adminRequest('/api/admin/snapshot');
+      setAdminData({ ...emptyAdminData, ...data });
+    } catch (requestError) {
+      setDetailError(requestError.message);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   const renderContent = () => {
     if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
@@ -2511,7 +2721,7 @@ function AdminApp({ admin, onSignedOut }) {
       onQueryChange: setCurrentQuery,
       presetFilter: viewPreset.view === activeView ? viewPreset.value : '',
     };
-    if (activeView === 'candidates') return <CandidatesPage {...listProps} />;
+    if (activeView === 'candidates') return <CandidatesPage {...listProps} onAccountsChanged={refreshSnapshot} />;
     if (activeView === 'interviews') return <InterviewsPage {...listProps} />;
     if (activeView === 'reports') return <ReportsPage {...listProps} />;
     if (activeView === 'agents') return <AgentsPage {...listProps} />;
@@ -2604,6 +2814,8 @@ function AdminApp({ admin, onSignedOut }) {
         error={detailError}
         onReview={reviewReport}
         canReview={admin?.role === 'super_admin' || admin?.role === 'reviewer'}
+        onRevealTemporaryPassword={revealTemporaryPassword}
+        onResetStudentPassword={resetStudentPassword}
         onClose={closeDetail}
         onMove={moveDetail}
         position={detailPosition}

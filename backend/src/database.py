@@ -269,8 +269,21 @@ def _init_sqlite_db() -> None:
         CREATE TABLE IF NOT EXISTS users (
           id TEXT PRIMARY KEY,
           email TEXT NOT NULL UNIQUE,
+          student_no TEXT,
           password_hash TEXT NOT NULL,
           name TEXT NOT NULL,
+          college TEXT,
+          gender TEXT,
+          class_name TEXT,
+          counselor TEXT,
+          student_status TEXT,
+          source_account_status TEXT,
+          must_change_password INTEGER NOT NULL DEFAULT 0,
+          temp_password_encrypted TEXT,
+          temp_password_created_at TEXT,
+          activated_at TEXT,
+          source_registered_at TEXT,
+          source_updated_at TEXT,
           status TEXT NOT NULL DEFAULT 'normal',
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -553,6 +566,26 @@ def _init_sqlite_db() -> None:
         ("preferred_difficulty", "TEXT"),
         ("preferred_interviewer_style", "TEXT"),
     ]
+    user_columns = [
+        ("student_no", "TEXT"),
+        ("college", "TEXT"),
+        ("gender", "TEXT"),
+        ("class_name", "TEXT"),
+        ("counselor", "TEXT"),
+        ("student_status", "TEXT"),
+        ("source_account_status", "TEXT"),
+        ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+        ("temp_password_encrypted", "TEXT"),
+        ("temp_password_created_at", "TEXT"),
+        ("activated_at", "TEXT"),
+        ("source_registered_at", "TEXT"),
+        ("source_updated_at", "TEXT"),
+    ]
+    existing = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    for name, column_type in user_columns:
+        if name not in existing:
+            db.execute(f"ALTER TABLE users ADD COLUMN {name} {column_type}")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_student_no ON users(student_no)")
     existing = {row["name"] for row in db.execute("PRAGMA table_info(profiles)").fetchall()}
     for name, column_type in profile_columns:
         if name not in existing:
@@ -607,8 +640,21 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS users (
           id CHAR(36) PRIMARY KEY,
           email VARCHAR(255) NOT NULL UNIQUE,
+          student_no VARCHAR(80) NULL,
           password_hash VARCHAR(255) NOT NULL,
           name VARCHAR(120) NOT NULL,
+          college VARCHAR(160) NULL,
+          gender VARCHAR(20) NULL,
+          class_name VARCHAR(160) NULL,
+          counselor VARCHAR(120) NULL,
+          student_status VARCHAR(80) NULL,
+          source_account_status VARCHAR(80) NULL,
+          must_change_password TINYINT(1) NOT NULL DEFAULT 0,
+          temp_password_encrypted TEXT NULL,
+          temp_password_created_at DATETIME NULL,
+          activated_at DATETIME NULL,
+          source_registered_at DATETIME NULL,
+          source_updated_at DATETIME NULL,
           status VARCHAR(40) NOT NULL DEFAULT 'normal',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -869,6 +915,25 @@ def init_db() -> None:
     for statement in schema_statements:
         _execute_schema(statement)
 
+    user_columns = [
+        ("student_no", "VARCHAR(80) NULL"),
+        ("college", "VARCHAR(160) NULL"),
+        ("gender", "VARCHAR(20) NULL"),
+        ("class_name", "VARCHAR(160) NULL"),
+        ("counselor", "VARCHAR(120) NULL"),
+        ("student_status", "VARCHAR(80) NULL"),
+        ("source_account_status", "VARCHAR(80) NULL"),
+        ("must_change_password", "TINYINT(1) NOT NULL DEFAULT 0"),
+        ("temp_password_encrypted", "TEXT NULL"),
+        ("temp_password_created_at", "DATETIME NULL"),
+        ("activated_at", "DATETIME NULL"),
+        ("source_registered_at", "DATETIME NULL"),
+        ("source_updated_at", "DATETIME NULL"),
+    ]
+    for name, column_type in user_columns:
+        if not _column_exists("users", name):
+            _execute_schema(f"ALTER TABLE users ADD COLUMN {name} {column_type}")
+
     profile_columns = [
         ("avatar_url", "VARCHAR(500)"),
         ("company_type", "VARCHAR(160)"),
@@ -922,6 +987,7 @@ def init_db() -> None:
                 _execute_schema(f"ALTER TABLE {table_name} ADD COLUMN {name} {column_type}")
 
     _ensure_index("sessions", "idx_sessions_token_hash", "token_hash")
+    _ensure_unique_index("users", "uq_users_student_no", "student_no")
     _ensure_index("sessions", "idx_sessions_user_id", "user_id")
     _ensure_index("password_reset_tokens", "idx_password_reset_token_hash", "token_hash")
     _ensure_index("interview_sessions", "idx_interview_sessions_user_id", "user_id")

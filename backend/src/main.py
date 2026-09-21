@@ -61,7 +61,9 @@ from .security import (
     hash_password,
     hash_token,
     is_valid_email,
+    is_valid_student_no,
     normalize_email,
+    normalize_student_no,
     sanitize_user,
     verify_password,
 )
@@ -521,7 +523,9 @@ def find_user_by_session(request: Request) -> dict | None:
         return None
     return one(
         """
-        SELECT users.id, users.email, users.name, users.status, users.created_at, users.last_login_at
+        SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
+               users.counselor, users.student_status, users.must_change_password,
+               users.status, users.created_at, users.last_login_at
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token_hash = ?
@@ -537,7 +541,9 @@ def find_user_by_session_token(token: str | None) -> dict | None:
         return None
     return one(
         """
-        SELECT users.id, users.email, users.name, users.status, users.created_at, users.last_login_at
+        SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
+               users.counselor, users.student_status, users.must_change_password,
+               users.status, users.created_at, users.last_login_at
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token_hash = ?
@@ -552,6 +558,8 @@ def require_auth(request: Request) -> dict:
     user = find_user_by_session(request)
     if not user:
         raise error(401, "请先登录。")
+    if bool(user.get("must_change_password")):
+        raise error(403, "首次登录必须先修改临时密码。")
     return user
 
 
@@ -2011,6 +2019,8 @@ def auth_me(request: Request):
 
 @app.post("/api/auth/register", status_code=201)
 async def auth_register(request: Request, response: Response, body: dict | None = None):
+    if os.environ.get("APP_ENV", "development").strip().lower() != "test":
+        raise error(403, "学生自主注册已关闭，请使用学校分配的学号和临时密码登录。")
     body = json_body(body)
     email = normalize_email(body.get("email"))
     password = str(body.get("password") or "")
@@ -2036,24 +2046,79 @@ async def auth_register(request: Request, response: Response, body: dict | None 
 @app.post("/api/auth/login")
 async def auth_login(request: Request, response: Response, body: dict | None = None):
     body = json_body(body)
-    email = normalize_email(body.get("email"))
+    student_no = normalize_student_no(body.get("student_no") or body.get("studentNo"))
     password = str(body.get("password") or "")
-    if not is_valid_email(email) or not password:
-        raise error(400, "请输入邮箱和密码。")
-    if is_login_limited(request, email):
+    if not is_valid_student_no(student_no) or not password:
+        raise error(400, "请输入正确的学号和密码。")
+    if is_login_limited(request, student_no):
         raise error(429, "登录尝试过于频繁，请稍后再试。")
 
-    user = one("SELECT id, email, password_hash, name, status, created_at, last_login_at FROM users WHERE email = ?", (email,))
+    user = one(
+        """
+        SELECT id, email, student_no, password_hash, name, college, class_name, counselor,
+               student_status, must_change_password, status, created_at, last_login_at
+        FROM users WHERE student_no = ?
+        """,
+        (student_no,),
+    )
     if not user or user["status"] != "normal" or not verify_password(password, user["password_hash"]):
-        record_failed_login(request, email)
-        raise error(401, "邮箱或密码不正确。")
+        record_failed_login(request, student_no)
+        raise error(401, "学号或密码不正确，或账号已被停用。")
 
-    clear_failed_logins(request, email)
+    clear_failed_logins(request, student_no)
     db.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (user["id"],))
     db.commit()
     create_session(response, user["id"], request.headers.get("user-agent"))
-    current_user = one("SELECT id, email, name, status, created_at, last_login_at FROM users WHERE id = ?", (user["id"],))
+    current_user = one(
+        """
+        SELECT id, email, student_no, name, college, class_name, counselor, student_status,
+               must_change_password, status, created_at, last_login_at
+        FROM users WHERE id = ?
+        """,
+        (user["id"],),
+    )
     return {"user": sanitize_user(current_user)}
+
+
+@app.post("/api/auth/change-initial-password")
+def change_initial_password(request: Request, response: Response, body: dict | None = None):
+    user = find_user_by_session(request)
+    if not user:
+        raise error(401, "请先使用学号和临时密码登录。")
+    if not bool(user.get("must_change_password")):
+        raise error(409, "当前账号不需要修改临时密码。")
+
+    payload = json_body(body)
+    password = str(payload.get("password") or "")
+    confirmation = str(payload.get("confirm_password") or payload.get("confirmPassword") or "")
+    password_error = validate_new_password(password, confirmation)
+    if password_error:
+        raise error(400, password_error)
+
+    with db:
+        db.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, must_change_password = 0, temp_password_encrypted = NULL,
+                temp_password_created_at = NULL, activated_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (hash_password(password), user["id"]),
+        ).close()
+        db.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],)).close()
+
+    clear_session(response)
+    create_session(response, user["id"], request.headers.get("user-agent"))
+    current_user = one(
+        """
+        SELECT id, email, student_no, name, college, class_name, counselor, student_status,
+               must_change_password, status, created_at, last_login_at
+        FROM users WHERE id = ?
+        """,
+        (user["id"],),
+    )
+    return {"user": sanitize_user(current_user), "message": "密码修改成功。"}
 
 
 @app.post("/api/auth/logout")
@@ -2983,7 +3048,7 @@ async def qwen_omni_realtime_ws(websocket: WebSocket, interview_id: str):
     await websocket.accept()
 
     user = find_user_by_session_token(websocket.cookies.get(SESSION_COOKIE_NAME))
-    if not user:
+    if not user or bool(user.get("must_change_password")):
         await websocket.send_json({"type": "error", "message": "请先登录后再连接千问 Omni 实时通话。"})
         await websocket.close(code=1008)
         return

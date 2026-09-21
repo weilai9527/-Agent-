@@ -3,8 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
+from pathlib import Path
 import re
 import secrets
+
+from cryptography.fernet import Fernet, InvalidToken
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -62,6 +66,58 @@ def create_token() -> str:
 
 def hash_token(token: object) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+
+
+def generate_temporary_password(length: int = 12) -> str:
+    """Generate a print-friendly, per-student password without ambiguous glyphs."""
+    size = max(10, min(32, int(length)))
+    required = [
+        secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ"),
+        secrets.choice("abcdefghijkmnopqrstuvwxyz"),
+        secrets.choice("23456789"),
+    ]
+    characters = required + [secrets.choice(TEMP_PASSWORD_ALPHABET) for _ in range(size - len(required))]
+    secrets.SystemRandom().shuffle(characters)
+    return "".join(characters)
+
+
+def _temporary_password_cipher() -> Fernet:
+    configured_key = os.environ.get("STUDENT_TEMP_PASSWORD_KEY", "").strip()
+    if configured_key:
+        try:
+            return Fernet(configured_key.encode("ascii"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("STUDENT_TEMP_PASSWORD_KEY 不是有效的 Fernet 密钥。") from exc
+
+    if os.environ.get("APP_ENV", "development").strip().lower() == "production":
+        raise RuntimeError("生产环境必须配置 STUDENT_TEMP_PASSWORD_KEY。")
+
+    key_path = Path(__file__).resolve().parents[1] / "data" / "student-temp-password.key"
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        key = key_path.read_bytes().strip()
+    except FileNotFoundError:
+        key = Fernet.generate_key()
+        try:
+            with key_path.open("xb") as handle:
+                handle.write(key)
+        except FileExistsError:
+            key = key_path.read_bytes().strip()
+    return Fernet(key)
+
+
+def encrypt_temporary_password(password: str) -> str:
+    return _temporary_password_cipher().encrypt(password.encode("utf-8")).decode("ascii")
+
+
+def decrypt_temporary_password(encrypted_password: str) -> str:
+    try:
+        return _temporary_password_cipher().decrypt(str(encrypted_password).encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("临时密码无法解密，请为该学生重新生成。") from exc
 
 
 def sanitize_admin(admin: dict | None) -> dict | None:

@@ -3189,7 +3189,135 @@ td {
   }
 }
 
+.student-account-page {
+  display: grid;
+  gap: 18px;
+}
+
+.student-roster-filters {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.student-roster-filters > strong {
+  align-self: center;
+  margin-right: 4px;
+}
+
+.student-roster-filters label {
+  display: grid;
+  gap: 5px;
+  min-width: 150px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.student-roster-filters select {
+  min-height: 36px;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: #ffffff;
+}
+
+.student-roster-filters button {
+  min-height: 36px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 8px;
+  color: #1668dc;
+  background: #edf4ff;
+  cursor: pointer;
+}
+
+.student-roster-filters small {
+  align-self: center;
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.student-account-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.student-account-grid > form,
+.student-account-grid > div {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(247, 250, 252, 0.72);
+}
+
+.student-account-grid p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.student-account-grid .primary-button,
+.student-account-grid .secondary-button {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.account-tool-message {
+  margin: 14px 0 0;
+  padding: 11px 13px;
+  border-radius: 10px;
+}
+
+.account-tool-message.success {
+  color: #116149;
+  background: #e9f7f1;
+}
+
+.account-tool-message.error {
+  color: #a43b38;
+  background: #fff0ef;
+}
+
+.student-password-actions code {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  color: #17324d;
+  background: #edf3f8;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  user-select: all;
+}
+
+.student-password-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 @media (max-width: 900px) {
+  .student-account-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .student-roster-filters small {
+    width: 100%;
+    margin-left: 0;
+  }
+
   .connection-log-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

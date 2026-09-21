@@ -171,6 +171,47 @@ def get_database_path() -> str:
     return f"mysql://{config.user}@{config.host}:{config.port}/{config.database}"
 
 
+def _table_exists(table_name: str) -> bool:
+    if DB_ENGINE == "sqlite":
+        cursor = db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        )
+        try:
+            return cursor.fetchone() is not None
+        finally:
+            cursor.close()
+    cursor = db.execute(
+        "SELECT COUNT(*) AS count FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+        (table_name,),
+    )
+    try:
+        row = cursor.fetchone()
+        return bool(row and row["count"])
+    finally:
+        cursor.close()
+
+
+def _column_exists(table_name: str, column_name: str) -> bool:
+    if DB_ENGINE == "sqlite":
+        cursor = db.execute(f"PRAGMA table_info({table_name})")
+        try:
+            return any(row["name"] == column_name for row in cursor.fetchall())
+        finally:
+            cursor.close()
+    cursor = db.execute(
+        "SELECT COUNT(*) AS count FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+        (table_name, column_name),
+    )
+    try:
+        row = cursor.fetchone()
+        return bool(row and row["count"])
+    finally:
+        cursor.close()
+
+
 def ensure_mysql_cross_schema_collations() -> None:
     """Align columns joined to tables owned by the candidate backend."""
     if DB_ENGINE != "mysql":
@@ -432,6 +473,46 @@ def ensure_admin_schema() -> None:
         cursor = db.execute(statement)
         cursor.close()
     db.commit()
+
+    # Student accounts live in the candidate backend's users table.  The admin
+    # service also applies these additive migrations so either service can be
+    # started first during deployment.
+    if _table_exists("users"):
+        user_columns = [
+            ("student_no", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(80) NULL"),
+            ("college", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(160) NULL"),
+            ("gender", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(20) NULL"),
+            ("class_name", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(160) NULL"),
+            ("counselor", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(120) NULL"),
+            ("student_status", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(80) NULL"),
+            ("source_account_status", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(80) NULL"),
+            ("must_change_password", "INTEGER NOT NULL DEFAULT 0" if DB_ENGINE == "sqlite" else "TINYINT(1) NOT NULL DEFAULT 0"),
+            ("temp_password_encrypted", "TEXT" if DB_ENGINE == "sqlite" else "TEXT NULL"),
+            ("temp_password_created_at", "TEXT" if DB_ENGINE == "sqlite" else "DATETIME NULL"),
+            ("activated_at", "TEXT" if DB_ENGINE == "sqlite" else "DATETIME NULL"),
+            ("source_registered_at", "TEXT" if DB_ENGINE == "sqlite" else "DATETIME NULL"),
+            ("source_updated_at", "TEXT" if DB_ENGINE == "sqlite" else "DATETIME NULL"),
+        ]
+        for column_name, column_type in user_columns:
+            if not _column_exists("users", column_name):
+                cursor = db.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_type}")
+                cursor.close()
+        if DB_ENGINE == "sqlite":
+            cursor = db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_student_no ON users(student_no)")
+            cursor.close()
+        else:
+            cursor = db.execute(
+                "SELECT COUNT(*) AS count FROM information_schema.STATISTICS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND INDEX_NAME = 'uq_users_student_no'"
+            )
+            try:
+                index_exists = bool(cursor.fetchone()["count"])
+            finally:
+                cursor.close()
+            if not index_exists:
+                cursor = db.execute("CREATE UNIQUE INDEX uq_users_student_no ON users (student_no)")
+                cursor.close()
+        db.commit()
 
     ensure_mysql_cross_schema_collations()
 

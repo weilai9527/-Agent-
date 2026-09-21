@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,11 +13,16 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 
 from .database import DB_ENGINE, all_rows, db, ensure_admin_schema, get_database_path, one
 from .security import (
     create_token,
+    decrypt_temporary_password,
+    encrypt_temporary_password,
+    generate_temporary_password,
     hash_password,
     hash_token,
     is_valid_email,
@@ -315,7 +321,7 @@ def avg_value(sql: str, params: tuple = ()) -> float:
 
 
 def status_label(value: str | None) -> str:
-    return {"draft": "草稿", "running": "进行中", "completed": "已完成", "normal": "正常"}.get(value or "", value or "-")
+    return {"draft": "草稿", "running": "进行中", "completed": "已完成", "normal": "正常", "disabled": "已禁用"}.get(value or "", value or "-")
 
 
 def report_review_status(score: int) -> str:
@@ -452,10 +458,246 @@ def build_settings() -> dict[str, Any]:
     }
 
 
+STUDENT_IMPORT_HEADERS = {
+    "学院": "college",
+    "学号": "student_no",
+    "姓名": "name",
+    "性别": "gender",
+    "班级": "class_name",
+    "辅导员": "counselor",
+    "账号状态": "source_account_status",
+    "学生状态": "student_status",
+    "注册时间": "source_registered_at",
+    "修改时间": "source_updated_at",
+}
+STUDENT_IMPORT_MAX_BYTES = 10 * 1024 * 1024
+STUDENT_IMPORT_MAX_ROWS = 10000
+
+
+def normalize_student_no(value: object) -> str:
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value or "").strip().upper()
+
+
+def excel_cell_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def student_login_status(account_status: str, student_status: str) -> str:
+    disabled_markers = ("禁用", "停用", "冻结", "注销", "退学", "无效", "disabled", "inactive")
+    combined = f"{account_status} {student_status}".lower()
+    return "disabled" if any(marker in combined for marker in disabled_markers) else "normal"
+
+
+def student_account_email(student_no: str) -> str:
+    return f"{student_no.lower()}@student.local"
+
+
+def student_admission_year(student_no: object) -> str:
+    matched = re.match(r"^(20\d{2})", str(student_no or "").strip())
+    return matched.group(1) if matched else ""
+
+
+def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
+    try:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as exc:
+        raise error(400, "无法读取 Excel，请确认文件为有效的 .xlsx 格式。") from exc
+
+    worksheet = workbook.active
+    rows = worksheet.iter_rows(values_only=True)
+    try:
+        raw_headers = next(rows)
+    except StopIteration as exc:
+        raise error(400, "Excel 中没有可导入的数据。") from exc
+
+    headers = [excel_cell_text(value) for value in raw_headers]
+    column_indexes = {
+        field: index
+        for index, header in enumerate(headers)
+        if (field := STUDENT_IMPORT_HEADERS.get(header))
+    }
+    missing = [label for label, field in (("学号", "student_no"), ("姓名", "name")) if field not in column_indexes]
+    if missing:
+        raise error(400, f"Excel 缺少必填列：{'、'.join(missing)}。")
+
+    created = 0
+    updated = 0
+    skipped = 0
+    errors: list[str] = []
+    seen_student_numbers: set[str] = set()
+
+    db.begin()
+    try:
+        for row_number, raw_row in enumerate(rows, start=2):
+            if row_number > STUDENT_IMPORT_MAX_ROWS + 1:
+                errors.append(f"最多支持导入 {STUDENT_IMPORT_MAX_ROWS} 名学生，其余行未处理。")
+                break
+            values = {
+                field: excel_cell_text(raw_row[index] if index < len(raw_row) else None)
+                for field, index in column_indexes.items()
+            }
+            if not any(values.values()):
+                continue
+            student_no = normalize_student_no(values.get("student_no"))
+            name = values.get("name", "").strip()
+            if not re.match(r"^[0-9A-Z_-]{3,40}$", student_no):
+                skipped += 1
+                errors.append(f"第 {row_number} 行学号格式不正确。")
+                continue
+            if not name or len(name) > 120:
+                skipped += 1
+                errors.append(f"第 {row_number} 行姓名为空或过长。")
+                continue
+            if student_no in seen_student_numbers:
+                skipped += 1
+                errors.append(f"第 {row_number} 行学号 {student_no} 在文件中重复。")
+                continue
+            seen_student_numbers.add(student_no)
+
+            account_status = values.get("source_account_status", "")[:80]
+            student_status = values.get("student_status", "")[:80]
+            login_status = student_login_status(account_status, student_status)
+            existing = one("SELECT id FROM users WHERE student_no = ?", (student_no,))
+            common_values = (
+                name,
+                values.get("college", "")[:160] or None,
+                values.get("gender", "")[:20] or None,
+                values.get("class_name", "")[:160] or None,
+                values.get("counselor", "")[:120] or None,
+                student_status or None,
+                account_status or None,
+                values.get("source_registered_at") or None,
+                values.get("source_updated_at") or None,
+                login_status,
+            )
+            if existing:
+                cursor = db.execute(
+                    """
+                    UPDATE users
+                    SET name = ?, college = ?, gender = ?, class_name = ?, counselor = ?,
+                        student_status = ?, source_account_status = ?, source_registered_at = ?,
+                        source_updated_at = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    common_values + (existing["id"],),
+                )
+                cursor.close()
+                if one("SELECT user_id FROM profiles WHERE user_id = ?", (existing["id"],)):
+                    cursor = db.execute("UPDATE profiles SET nickname = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (name, existing["id"]))
+                    cursor.close()
+                else:
+                    cursor = db.execute(
+                        "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
+                        (str(uuid4()), existing["id"], name),
+                    )
+                    cursor.close()
+                if login_status != "normal":
+                    cursor = db.execute("DELETE FROM sessions WHERE user_id = ?", (existing["id"],))
+                    cursor.close()
+                updated += 1
+                continue
+
+            temporary_password = generate_temporary_password()
+            user_id = str(uuid4())
+            cursor = db.execute(
+                """
+                INSERT INTO users (
+                  id, email, student_no, password_hash, name, college, gender, class_name,
+                  counselor, student_status, source_account_status, must_change_password,
+                  temp_password_encrypted, temp_password_created_at, source_registered_at,
+                  source_updated_at, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    student_account_email(student_no),
+                    student_no,
+                    hash_password(temporary_password),
+                ) + common_values[:7] + (encrypt_temporary_password(temporary_password),) + common_values[7:9] + (login_status,),
+            )
+            cursor.close()
+            cursor = db.execute(
+                "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
+                (str(uuid4()), user_id, name),
+            )
+            cursor.close()
+            created += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        workbook.close()
+
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "processed": created + updated,
+        "errors": errors[:30],
+    }
+
+
+def build_student_password_workbook(rows: list[dict[str, Any]]) -> io.BytesIO:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "学生临时密码"
+    headers = ["学院", "学号", "学年", "姓名", "性别", "班级", "辅导员", "临时密码", "账号状态", "学生状态", "激活状态", "生成时间"]
+    worksheet.append(headers)
+    header_fill = PatternFill("solid", fgColor="17324D")
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row in rows:
+        worksheet.append([
+            row.get("college") or "",
+            row.get("student_no") or "",
+            student_admission_year(row.get("student_no")),
+            row.get("name") or "",
+            row.get("gender") or "",
+            row.get("class_name") or "",
+            row.get("counselor") or "",
+            decrypt_temporary_password(row["temp_password_encrypted"]),
+            row.get("source_account_status") or row.get("status") or "",
+            row.get("student_status") or "",
+            "待首次改密",
+            str(row.get("temp_password_created_at") or ""),
+        ])
+
+    widths = [18, 18, 10, 14, 9, 18, 14, 18, 14, 14, 14, 20]
+    for index, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[chr(64 + index)].width = width
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 0
+    worksheet.print_title_rows = "1:1"
+    worksheet.oddFooter.center.text = "仅限辅导员发放临时密码使用，请妥善保管"
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
 def list_candidates() -> list[dict[str, Any]]:
     rows = all_rows(
         """
-        SELECT users.id, users.email, users.name, users.status, users.created_at, users.last_login_at,
+        SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
+               users.counselor, users.student_status, users.must_change_password,
+               users.temp_password_encrypted, users.status, users.created_at, users.last_login_at,
                profiles.target_role,
                COALESCE(interview_counts.interviews, 0) AS interviews,
                COALESCE(report_scores.average_score, 0) AS average_score
@@ -472,7 +714,7 @@ def list_candidates() -> list[dict[str, Any]]:
           GROUP BY user_id
         ) AS report_scores ON report_scores.user_id = users.id
         ORDER BY users.updated_at DESC, users.created_at DESC
-        LIMIT 50
+        LIMIT 5000
         """
     )
     return [
@@ -480,8 +722,15 @@ def list_candidates() -> list[dict[str, Any]]:
             "id": row["id"],
             "name": row["name"],
             "email": row["email"],
+            "studentNo": row.get("student_no") or "-",
+            "admissionYear": student_admission_year(row.get("student_no")) or "-",
+            "college": row.get("college") or "-",
+            "className": row.get("class_name") or "-",
+            "counselor": row.get("counselor") or "-",
             "role": row.get("target_role") or "未填写",
             "status": status_label(row.get("status")),
+            "activationStatus": "待首次改密" if row.get("must_change_password") else ("已激活" if row.get("student_no") else "待绑定学号"),
+            "canViewTemporaryPassword": bool(row.get("must_change_password") and row.get("temp_password_encrypted")),
             "interviews": int(row.get("interviews") or 0),
             "averageScore": round(float(row.get("average_score") or 0), 1),
             "lastLogin": str(row.get("last_login_at") or "-"),
@@ -493,7 +742,12 @@ def list_candidates() -> list[dict[str, Any]]:
 def get_candidate_detail(candidate_id: str) -> dict[str, Any]:
     row = one(
         """
-        SELECT users.id, users.email, users.name, users.status, users.created_at, users.updated_at,
+        SELECT users.id, users.email, users.student_no, users.name, users.college, users.gender,
+               users.class_name, users.counselor, users.student_status, users.source_account_status,
+               users.must_change_password,
+               CASE WHEN users.temp_password_encrypted IS NULL THEN 0 ELSE 1 END AS can_view_temp_password,
+               users.temp_password_created_at,
+               users.activated_at, users.status, users.created_at, users.updated_at,
                users.last_login_at, profiles.nickname, profiles.target_role, profiles.experience_level,
                profiles.company_type, profiles.target_city, profiles.expected_salary,
                profiles.years_of_experience, profiles.education_level, profiles.skills,
@@ -1551,6 +1805,163 @@ def snapshot(admin: dict = Depends(require_admin)):
         }
     except Exception as exc:
         raise error(500, f"管理端数据读取失败：{exc}") from exc
+
+
+@app.post("/api/admin/student-accounts/import")
+async def import_student_accounts(
+    request: Request,
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_roles("super_admin", "operations")),
+):
+    validate_admin_origin(request)
+    filename = str(file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise error(400, "请上传 .xlsx 格式的学生名单。")
+    content = await file.read(STUDENT_IMPORT_MAX_BYTES + 1)
+    if not content:
+        raise error(400, "上传的学生名单为空。")
+    if len(content) > STUDENT_IMPORT_MAX_BYTES:
+        raise error(413, "学生名单不能超过 10MB。")
+
+    result = import_student_accounts_from_workbook(content)
+    record_audit(
+        request,
+        admin,
+        "student_accounts.import",
+        target_type="student_account",
+        summary=f"导入学生名单：新增 {result['created']}，更新 {result['updated']}，跳过 {result['skipped']}",
+    )
+    return {"ok": True, "result": result}
+
+
+@app.get("/api/admin/student-accounts/export")
+def export_student_accounts(
+    request: Request,
+    counselor: str = "",
+    class_name: str = "",
+    admission_year: str = "",
+    admin: dict = Depends(require_roles("super_admin", "operations")),
+):
+    normalized_counselor = counselor.strip()[:120]
+    normalized_class_name = class_name.strip()[:160]
+    normalized_admission_year = admission_year.strip()
+    if normalized_admission_year and not re.match(r"^20\d{2}$", normalized_admission_year):
+        raise error(400, "学年筛选格式不正确。")
+    clauses = ["must_change_password = 1", "temp_password_encrypted IS NOT NULL"]
+    params: list[Any] = []
+    if normalized_counselor:
+        clauses.append("counselor = ?")
+        params.append(normalized_counselor)
+    if normalized_class_name:
+        clauses.append("class_name = ?")
+        params.append(normalized_class_name)
+    if normalized_admission_year:
+        clauses.append("student_no LIKE ?")
+        params.append(f"{normalized_admission_year}%")
+    where = "WHERE " + " AND ".join(clauses)
+    rows = all_rows(
+        f"""
+        SELECT student_no, name, college, gender, class_name, counselor,
+               source_account_status, student_status, status,
+               temp_password_encrypted, temp_password_created_at
+        FROM users
+        {where}
+        ORDER BY counselor, college, class_name, student_no
+        """,
+        tuple(params),
+    )
+    output = build_student_password_workbook(rows)
+    record_audit(
+        request,
+        admin,
+        "student_accounts.export",
+        target_type="student_account",
+        target_id=normalized_counselor,
+        summary=(
+            f"导出 {len(rows)} 名待激活学生的临时密码"
+            + (f"，辅导员：{normalized_counselor}" if normalized_counselor else "")
+            + (f"，班级：{normalized_class_name}" if normalized_class_name else "")
+            + (f"，学年：{normalized_admission_year}" if normalized_admission_year else "")
+        ),
+    )
+    filename = f"student-temporary-passwords-{datetime.now().strftime('%Y%m%d-%H%M')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/admin/student-accounts/{user_id}/temporary-password")
+def reveal_student_temporary_password(
+    request: Request,
+    user_id: str,
+    admin: dict = Depends(require_roles("super_admin", "operations")),
+):
+    user = one(
+        """
+        SELECT id, student_no, must_change_password, temp_password_encrypted
+        FROM users WHERE id = ?
+        """,
+        (user_id,),
+    )
+    if not user:
+        raise error(404, "学生账号不存在。")
+    if not user.get("must_change_password") or not user.get("temp_password_encrypted"):
+        raise error(409, "该学生已完成改密，临时密码不可查看。")
+    try:
+        temporary_password = decrypt_temporary_password(user["temp_password_encrypted"])
+    except ValueError as exc:
+        raise error(409, str(exc)) from exc
+    record_audit(
+        request,
+        admin,
+        "student_accounts.password_reveal",
+        target_type="student_account",
+        target_id=user_id,
+        summary=f"查看学号 {user.get('student_no') or '-'} 的临时密码",
+    )
+    return {"temporaryPassword": temporary_password}
+
+
+@app.post("/api/admin/student-accounts/{user_id}/reset-password")
+def reset_student_password(
+    request: Request,
+    user_id: str,
+    admin: dict = Depends(require_roles("super_admin", "operations")),
+):
+    validate_admin_origin(request)
+    user = one("SELECT id, student_no FROM users WHERE id = ?", (user_id,))
+    if not user or not user.get("student_no"):
+        raise error(404, "学生账号不存在或尚未绑定学号。")
+    temporary_password = generate_temporary_password()
+    db.begin()
+    try:
+        cursor = db.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, must_change_password = 1, temp_password_encrypted = ?,
+                temp_password_created_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (hash_password(temporary_password), encrypt_temporary_password(temporary_password), user_id),
+        )
+        cursor.close()
+        cursor = db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        cursor.close()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(
+        request,
+        admin,
+        "student_accounts.password_reset",
+        target_type="student_account",
+        target_id=user_id,
+        summary=f"重置学号 {user['student_no']} 的临时密码并撤销全部登录会话",
+    )
+    return {"temporaryPassword": temporary_password, "mustChangePassword": True}
 
 
 @app.get("/api/admin/candidates/{candidate_id}")

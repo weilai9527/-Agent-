@@ -12,13 +12,13 @@ import {
   Clock3,
   Download,
   FileText,
+  GraduationCap,
   Headphones,
   History,
   KeyRound,
   LockKeyhole,
   LogIn,
   LogOut,
-  Mail,
   Layers3,
   MessageSquareText,
   Mic,
@@ -32,7 +32,6 @@ import {
   Target,
   TrendingUp,
   Upload,
-  UserPlus,
   UserRound,
   Wrench,
 } from 'lucide-react';
@@ -622,7 +621,6 @@ const recommendationLabels = {
 };
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
-const PASSWORD_RESET_ENABLED = import.meta.env.VITE_PASSWORD_RESET_ENABLED === 'true';
 const OPENAI_REALTIME_AUDIO_CONSTRAINTS = {
   echoCancellation: true,
   noiseSuppression: true,
@@ -1355,14 +1353,12 @@ function AuthInput({ icon, label, type = 'text', value, onChange, placeholder })
 }
 
 function LoginPage({ onAuthenticated }) {
-  const initialResetToken = PASSWORD_RESET_ENABLED
-    ? new URLSearchParams(window.location.search).get('reset_token') || ''
-    : '';
-  const [mode, setMode] = useState(initialResetToken ? 'reset-confirm' : 'login');
+  const initialResetToken = '';
+  const [mode, setMode] = useState('login');
   const [resetToken, setResetToken] = useState(initialResetToken);
   const [resetTokenStatus, setResetTokenStatus] = useState(initialResetToken ? 'verifying' : 'idle');
   const [form, setForm] = useState({
-    email: '',
+    studentNo: '',
     password: '',
     confirmPassword: '',
   });
@@ -1411,9 +1407,9 @@ function LoginPage({ onAuthenticated }) {
     }
   };
 
-  const isRegister = mode === 'register';
-  const isResetRequest = mode === 'reset';
-  const isResetConfirm = mode === 'reset-confirm';
+  const isRegister = false;
+  const isResetRequest = false;
+  const isResetConfirm = false;
   const isReset = isResetRequest || isResetConfirm;
   const title = isResetConfirm
     ? '设置新的登录密码'
@@ -1421,12 +1417,12 @@ function LoginPage({ onAuthenticated }) {
       ? '重置登录密码'
       : isRegister
         ? '创建个人训练账号'
-        : '登录个人面试空间';
+        : '使用学号登录';
   const subtitle = isResetConfirm
     ? '重置链接只能使用一次；完成后，所有旧设备上的登录状态都会失效。'
     : isResetRequest
       ? '输入注册邮箱后，系统会发送一次性的密码重置链接。'
-      : '你的简历、模拟面试记录和复盘报告会保存在个人空间中，仅你可见。';
+      : '账号由学校统一创建。首次登录请使用辅导员发放的临时密码。';
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -1475,11 +1471,10 @@ function LoginPage({ onAuthenticated }) {
         return;
       }
 
-      const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
-      const data = await apiRequest(endpoint, {
+      const data = await apiRequest('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({
-          email: form.email,
+          student_no: form.studentNo,
           password: form.password,
         }),
       });
@@ -1530,7 +1525,7 @@ function LoginPage({ onAuthenticated }) {
         <form className="auth-card" onSubmit={handleSubmit}>
           <div className="auth-card-head">
             <div className="auth-icon">
-              {isReset ? <KeyRound size={22} /> : isRegister ? <UserPlus size={22} /> : <LogIn size={22} />}
+              <LogIn size={22} />
             </div>
             <div>
               <h2>{title}</h2>
@@ -1538,28 +1533,20 @@ function LoginPage({ onAuthenticated }) {
             </div>
           </div>
 
-          <div className="auth-tabs" aria-label="登录模式切换">
-            <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => switchMode('login')}>
-              登录
-            </button>
-            <button
-              type="button"
-              className={mode === 'register' ? 'active' : ''}
-              onClick={() => switchMode('register')}
-            >
-              注册
+          <div className="auth-tabs" aria-label="账号登录方式">
+            <button type="button" className="active">
+              学号登录
             </button>
           </div>
 
           <div className="auth-form">
             {!isResetConfirm && (
               <AuthInput
-                icon={<Mail size={17} />}
-                label="邮箱"
-                type="email"
-                value={form.email}
-                onChange={(value) => updateForm('email', value)}
-                placeholder="name@example.com"
+                icon={<GraduationCap size={17} />}
+                label="学号"
+                value={form.studentNo}
+                onChange={(value) => updateForm('studentNo', value)}
+                placeholder="请输入学校分配的学号"
               />
             )}
             {!isResetRequest && (
@@ -1590,11 +1577,7 @@ function LoginPage({ onAuthenticated }) {
                 <input type="checkbox" defaultChecked />
                 保持登录状态
               </label>
-              {PASSWORD_RESET_ENABLED && (
-                <button type="button" onClick={() => switchMode('reset')}>
-                  忘记密码
-                </button>
-              )}
+              <span>忘记密码请联系辅导员或系统管理员</span>
             </div>
           )}
 
@@ -1623,12 +1606,71 @@ function LoginPage({ onAuthenticated }) {
                   ? '发送重置链接'
                   : isRegister
                     ? '创建账号并进入'
-                    : '登录并进入工作台'}
+                    : '使用学号登录'}
           </button>
 
           <p className="auth-notice">
-            当前已接入后端登录与 MySQL 数据库；密码使用加盐哈希保存，登录态通过 HttpOnly Cookie 维护。
+            学生账号由学校统一创建，不开放自主注册。首次登录后必须修改临时密码。
           </p>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function InitialPasswordChangePage({ user, onChanged, onLogout }) {
+  const [form, setForm] = useState({ password: '', confirmPassword: '' });
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setFormError('');
+    if (form.password !== form.confirmPassword) {
+      setFormError('两次输入的密码不一致。');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const data = await apiRequest('/api/auth/change-initial-password', {
+        method: 'POST',
+        body: JSON.stringify({ password: form.password, confirm_password: form.confirmPassword }),
+      });
+      onChanged(data.user);
+    } catch (error) {
+      setFormError(error.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-page">
+        <div className="auth-brand-panel">
+          <div className="auth-brand-head">
+            <div className="brand-mark"><ShieldCheck size={22} /></div>
+            <div><strong>AI Interview Intelligence</strong><span>多 Agent 面试评估系统</span></div>
+          </div>
+          <div className="auth-copy">
+            <p className="eyebrow">FIRST LOGIN SECURITY</p>
+            <h1>保护你的个人训练档案</h1>
+            <p>临时密码仅用于首次身份确认。完成改密后，管理员将无法再查看原临时密码。</p>
+          </div>
+        </div>
+        <form className="auth-card" onSubmit={handleSubmit}>
+          <div className="auth-card-head">
+            <div className="auth-icon"><KeyRound size={22} /></div>
+            <div><h2>首次登录修改密码</h2><p>学号：{user.studentNo} · {user.name}</p></div>
+          </div>
+          <div className="auth-form">
+            <AuthInput icon={<LockKeyhole size={17} />} label="新密码" type="password" value={form.password} onChange={(value) => setForm((current) => ({ ...current, password: value }))} placeholder="请输入至少 8 位的新密码" />
+            <AuthInput icon={<LockKeyhole size={17} />} label="确认新密码" type="password" value={form.confirmPassword} onChange={(value) => setForm((current) => ({ ...current, confirmPassword: value }))} placeholder="再次输入新密码" />
+          </div>
+          {formError && <p className="auth-alert error">{formError}</p>}
+          <button className="auth-submit" type="submit" disabled={submitting}>{submitting ? '正在保存...' : '修改密码并进入系统'}</button>
+          <button className="auth-secondary-action" type="button" onClick={onLogout}>退出当前账号</button>
+          <p className="auth-notice">密码修改成功后，临时密码立即失效，且无法由管理员恢复查看。</p>
         </form>
       </section>
     </main>
@@ -5725,6 +5767,7 @@ function App() {
         if (mounted) {
           setUser(data.user);
         }
+        if (!data.user || data.user.mustChangePassword) return null;
         return apiRequest('/api/interviews?status=running')
           .then((interviewData) => {
             if (!mounted) return;
@@ -5803,6 +5846,10 @@ function App() {
 
   if (!user) {
     return <LoginPage onAuthenticated={setUser} />;
+  }
+
+  if (user.mustChangePassword) {
+    return <InitialPasswordChangePage user={user} onChanged={setUser} onLogout={handleLogout} />;
   }
 
   return (

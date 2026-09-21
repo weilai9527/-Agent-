@@ -816,6 +816,20 @@ button {
   gap: 8px;
 }
 
+.auth-secondary-action {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #60758a;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px;
+}
+
+.auth-secondary-action:hover {
+  color: #17324d;
+}
+
 .analysis-source-note {
   display: flex;
   align-items: center;

@@ -42,6 +42,13 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import {
+  createAliyunRtcAudioSession,
+  createAliyunRtcTranscriptAssembler,
+  extractQuestionFromAgentTranscript,
+  findLatestInterviewQuestion,
+  shouldPersistAliyunAgentTurn,
+} from './aliyunRtc';
 import './styles.css';
 
 const report = {
@@ -1402,9 +1409,14 @@ function AuthInput({ icon, label, type = 'text', value, onChange, placeholder })
 }
 
 function LoginPage({ onAuthenticated }) {
+  const initialResetToken = '';
+  const [mode, setMode] = useState('login');
+  const [resetToken, setResetToken] = useState(initialResetToken);
+  const [resetTokenStatus, setResetTokenStatus] = useState(initialResetToken ? 'verifying' : 'idle');
   const [form, setForm] = useState({
     studentNo: '',
-    name: '',
+    password: '',
+    confirmPassword: '',
   });
   const [authError, setAuthError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -1413,16 +1425,84 @@ function LoginPage({ onAuthenticated }) {
     setForm((current) => ({ ...current, [key]: value }));
   };
 
+  const removeResetTokenFromUrl = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('reset_token');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  };
+
+  const switchMode = (nextMode) => {
+    setMode(nextMode);
+    setAuthMessage('');
+    setAuthError('');
+    if (nextMode !== 'reset-confirm' && resetToken) {
+      setResetToken('');
+      setResetTokenStatus('idle');
+      removeResetTokenFromUrl();
+    }
+  };
+
+  const isRegister = false;
+  const isResetRequest = false;
+  const isResetConfirm = false;
+  const isReset = isResetRequest || isResetConfirm;
+  const title = isResetConfirm
+    ? '设置新的登录密码'
+    : isResetRequest
+      ? '重置登录密码'
+      : isRegister
+        ? '创建个人训练账号'
+        : '使用学号登录';
+  const subtitle = isResetConfirm
+    ? '重置链接只能使用一次；完成后，所有旧设备上的登录状态都会失效。'
+    : isResetRequest
+      ? '输入注册邮箱后，系统会发送一次性的密码重置链接。'
+      : '账号由学校统一创建。首次登录请使用辅导员发放的临时密码。';
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     setAuthError('');
     setSubmitting(true);
     try {
-      const data = await apiRequest('/api/auth/student-login', {
+      if (isResetRequest) {
+        const data = await apiRequest('/api/auth/password-reset/request', {
+          method: 'POST',
+          body: JSON.stringify({ email: form.email }),
+        });
+        if (data.devResetToken) {
+          setResetToken(data.devResetToken);
+          setResetTokenStatus('valid');
+          setMode('reset-confirm');
+          setAuthMessage('开发环境已生成一次性重置凭证，请设置新密码。');
+          return;
+        }
+        setAuthMessage('如果邮箱存在，我们会发送密码重置链接。');
+        return;
+      }
+
+      if (isResetConfirm) {
+        const data = await apiRequest('/api/auth/password-reset/confirm', {
+          method: 'POST',
+          body: JSON.stringify({
+            token: resetToken,
+            password: form.password,
+            confirm_password: form.confirmPassword,
+          }),
+        });
+        setResetToken('');
+        setResetTokenStatus('idle');
+        setMode('login');
+        setForm((current) => ({ ...current, password: '', confirmPassword: '' }));
+        removeResetTokenFromUrl();
+        setAuthMessage(data.message || '密码已重置，请使用新密码登录。');
+        return;
+      }
+
+      const data = await apiRequest('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({
-          studentNo: form.studentNo,
-          name: form.name,
+          student_no: form.studentNo,
+          password: form.password,
         }),
       });
       onAuthenticated(data.user);
@@ -1479,32 +1559,143 @@ function LoginPage({ onAuthenticated }) {
             </div>
           </div>
 
-          <div className="auth-form">
-            <AuthInput
-              icon={<GraduationCap size={17} />}
-              label="学号"
-              value={form.studentNo}
-              onChange={(value) => updateForm('studentNo', value)}
-              placeholder="请输入你的学号"
-            />
-            <AuthInput
-              icon={<UserRound size={17} />}
-              label="姓名"
-              value={form.name}
-              onChange={(value) => updateForm('name', value)}
-              placeholder="请输入与学籍一致的姓名"
-            />
+          <div className="auth-tabs" aria-label="账号登录方式">
+            <button type="button" className="active">
+              学号登录
+            </button>
           </div>
+
+          <div className="auth-form">
+            {!isResetConfirm && (
+              <AuthInput
+                icon={<GraduationCap size={17} />}
+                label="学号"
+                value={form.studentNo}
+                onChange={(value) => updateForm('studentNo', value)}
+                placeholder="请输入学校分配的学号"
+              />
+            )}
+            {!isResetRequest && (
+              <AuthInput
+                icon={<LockKeyhole size={17} />}
+                label="密码"
+                type="password"
+                value={form.password}
+                onChange={(value) => updateForm('password', value)}
+                placeholder={isResetConfirm ? '输入至少 8 位的新密码' : '输入登录密码'}
+              />
+            )}
+            {(isRegister || isResetConfirm) && (
+              <AuthInput
+                icon={<LockKeyhole size={17} />}
+                label="确认密码"
+                type="password"
+                value={form.confirmPassword}
+                onChange={(value) => updateForm('confirmPassword', value)}
+                placeholder="再次输入密码"
+              />
+            )}
+          </div>
+
+          {!isReset && (
+            <div className="auth-options">
+              <label>
+                <input type="checkbox" defaultChecked />
+                保持登录状态
+              </label>
+              <span>忘记密码请联系辅导员或系统管理员</span>
+            </div>
+          )}
+
+          {isReset && (
+            <div className="auth-options">
+              <span>{isResetConfirm && resetTokenStatus === 'verifying' ? '正在校验重置链接...' : '记起密码了？'}</span>
+              <button type="button" onClick={() => switchMode('login')}>
+                返回登录
+              </button>
+            </div>
+          )}
 
           {authError && <p className="auth-alert error">{authError}</p>}
 
-          <button className="auth-submit" type="submit" disabled={submitting}>
-            {submitting ? '验证中...' : '登录并进入工作台'}
+          <button
+            className="auth-submit"
+            type="submit"
+            disabled={submitting || (isResetConfirm && resetTokenStatus !== 'valid')}
+          >
+            {submitting
+              ? '处理中...'
+              : isResetConfirm
+                ? '确认修改密码'
+                : isResetRequest
+                  ? '发送重置链接'
+                  : isRegister
+                    ? '创建账号并进入'
+                    : '使用学号登录'}
           </button>
 
           <p className="auth-notice">
-            首次登录会自动创建你的个人训练空间；如提示信息不匹配，请联系管理员确认你的学籍信息已导入。
+            学生账号由学校统一创建，不开放自主注册。首次登录后必须修改临时密码。
           </p>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function InitialPasswordChangePage({ user, onChanged, onLogout }) {
+  const [form, setForm] = useState({ password: '', confirmPassword: '' });
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setFormError('');
+    if (form.password !== form.confirmPassword) {
+      setFormError('两次输入的密码不一致。');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const data = await apiRequest('/api/auth/change-initial-password', {
+        method: 'POST',
+        body: JSON.stringify({ password: form.password, confirm_password: form.confirmPassword }),
+      });
+      onChanged(data.user);
+    } catch (error) {
+      setFormError(error.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-page">
+        <div className="auth-brand-panel">
+          <div className="auth-brand-head">
+            <div className="brand-mark"><ShieldCheck size={22} /></div>
+            <div><strong>AI Interview Intelligence</strong><span>多 Agent 面试评估系统</span></div>
+          </div>
+          <div className="auth-copy">
+            <p className="eyebrow">FIRST LOGIN SECURITY</p>
+            <h1>保护你的个人训练档案</h1>
+            <p>临时密码仅用于首次身份确认。完成改密后，管理员将无法再查看原临时密码。</p>
+          </div>
+        </div>
+        <form className="auth-card" onSubmit={handleSubmit}>
+          <div className="auth-card-head">
+            <div className="auth-icon"><KeyRound size={22} /></div>
+            <div><h2>首次登录修改密码</h2><p>学号：{user.studentNo} · {user.name}</p></div>
+          </div>
+          <div className="auth-form">
+            <AuthInput icon={<LockKeyhole size={17} />} label="新密码" type="password" value={form.password} onChange={(value) => setForm((current) => ({ ...current, password: value }))} placeholder="请输入至少 8 位的新密码" />
+            <AuthInput icon={<LockKeyhole size={17} />} label="确认新密码" type="password" value={form.confirmPassword} onChange={(value) => setForm((current) => ({ ...current, confirmPassword: value }))} placeholder="再次输入新密码" />
+          </div>
+          {formError && <p className="auth-alert error">{formError}</p>}
+          <button className="auth-submit" type="submit" disabled={submitting}>{submitting ? '正在保存...' : '修改密码并进入系统'}</button>
+          <button className="auth-secondary-action" type="button" onClick={onLogout}>退出当前账号</button>
+          <p className="auth-notice">密码修改成功后，临时密码立即失效，且无法由管理员恢复查看。</p>
         </form>
       </section>
     </main>
@@ -3216,6 +3407,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const [omniMessage, setOmniMessage] = useState('连接 Qwen-Omni API、网关或官方 WebRTC 后开始通话');
   const [omniAudioUrl, setOmniAudioUrl] = useState('');
   const [omniSignals, setOmniSignals] = useState({ text: false, audioField: false, playableAudio: false });
+  const [aliyunRtcStatus, setAliyunRtcStatus] = useState('idle');
+  const [aliyunRtcMessage, setAliyunRtcMessage] = useState('点击麦克风加入阿里云 RTC 面试频道');
+  const [aliyunRtcRemoteUsers, setAliyunRtcRemoteUsers] = useState(0);
+  const [aliyunAgentStatus, setAliyunAgentStatus] = useState('disabled');
+  const [aliyunAgentTranscript, setAliyunAgentTranscript] = useState(null);
+  const [aliyunSpokenQuestion, setAliyunSpokenQuestion] = useState('');
 
   useEffect(() => {
     if (!processingStage) {
@@ -3267,6 +3464,101 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const qwenRecognitionActiveRef = useRef(false);
   const qwenRecognitionSubmittedRef = useRef(false);
   const savedRealtimeEventsRef = useRef(new Set());
+  const aliyunRtcSessionRef = useRef(null);
+  const aliyunRtcAttemptRef = useRef(0);
+  const aliyunRtcChannelRef = useRef('');
+  const aliyunRtcAgentTaskRef = useRef('');
+  const aliyunRtcHeartbeatIntervalRef = useRef(15000);
+  const aliyunRtcTranscriptAssemblerRef = useRef(null);
+  if (!aliyunRtcTranscriptAssemblerRef.current) {
+    aliyunRtcTranscriptAssemblerRef.current = createAliyunRtcTranscriptAssembler();
+  }
+  const aliyunRtcProcessedTurnsRef = useRef(new Set());
+  const aliyunRtcSubmissionQueueRef = useRef(Promise.resolve());
+  const aliyunRtcAgentSubmissionQueueRef = useRef(Promise.resolve());
+  const aliyunRtcSubmissionErrorRef = useRef(null);
+  const aliyunRtcNextActionRef = useRef('ask_follow_up');
+  const activeAgentRef = useRef(null);
+  const handleSubmitAnswerRef = useRef(null);
+
+  const enqueueAliyunRtcCandidateTurn = (turn) => {
+    if (!turn?.text || turn.speaker !== 'candidate' || !turn.end) return;
+    const processedKey = `candidate:${turn.turnId}`;
+    if (aliyunRtcProcessedTurnsRef.current.has(processedKey)) return;
+    aliyunRtcProcessedTurnsRef.current.add(processedKey);
+    aliyunRtcNextActionRef.current = 'pending';
+    setAliyunRtcMessage('已识别到回答，正在保存并生成下一题');
+    recordAliyunRtcDiagnostic('candidate_turn_finalized', {
+      message: 'RTC 候选人转写已收口，开始提交业务回答',
+      metadata: { text_length: turn.text.length },
+    });
+    aliyunRtcSubmissionQueueRef.current = aliyunRtcSubmissionQueueRef.current
+      .then(() => handleSubmitAnswerRef.current?.(turn.text, {
+        source: 'aliyun_rtc',
+        sourceRef: turn.turnId,
+        transcriptText: turn.text,
+      }))
+      .then(() => {
+        aliyunRtcSubmissionErrorRef.current = null;
+      })
+      .catch((submitError) => {
+        aliyunRtcProcessedTurnsRef.current.delete(processedKey);
+        aliyunRtcSubmissionErrorRef.current = submitError;
+        aliyunRtcNextActionRef.current = 'error';
+        setError(submitError.message || 'RTC 语音回答保存失败');
+        setAliyunRtcMessage('RTC 回答保存失败，请先不要结束面试');
+      });
+  };
+
+  const enqueueAliyunRtcAgentTurn = (turn) => {
+    if (!turn?.text || turn.speaker !== 'agent' || !turn.end) return;
+    const processedKey = `agent:${turn.turnId}`;
+    if (aliyunRtcProcessedTurnsRef.current.has(processedKey)) return;
+    aliyunRtcProcessedTurnsRef.current.add(processedKey);
+    const candidateSubmission = aliyunRtcSubmissionQueueRef.current;
+    const agentId = activeAgentRef.current?.id || '';
+    aliyunRtcAgentSubmissionQueueRef.current = aliyunRtcAgentSubmissionQueueRef.current
+      .then(async () => {
+        // Cloud speech can finish before the candidate answer/evaluation has
+        // committed. Wait so the actual question keeps the right message order.
+        await candidateSubmission;
+        const latestMessages = await reloadMessages();
+        const latestQuestion = findLatestInterviewQuestion(latestMessages);
+        if (!shouldPersistAliyunAgentTurn(
+          turn,
+          latestQuestion,
+          aliyunRtcNextActionRef.current
+        )) return;
+        if (!agentId) throw new Error('无法确定 RTC 面试官，实际追问未保存');
+        const spokenQuestion = extractQuestionFromAgentTranscript(turn.text);
+        await apiRequest(`/api/interviews/${interviewId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            agent_id: agentId,
+            sender_type: 'agent',
+            message_type: 'follow_up',
+            content: spokenQuestion,
+            transcript_text: turn.text,
+            source: 'aliyun_rtc',
+            source_ref: `agent:${turn.turnId}`,
+          }),
+        });
+        await reloadMessages();
+        recordAliyunRtcDiagnostic('agent_turn_persisted', {
+          message: 'RTC AI 实际追问已同步到当前问题',
+          metadata: { text_length: spokenQuestion.length },
+        });
+      })
+      .catch((submitError) => {
+        aliyunRtcProcessedTurnsRef.current.delete(processedKey);
+        setError(submitError.message || 'RTC AI 实际追问同步失败');
+        recordAliyunRtcDiagnostic('agent_turn_persist_failed', {
+          level: 'warning',
+          message: 'RTC AI 实际追问未能同步到消息流',
+          metadata: { error_name: submitError?.name || 'Error' },
+        });
+      });
+  };
 
   const recordOmniWebrtcDiagnostic = (eventType, {
     level = 'info',
@@ -3298,11 +3590,358 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     });
   };
 
+  const recordAliyunRtcDiagnostic = (eventType, {
+    level = 'info',
+    message = '',
+    connectionState = '',
+    metadata = {},
+  } = {}) => {
+    if (!interviewId) return;
+    void apiRequest(`/api/interviews/${interviewId}/webrtc-events`, {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: 'aliyun-rtc-web',
+        session_id: aliyunRtcChannelRef.current,
+        event_type: eventType,
+        level,
+        connection_state: connectionState,
+        message,
+        metadata,
+        client_created_at: new Date().toISOString(),
+      }),
+    }).catch(() => {
+      // Diagnostics must never interrupt the interview flow.
+    });
+  };
+
+  const stopAliyunRtcAgentTask = async (_taskId) => {
+    if (!interviewId) return null;
+    try {
+      let result = await apiRequest(`/api/interviews/${interviewId}/rtc/agent/stop`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      // A concurrent server-side finish may observe the persisted stop intent
+      // before StopAgent returns. Wait briefly for the authoritative terminal
+      // state instead of navigating away while the Agent is still speaking.
+      for (let poll = 0; result.status !== 'stopped' && poll < 12; poll += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        const statusResult = await apiRequest(`/api/interviews/${interviewId}/rtc/session`);
+        result = {
+          ...result,
+          status: statusResult.rtc_session?.state || result.status,
+          rtc_session: statusResult.rtc_session || result.rtc_session,
+        };
+      }
+      recordAliyunRtcDiagnostic(
+        result.status === 'stopped' ? 'ai_agent_stopped' : 'ai_agent_stop_deferred',
+        {
+          level: result.status === 'stopped' ? 'info' : 'warning',
+          message: result.status === 'stopped' ? 'RTC AI 智能体已停止' : 'RTC AI 智能体停止请求已持久化',
+          metadata: { phase: result.status || 'unknown' },
+        }
+      );
+      if (result.status !== 'stopped') {
+        setAliyunRtcMessage('已退出通话，服务端正在回收 RTC 智能体');
+      }
+      return result;
+    } catch (stopError) {
+      recordAliyunRtcDiagnostic('ai_agent_stop_request_failed', {
+        level: 'warning',
+        message: 'RTC AI 智能体停止请求未送达，服务端将按心跳超时回收',
+        metadata: { error_name: stopError?.name || 'Error' },
+      });
+      return null;
+    }
+  };
+
+  const stopAliyunRtcCall = async (message = '阿里云 RTC 通话已断开') => {
+    // Some provider sessions do not emit a final end=true caption. Preserve
+    // any buffered candidate speech before pausing or leaving the channel.
+    enqueueAliyunRtcCandidateTurn(aliyunRtcTranscriptAssemblerRef.current.finalize('candidate'));
+    aliyunRtcAttemptRef.current += 1;
+    const agentTaskId = aliyunRtcAgentTaskRef.current;
+    aliyunRtcAgentTaskRef.current = '';
+    const session = aliyunRtcSessionRef.current;
+    aliyunRtcSessionRef.current = null;
+    setAliyunRtcStatus('idle');
+    setAliyunRtcMessage(message);
+    setAliyunRtcRemoteUsers(0);
+    setAliyunAgentStatus('disabled');
+    setAliyunAgentTranscript(null);
+    const leavePromise = session ? session.leave() : Promise.resolve();
+    const stopPromise = stopAliyunRtcAgentTask(agentTaskId);
+    await Promise.allSettled([leavePromise, stopPromise]);
+    if (session) {
+      recordAliyunRtcDiagnostic('call_stopped', { message: '用户已退出阿里云 RTC 频道' });
+    }
+    aliyunRtcChannelRef.current = '';
+    aliyunRtcTranscriptAssemblerRef.current.reset();
+  };
+
+  const waitForAliyunRtcAgentActive = async (initialSession, attempt) => {
+    let rtcSession = initialSession?.rtc_session || initialSession;
+    for (let poll = 0; poll < 75; poll += 1) {
+      if (aliyunRtcAttemptRef.current !== attempt) {
+        throw new Error('RTC 启动已取消');
+      }
+      if (rtcSession?.state === 'active') {
+        return {
+          task_id: rtcSession.task_id,
+          status: rtcSession.state,
+          rtc_session: rtcSession,
+        };
+      }
+      if (['start_failed', 'stop_requested', 'stopping', 'stop_failed', 'stopped'].includes(rtcSession?.state)) {
+        throw new Error(rtcSession.last_error || `RTC AI 智能体状态异常：${rtcSession.state}`);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const statusResult = await apiRequest(`/api/interviews/${interviewId}/rtc/session`);
+      rtcSession = statusResult.rtc_session;
+    }
+    throw new Error('RTC AI 智能体启动确认超时，请断开后重试');
+  };
+
+  const startAliyunRtcCall = async () => {
+    if (!interviewId || interview?.status === 'completed') {
+      setAliyunRtcStatus('idle');
+      setAliyunRtcMessage('本场面试已结束，不能重新加入 RTC 频道');
+      setError('本场面试已结束，请在复盘报告中查看结果。');
+      return;
+    }
+
+    if (aliyunRtcStatus === 'connected' || aliyunRtcStatus === 'connecting') {
+      await stopAliyunRtcCall();
+      return;
+    }
+
+    stopRealtimeCall();
+    stopOmniRealtimeCall('已切换到阿里云 RTC');
+    stopOmniWebrtcCall('已切换到阿里云 RTC');
+    stopQwenRecognition();
+    stopQwenSpeech();
+
+    const attempt = aliyunRtcAttemptRef.current + 1;
+    aliyunRtcAttemptRef.current = attempt;
+    setError('');
+    setAliyunRtcStatus('connecting');
+    setAliyunRtcMessage('正在申请面试频道 Token');
+    setAliyunRtcRemoteUsers(0);
+    setAliyunAgentStatus('disabled');
+    setAliyunAgentTranscript(null);
+    setAliyunSpokenQuestion('');
+    aliyunRtcTranscriptAssemblerRef.current.reset();
+    aliyunRtcProcessedTurnsRef.current.clear();
+    aliyunRtcSubmissionErrorRef.current = null;
+    aliyunRtcNextActionRef.current = 'ask_follow_up';
+
+    try {
+      // A reconnect must use the database-backed question instead of the
+      // messages captured by the render that created this callback.
+      const latestMessages = await reloadMessages();
+      const latestQuestion = findLatestInterviewQuestion(latestMessages);
+      const credentials = await apiRequest(`/api/interviews/${interviewId}/rtc/token`, {
+        method: 'POST',
+      });
+      if (aliyunRtcAttemptRef.current !== attempt) return;
+      aliyunRtcChannelRef.current = credentials.channel_id;
+      aliyunRtcHeartbeatIntervalRef.current = Math.max(
+        5000,
+        Number(credentials.rtc_session?.heartbeat_interval_seconds || 15) * 1000
+      );
+      recordAliyunRtcDiagnostic('token_issued', {
+        message: '已获取当前面试的 RTC 短期 Token',
+        metadata: { expires_in: credentials.expires_in },
+      });
+
+      setAliyunRtcMessage('正在请求麦克风权限并加入 RTC 频道');
+      const session = await createAliyunRtcAudioSession({
+        credentials,
+        onConnectionState: ({ state, message }) => {
+          if (aliyunRtcAttemptRef.current !== attempt) return;
+          if (state === 'connected') setAliyunRtcStatus('connected');
+          if (state === 'reconnecting') setAliyunRtcStatus('connecting');
+          if (state === 'disconnected') setAliyunRtcStatus('error');
+          setAliyunRtcMessage(message);
+          recordAliyunRtcDiagnostic('connection_state_changed', {
+            level: state === 'disconnected' ? 'warning' : 'info',
+            message: '阿里云 RTC 连接状态变更',
+            connectionState: state,
+          });
+        },
+        onRemoteAudio: (remoteUser) => {
+          if (aliyunRtcAttemptRef.current !== attempt) return;
+          setAliyunRtcMessage(`正在播放 ${remoteUser.userName || '远端面试官'} 的语音`);
+          recordAliyunRtcDiagnostic('remote_audio_playing', {
+            message: '已订阅并播放远端音频',
+          });
+        },
+        onRemoteUserCount: (count) => {
+          if (aliyunRtcAttemptRef.current === attempt) setAliyunRtcRemoteUsers(count);
+        },
+        onAgentMessagingReady: (ready) => {
+          if (aliyunRtcAttemptRef.current !== attempt) return;
+          recordAliyunRtcDiagnostic(
+            ready ? 'ai_agent_messaging_ready' : 'ai_agent_messaging_unavailable',
+            {
+              level: ready ? 'info' : 'error',
+              message: ready
+                ? 'RTC AI 字幕通道已就绪'
+                : 'RTC AI 字幕通道未就绪',
+            }
+          );
+        },
+        onAgentStatus: (status) => {
+          if (aliyunRtcAttemptRef.current !== attempt) return;
+          if (['thinking', 'processing', 'responding'].includes(status)) {
+            enqueueAliyunRtcCandidateTurn(
+              aliyunRtcTranscriptAssemblerRef.current.finalize('candidate')
+            );
+          }
+          setAliyunAgentStatus(status);
+          const statusMessages = {
+            listening: 'AI 面试官正在聆听',
+            thinking: 'AI 面试官正在思考',
+            processing: 'AI 面试官正在思考',
+            responding: 'AI 面试官正在回答',
+          };
+          setAliyunRtcMessage(statusMessages[status] || `AI 面试官状态：${status}`);
+          recordAliyunRtcDiagnostic('ai_agent_status_changed', {
+            message: 'RTC AI 智能体状态变更',
+            metadata: { phase: status },
+          });
+        },
+        onAgentMessage: (message) => {
+          if (aliyunRtcAttemptRef.current !== attempt) return;
+          recordAliyunRtcDiagnostic('transcription_received', {
+            message: 'RTC AI 智能体字幕回调',
+            metadata: {
+              speaker: message?.userType || 'unknown',
+              end: Boolean(message?.end),
+              reasoning: Boolean(message?.reasoning),
+              text_length: String(message?.message || '').trim().length,
+            },
+          });
+          if (message?.userType === 'agent' && !message?.reasoning) {
+            enqueueAliyunRtcCandidateTurn(
+              aliyunRtcTranscriptAssemblerRef.current.finalize('candidate')
+            );
+          }
+          const turn = aliyunRtcTranscriptAssemblerRef.current.consume(message);
+          if (!turn) return;
+          setAliyunAgentTranscript({
+            text: turn.text,
+            speaker: turn.speaker === 'candidate' ? '候选人' : 'AI 面试官',
+            end: turn.end,
+          });
+          if (turn.speaker === 'agent') {
+            setAliyunSpokenQuestion(extractQuestionFromAgentTranscript(turn.text));
+            enqueueAliyunRtcAgentTurn(turn);
+          }
+          enqueueAliyunRtcCandidateTurn(turn);
+        },
+      });
+
+      if (aliyunRtcAttemptRef.current !== attempt) {
+        await session.leave();
+        return;
+      }
+      aliyunRtcSessionRef.current = session;
+      setAliyunRtcStatus('connected');
+      if (credentials.ai_agent?.enabled) {
+        setAliyunAgentStatus('starting');
+        setAliyunRtcMessage('已加入 RTC，正在启动 AI 面试官');
+        let agentSession = await apiRequest(`/api/interviews/${interviewId}/rtc/agent/start`, {
+          method: 'POST',
+        });
+        if (agentSession.status !== 'active') {
+          setAliyunRtcMessage('智能体任务已提交，正在确认云端状态');
+          agentSession = await waitForAliyunRtcAgentActive(agentSession, attempt);
+        }
+        if (aliyunRtcAttemptRef.current !== attempt) {
+          stopAliyunRtcAgentTask(agentSession.task_id);
+          await session.leave();
+          return;
+        }
+        aliyunRtcAgentTaskRef.current = agentSession.task_id;
+        setAliyunAgentStatus(agentSession.status || 'starting');
+        setAliyunRtcMessage('AI 面试官正在进入频道');
+        recordAliyunRtcDiagnostic('ai_agent_started', {
+          message: 'RTC AI 智能体启动请求成功',
+        });
+        // A newly created provider task receives the current question as its
+        // StartAgent greeting from the backend. Only an already-running task
+        // needs an explicit replay when the browser reconnects.
+        if (agentSession.idempotent && latestQuestion?.id) {
+          void apiRequest(`/api/interviews/${interviewId}/rtc/agent/notify`, {
+            method: 'POST',
+            body: JSON.stringify({ message_id: latestQuestion.id }),
+          }).catch((notifyError) => {
+            setAliyunRtcMessage(notifyError.message || 'RTC 当前问题播报失败');
+          });
+        }
+      } else {
+        setAliyunAgentStatus('disabled');
+        setAliyunRtcMessage('已加入 RTC；配置模板和 RAM 密钥后会自动启动 AI 面试官');
+      }
+    } catch (requestError) {
+      if (aliyunRtcAttemptRef.current !== attempt) return;
+      const session = aliyunRtcSessionRef.current;
+      aliyunRtcSessionRef.current = null;
+      if (session) await session.leave();
+      const agentTaskId = aliyunRtcAgentTaskRef.current;
+      aliyunRtcAgentTaskRef.current = '';
+      stopAliyunRtcAgentTask(agentTaskId);
+      setAliyunRtcStatus('error');
+      setAliyunAgentStatus('error');
+      setAliyunRtcMessage(requestError.message || '阿里云 RTC 连接失败');
+      setError(requestError.message || '阿里云 RTC 连接失败');
+      recordAliyunRtcDiagnostic('call_start_failed', {
+        level: 'error',
+        message: '阿里云 RTC 启动失败',
+        metadata: { stage: aliyunRtcChannelRef.current ? 'join_or_publish' : 'token' },
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (!interviewId || aliyunRtcStatus !== 'connected') return undefined;
+    let cancelled = false;
+
+    const heartbeat = () => {
+      void apiRequest(`/api/interviews/${interviewId}/rtc/session/heartbeat`, {
+        method: 'POST',
+      }).then((result) => {
+        if (cancelled) return;
+        const serverState = result.rtc_session?.state;
+        if (serverState && !['starting', 'active'].includes(serverState)) {
+          setAliyunRtcMessage(`RTC 服务端状态：${serverState}`);
+        }
+      }).catch((heartbeatError) => {
+        if (cancelled) return;
+        recordAliyunRtcDiagnostic('session_heartbeat_failed', {
+          level: 'warning',
+          message: 'RTC 会话心跳失败',
+          metadata: { error_name: heartbeatError?.name || 'Error' },
+        });
+      });
+    };
+
+    heartbeat();
+    const timer = window.setInterval(heartbeat, aliyunRtcHeartbeatIntervalRef.current);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [interviewId, aliyunRtcStatus]);
+
   const activeAgent = agents.find((agent) => agent.status === 'active') || agents.find((agent) => agent.status !== 'completed') || agents[0] || null;
+  activeAgentRef.current = activeAgent;
   const currentAgentName = activeAgent?.agent_name || liveInterview.currentAgent;
-  const currentQuestion =
-    [...messages].reverse().find((message) => message.sender_type === 'agent')?.content ||
-    createInitialQuestion(interview, activeAgent);
+  const persistedQuestion = findLatestInterviewQuestion(messages)?.content || createInitialQuestion(interview, activeAgent);
+  const currentQuestion = voiceProvider === 'aliyun-rtc' && aliyunSpokenQuestion
+    ? aliyunSpokenQuestion
+    : persistedQuestion;
 
   const reloadMessages = async () => {
     console.info('reloadMessages', {
@@ -4695,6 +5334,11 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         ]);
 
         if (!mounted) return;
+        if (interviewData.interview?.status === 'completed') {
+          onReportReady(interviewId);
+          return;
+        }
+
         setInterview(interviewData.interview);
         setAgents(agentData.agents || []);
 
@@ -4739,6 +5383,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   }, [interviewId]);
 
   useEffect(() => () => {
+    void stopAliyunRtcCall();
     stopRealtimeCall();
     stopOmniRealtimeCall();
     stopOmniWebrtcCall();
@@ -4747,24 +5392,35 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   }, []);
 
   useEffect(() => {
-    if (voiceProvider === 'openai') {
+    if (voiceProvider === 'aliyun-rtc') {
+      stopOmniRealtimeCall('已切换到阿里云 RTC');
+      stopOmniWebrtcCall('已切换到阿里云 RTC');
+      stopRealtimeCall();
+      stopQwenRecognition();
+      stopQwenSpeech();
+      setAliyunRtcMessage('点击麦克风加入阿里云 RTC 面试频道');
+    } else if (voiceProvider === 'openai') {
+      void stopAliyunRtcCall('已切换到 OpenAI 实时通话');
       stopOmniRealtimeCall('已切换到 OpenAI 实时通话');
       stopOmniWebrtcCall('已切换到 OpenAI 实时通话');
       stopQwenRecognition();
       stopQwenSpeech();
       setVoiceMessage('点击麦克风开始真实语音通话');
     } else if (voiceProvider === 'qwen') {
+      void stopAliyunRtcCall('已切换到千问 CosyVoice 对话');
       stopOmniRealtimeCall('已切换到千问 CosyVoice 对话');
       stopOmniWebrtcCall('已切换到千问 CosyVoice 对话');
       stopRealtimeCall();
       setQwenMessage('点击麦克风说出回答，或提交文本回答');
     } else if (voiceProvider === 'omni') {
+      void stopAliyunRtcCall('已切换到 Qwen-Omni API 录音');
       stopOmniWebrtcCall('已切换到 Qwen-Omni API 录音');
       stopRealtimeCall();
       stopQwenRecognition();
       stopQwenSpeech();
       setOmniMessage('连接 Qwen-Omni API/网关后开始录音提交');
     } else {
+      void stopAliyunRtcCall('已切换到 Qwen 官方 WebRTC');
       stopOmniRealtimeCall('已切换到 Qwen 官方 WebRTC');
       stopRealtimeCall();
       stopQwenRecognition();
@@ -4782,9 +5438,27 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     });
   };
 
-  const handleSubmitAnswer = async (submittedAnswer = null) => {
+  const speakAliyunRtcMessage = async (message) => {
+    const taskId = aliyunRtcAgentTaskRef.current;
+    if (voiceProvider !== 'aliyun-rtc' || !taskId || !message?.id) return;
+    try {
+      await apiRequest(`/api/interviews/${interviewId}/rtc/agent/notify`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: message.id }),
+      });
+    } catch (notifyError) {
+      setAliyunRtcMessage(notifyError.message || 'RTC 面试问题播报失败');
+      recordAliyunRtcDiagnostic('ai_agent_notify_failed', {
+        level: 'warning',
+        message: 'RTC AI 智能体问题播报失败',
+        metadata: { error_name: notifyError?.name || 'Error' },
+      });
+    }
+  };
+
+  const handleSubmitAnswer = async (submittedAnswer = null, options = {}) => {
     const content = typeof submittedAnswer === 'string' ? submittedAnswer.trim() : answer.trim();
-    if (!content || !interviewId || submitting) return;
+    if (!content || !interviewId || (submitting && options.source !== 'aliyun_rtc')) return;
 
     setSubmitting(true);
     setError('');
@@ -4797,8 +5471,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           sender_type: 'candidate',
           message_type: 'answer',
           content,
+          transcript_text: options.transcriptText || '',
+          source: options.source || 'text',
+          source_ref: options.sourceRef || '',
         }),
       });
+      if (answerData.duplicate) setProcessingStage('本轮语音回答已保存，正在继续生成下一题');
       setProcessingStage('正在生成本题评价');
       await apiRequest(`/api/interviews/${interviewId}/evaluations`, {
         method: 'POST',
@@ -4811,32 +5489,46 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         activeAgent,
         lastAnswer: content,
       });
+      if (options.source === 'aliyun_rtc') {
+        aliyunRtcNextActionRef.current = nextAction.action;
+      }
 
       if (nextAction.action === 'ask_follow_up' && activeAgent) {
-        setProcessingStage('正在生成下一条智能追问');
-        let followUpQuestion = nextAction.question;
-        try {
-          const followUp = await apiRequest(`/api/interviews/${interviewId}/follow-up`, {
-            method: 'POST',
-            body: JSON.stringify({ last_answer: content }),
-          });
-          if (followUp.question) {
-            followUpQuestion = followUp.question;
+        if (options.source === 'aliyun_rtc') {
+          // Alibaba's cloud Agent is already generating and speaking this
+          // follow-up. Its final caption is the source of truth and is saved by
+          // enqueueAliyunRtcAgentTurn; creating another question here caused
+          // the card and the actual voice to diverge.
+          setProcessingStage('正在等待 RTC AI 面试官的实际追问');
+        } else {
+          setProcessingStage('正在生成下一条智能追问');
+          let followUpQuestion = nextAction.question;
+          try {
+            const followUp = await apiRequest(`/api/interviews/${interviewId}/follow-up`, {
+              method: 'POST',
+              body: JSON.stringify({ last_answer: content }),
+            });
+            if (followUp.question) {
+              followUpQuestion = followUp.question;
+            }
+          } catch (followUpError) {
+            setQwenMessage('Kimi 追问生成失败，已使用本地追问兜底');
           }
-        } catch (followUpError) {
-          setQwenMessage('Kimi 追问生成失败，已使用本地追问兜底');
-        }
-        const followUpData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
-          method: 'POST',
-          body: JSON.stringify({
-            agent_id: activeAgent.id,
-            sender_type: 'agent',
-            message_type: 'follow_up',
-            content: followUpQuestion,
-          }),
-        });
-        if (voiceProvider === 'qwen') {
-          playQwenSpeechInBackground(followUpData.message.content);
+          const followUpData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+              agent_id: activeAgent.id,
+              sender_type: 'agent',
+              message_type: 'follow_up',
+              content: followUpQuestion,
+            }),
+          });
+          if (voiceProvider === 'qwen') {
+            playQwenSpeechInBackground(followUpData.message.content);
+          }
+          if (voiceProvider === 'aliyun-rtc') {
+            await speakAliyunRtcMessage(followUpData.message);
+          }
         }
       }
       if (nextAction.action === 'switch_agent' && activeAgent && nextAction.nextAgent) {
@@ -4865,9 +5557,18 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         if (voiceProvider === 'qwen') {
           playQwenSpeechInBackground(openingData.message.content);
         }
+        if (voiceProvider === 'aliyun-rtc') {
+          await speakAliyunRtcMessage(openingData.message);
+        }
       }
       if (nextAction.action === 'finish_interview') {
         setProcessingStage('三轮面试已完成，正在生成综合报告');
+        await stopAliyunRtcCall('面试已完成');
+        stopRealtimeCall();
+        stopOmniRealtimeCall();
+        stopOmniWebrtcCall();
+        stopQwenRecognition();
+        stopQwenSpeech();
         if (activeAgent) {
           await apiRequest(`/api/interviews/${interviewId}/messages`, {
             method: 'POST',
@@ -4889,24 +5590,38 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       await reloadMessages();
     } catch (requestError) {
       setError(requestError.message);
+      if (options.source === 'aliyun_rtc') throw requestError;
     } finally {
       setSubmitting(false);
       setProcessingStage('');
     }
   };
+  handleSubmitAnswerRef.current = handleSubmitAnswer;
 
   const handleFinish = async () => {
     if (!interviewId || finishing) return;
-    stopRealtimeCall();
-    stopOmniRealtimeCall();
-    stopOmniWebrtcCall();
-    stopQwenRecognition();
-    stopQwenSpeech();
     setFinishing(true);
     setError('');
-    setProcessingStage('正在结束面试并生成综合报告');
+    setProcessingStage('正在保存最后一条回答');
 
     try {
+      if (voiceProvider === 'aliyun-rtc') {
+        const pendingTurn = aliyunRtcTranscriptAssemblerRef.current.finalize('candidate');
+        enqueueAliyunRtcCandidateTurn(pendingTurn);
+        await aliyunRtcSubmissionQueueRef.current;
+        if (aliyunRtcSubmissionErrorRef.current) throw aliyunRtcSubmissionErrorRef.current;
+      }
+      await stopAliyunRtcCall();
+      stopRealtimeCall();
+      stopOmniRealtimeCall();
+      stopOmniWebrtcCall();
+      stopQwenRecognition();
+      stopQwenSpeech();
+      const finalMessages = await reloadMessages();
+      if (!finalMessages.some((item) => item.sender_type === 'candidate' && String(item.content || '').trim())) {
+        throw new Error('未识别到候选人回答，本次面试尚未完成。请重新接通阿里云 RTC 并确认页面出现实时转写后再结束。');
+      }
+      setProcessingStage('正在结束面试并生成综合报告');
       await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
       await apiRequest(`/api/interviews/${interviewId}/report`, { method: 'POST' });
       onReportReady(interviewId);
@@ -4967,32 +5682,69 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
             <p>{currentQuestion}</p>
           </div>
 
-          <div className="voice-mode-dropdown" aria-label="语音模式">
-            <div className="dropdown-trigger">
-              <span>千问 WebRTC</span>
-            </div>
+          <div className="voice-mode-dropdown">
+            <select
+              className="dropdown-trigger"
+              aria-label="语音模式"
+              value={voiceProvider}
+              onChange={(event) => setVoiceProvider(event.target.value)}
+            >
+              <option value="aliyun-rtc">阿里云 RTC AI</option>
+              <option value="omni-webrtc">千问官方 WebRTC</option>
+              <option value="openai">OpenAI 实时语音</option>
+              <option value="qwen">千问 CosyVoice 对话</option>
+              <option value="omni">Qwen-Omni API 录音</option>
+            </select>
           </div>
 
           <div className="call-controls" aria-label="电话面试控制">
             <button
               className={`control-button ${
-                voiceProvider === 'openai'
+                voiceProvider === 'aliyun-rtc'
+                  ? aliyunRtcStatus === 'connected' ? 'primary' : ''
+                  : voiceProvider === 'openai'
                   ? voiceStatus === 'connected' ? 'primary' : ''
                   : voiceProvider === 'qwen'
                     ? qwenStatus === 'listening' ? 'primary' : ''
                     : omniStatus === 'listening' || omniStatus === 'connected' || omniStatus === 'speaking' ? 'primary' : ''
               }`}
-              onClick={voiceProvider === 'openai' ? startRealtimeCall : voiceProvider === 'qwen' ? startQwenVoiceConversation : voiceProvider === 'omni-webrtc' ? startOmniWebrtcCall : startOmniRealtimeCall}
-              disabled={voiceProvider === 'openai' ? voiceStatus === 'connecting' : voiceProvider === 'qwen' ? qwenStatus === 'connecting' || submitting : omniStatus === 'connecting'}
-              title={voiceProvider === 'openai' ? voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音' : voiceProvider === 'qwen' ? qwenStatus === 'listening' ? '停止聆听' : '开始聆听候选人回答' : voiceProvider === 'omni-webrtc' ? omniStatus === 'connected' || omniStatus === 'listening' || omniStatus === 'speaking' ? '断开 Qwen 官方 WebRTC 通话' : '开始 Qwen 官方 WebRTC 通话' : omniStatus === 'listening' ? '停止录音并提交 Qwen-Omni' : '开始 Qwen-Omni 录音'}
+              onClick={voiceProvider === 'aliyun-rtc' ? startAliyunRtcCall : voiceProvider === 'openai' ? startRealtimeCall : voiceProvider === 'qwen' ? startQwenVoiceConversation : voiceProvider === 'omni-webrtc' ? startOmniWebrtcCall : startOmniRealtimeCall}
+              disabled={finishing || interview?.status === 'completed' || (voiceProvider === 'aliyun-rtc' ? false : voiceProvider === 'openai' ? voiceStatus === 'connecting' : voiceProvider === 'qwen' ? qwenStatus === 'connecting' || submitting : omniStatus === 'connecting')}
+              title={voiceProvider === 'aliyun-rtc' ? aliyunRtcStatus === 'connected' || aliyunRtcStatus === 'connecting' ? '断开阿里云 RTC 通话' : '加入阿里云 RTC 通话' : voiceProvider === 'openai' ? voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音' : voiceProvider === 'qwen' ? qwenStatus === 'listening' ? '停止聆听' : '开始聆听候选人回答' : voiceProvider === 'omni-webrtc' ? omniStatus === 'connected' || omniStatus === 'listening' || omniStatus === 'speaking' ? '断开 Qwen 官方 WebRTC 通话' : '开始 Qwen 官方 WebRTC 通话' : omniStatus === 'listening' ? '停止录音并提交 Qwen-Omni' : '开始 Qwen-Omni 录音'}
             >
               <Mic size={20} />
             </button>
-            <button className="control-button danger" onClick={handleFinish} disabled={finishing}>
+            <button className="control-button danger" onClick={handleFinish} disabled={finishing || submitting}>
               <PhoneOff size={20} />
             </button>
           </div>
-          {voiceProvider === 'openai' ? (
+          {voiceProvider === 'aliyun-rtc' ? (
+            <div className={`voice-status ${aliyunRtcStatus}`}>
+              <span>{aliyunRtcStatus === 'connected' ? '阿里云 RTC 已接通' : aliyunRtcStatus === 'connecting' ? '正在连接阿里云 RTC' : aliyunRtcStatus === 'error' ? '阿里云 RTC 连接失败' : '阿里云 RTC 待接入'}</span>
+              <small>{aliyunRtcMessage}</small>
+              {aliyunRtcStatus === 'connected' && <small>频道内远端成员：{aliyunRtcRemoteUsers}</small>}
+              {aliyunRtcStatus === 'connected' && (
+                <small>
+                  AI 面试官：{{
+                    disabled: '待配置',
+                    starting: '启动中',
+                    active: '已连接',
+                    listening: '聆听中',
+                    thinking: '思考中',
+                    processing: '思考中',
+                    responding: '回答中',
+                    error: '异常',
+                  }[aliyunAgentStatus] || aliyunAgentStatus}
+                </small>
+              )}
+              {aliyunAgentTranscript?.text && (
+                <small>
+                  {aliyunAgentTranscript.speaker}：{aliyunAgentTranscript.text}
+                  {!aliyunAgentTranscript.end ? '…' : ''}
+                </small>
+              )}
+            </div>
+          ) : voiceProvider === 'openai' ? (
             <div className={`voice-status ${voiceStatus}`}>
               <span>{voiceStatus === 'connected' ? '实时语音已接通' : voiceStatus === 'connecting' ? '正在连接实时语音' : voiceStatus === 'error' ? '实时语音连接失败' : '实时语音待接入'}</span>
               <small>{voiceMessage}</small>
@@ -5389,6 +6141,9 @@ function HistoryPage({ onOpenReport }) {
               <div>
                 <strong>{item.target_role}</strong>
                 <span>{item.interview_type || '综合模拟'} · {formatDateTime(item.updated_at || item.created_at)}</span>
+                <span>
+                  提问 {item.question_count ?? 0} · 回答 {item.candidate_answer_count ?? 0} · 单轮评价 {item.evaluation_count ?? 0}
+                </span>
                 <p>{item.summary}</p>
               </div>
               <div className="history-score">
@@ -5743,6 +6498,7 @@ function App() {
         if (mounted) {
           setUser(data.user);
         }
+        if (!data.user || data.user.mustChangePassword) return null;
         return apiRequest('/api/interviews?status=running')
           .then((interviewData) => {
             if (!mounted) return;
@@ -5806,6 +6562,10 @@ function App() {
 
   if (!user) {
     return <LoginPage onAuthenticated={setUser} />;
+  }
+
+  if (user.mustChangePassword) {
+    return <InitialPasswordChangePage user={user} onChanged={setUser} onLogout={handleLogout} />;
   }
 
   return (

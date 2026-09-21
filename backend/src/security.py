@@ -25,6 +25,14 @@ def is_valid_email(email: str) -> bool:
     return re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email or "") is not None
 
 
+def normalize_student_no(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def is_valid_student_no(value: str) -> bool:
+    return re.match(r"^[0-9A-Z_-]{3,40}$", value or "") is not None
+
+
 def hash_password(password: str) -> str:
     salt = _b64url_encode(secrets.token_bytes(16))
     derived_key = hashlib.scrypt(
@@ -73,9 +81,15 @@ def sanitize_user(user: dict | None) -> dict | None:
 
     return {
         "id": user["id"],
-        "email": user["email"],
+        "email": user.get("email"),
+        "studentNo": user.get("student_no"),
         "name": user["name"],
         "status": user["status"],
+        "college": user.get("college"),
+        "className": user.get("class_name"),
+        "counselor": user.get("counselor"),
+        "studentStatus": user.get("student_status"),
+        "mustChangePassword": bool(user.get("must_change_password")),
         "createdAt": user["created_at"],
         "lastLoginAt": user["last_login_at"],
     }

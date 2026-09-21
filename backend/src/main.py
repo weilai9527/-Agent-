@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -17,7 +19,6 @@ from uuid import uuid4
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
@@ -36,7 +37,14 @@ from .ai_evaluation import (
     generate_ai_evaluation,
     generate_ai_report,
 )
-from .kimi_followup import KimiFollowupError, analyze_resume, generate_kimi_followup, generate_opening_question, resume_analysis_source_text
+from .kimi_followup import (
+    KimiFollowupError,
+    analyze_resume,
+    format_resume_analysis,
+    generate_kimi_followup,
+    generate_opening_question,
+    resume_analysis_source_text,
+)
 from .qwen_realtime_tts import QwenRealtimeTtsError, get_qwen_realtime_tts_media_type, stream_qwen_realtime_tts
 from .qwen_tts import QwenTtsError, get_qwen_tts_media_type, stream_qwen_tts
 from .resume_parser import extract_pdf_text
@@ -53,12 +61,32 @@ from .security import (
     hash_password,
     hash_token,
     is_valid_email,
+    is_valid_student_no,
     normalize_email,
+    normalize_student_no,
     sanitize_user,
     verify_password,
 )
 
-app = FastAPI(title="Multi Agent Interview API")
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    global rtc_recovery_task
+    if rtc_recovery_task is None or rtc_recovery_task.done():
+        rtc_recovery_task = asyncio.create_task(rtc_recovery_loop())
+    try:
+        yield
+    finally:
+        if rtc_recovery_task is not None:
+            rtc_recovery_task.cancel()
+            try:
+                await rtc_recovery_task
+            except asyncio.CancelledError:
+                pass
+            rtc_recovery_task = None
+
+
+app = FastAPI(title="Multi Agent Interview API", lifespan=app_lifespan)
 
 allowed_origins = [
     origin.strip()
@@ -147,6 +175,7 @@ INTERVIEW_STATUSES = {"draft", "running", "completed"}
 AGENT_STATUSES = {"pending", "active", "completed"}
 MESSAGE_SENDER_TYPES = {"agent", "candidate", "system"}
 MESSAGE_TYPES = {"question", "answer", "follow_up", "system", "transcript"}
+MESSAGE_SOURCES = {"text", "aliyun_rtc"}
 AGENT_QUESTION_MESSAGE_TYPES = {"question", "follow_up"}
 INTERVIEW_TEXT_FIELDS = [
     ("target_role", "目标岗位", 80),
@@ -372,6 +401,14 @@ def parse_message_input(body: dict) -> dict:
     transcript_text, message = read_text_field(body, "transcript_text", "语音转写结果", 12000)
     if message:
         raise error(400, message)
+    source = str(body.get("source") or "text").strip().lower()
+    if source not in MESSAGE_SOURCES:
+        raise error(400, "消息来源不正确。")
+    source_ref, message = read_text_field(body, "source_ref", "消息来源标识", 128)
+    if message:
+        raise error(400, message)
+    if source == "aliyun_rtc" and not source_ref:
+        raise error(400, "RTC 字幕必须提供稳定的 turn_id。")
 
     agent_id = str(body.get("agent_id") or "").strip() or None
     if sender_type == "agent" and not agent_id:
@@ -391,6 +428,8 @@ def parse_message_input(body: dict) -> dict:
         "message_type": message_type,
         "content": content,
         "transcript_text": transcript_text,
+        "source": source,
+        "source_ref": source_ref,
     }
 
 
@@ -484,7 +523,9 @@ def find_user_by_session(request: Request) -> dict | None:
         return None
     return one(
         """
-        SELECT users.id, users.email, users.name, users.status, users.created_at, users.last_login_at
+        SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
+               users.counselor, users.student_status, users.must_change_password,
+               users.status, users.created_at, users.last_login_at
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token_hash = ?
@@ -500,7 +541,9 @@ def find_user_by_session_token(token: str | None) -> dict | None:
         return None
     return one(
         """
-        SELECT users.id, users.email, users.name, users.status, users.created_at, users.last_login_at
+        SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
+               users.counselor, users.student_status, users.must_change_password,
+               users.status, users.created_at, users.last_login_at
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token_hash = ?
@@ -515,6 +558,8 @@ def require_auth(request: Request) -> dict:
     user = find_user_by_session(request)
     if not user:
         raise error(401, "请先登录。")
+    if bool(user.get("must_change_password")):
+        raise error(403, "首次登录必须先修改临时密码。")
     return user
 
 
@@ -642,6 +687,16 @@ def ensure_resume_analysis_for_user(user: dict, force: bool = False) -> dict:
     return serialized
 
 
+def resume_analysis_for_prompt(user: dict) -> dict[str, Any] | None:
+    """Return a current structured analysis without inventing resume content."""
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    if not resume_source_text(profile):
+        return None
+    analysis = ensure_resume_analysis_for_user(user).get("analysis")
+    return analysis if isinstance(analysis, dict) else None
+
+
 def select_resume_point(analysis: dict, interview: dict, messages: list[dict]) -> dict:
     asked_text = "\n".join(str(message.get("content") or "") for message in messages if message.get("sender_type") == "agent")
     candidates: list[dict[str, Any]] = []
@@ -762,7 +817,9 @@ def list_messages_by_interview_id(interview_id: str) -> list[dict]:
         SELECT messages.id, messages.interview_id, messages.agent_id,
                agents.agent_name, agents.agent_type,
                messages.sender_type, messages.message_type, messages.content,
-               messages.transcript_text, messages.order_index, messages.created_at
+               messages.transcript_text, messages.source, messages.source_ref,
+               messages.reply_to_message_id, messages.round_agent_id,
+               messages.order_index, messages.created_at
         FROM interview_messages AS messages
         LEFT JOIN interview_agents AS agents ON agents.id = messages.agent_id
         WHERE messages.interview_id = ?
@@ -778,13 +835,39 @@ def find_message_by_interview_id(message_id: str, interview_id: str) -> dict | N
         SELECT messages.id, messages.interview_id, messages.agent_id,
                agents.agent_name, agents.agent_type,
                messages.sender_type, messages.message_type, messages.content,
-               messages.transcript_text, messages.order_index, messages.created_at
+               messages.transcript_text, messages.source, messages.source_ref,
+               messages.reply_to_message_id, messages.round_agent_id,
+               messages.order_index, messages.created_at
         FROM interview_messages AS messages
         LEFT JOIN interview_agents AS agents ON agents.id = messages.agent_id
         WHERE messages.id = ? AND messages.interview_id = ?
         """,
         (message_id, interview_id),
     )
+
+
+def find_message_by_source_ref(interview_id: str, source: str, source_ref: str) -> dict | None:
+    if not source_ref:
+        return None
+    row = one(
+        "SELECT id FROM interview_messages WHERE interview_id = ? AND source = ? AND source_ref = ?",
+        (interview_id, source, source_ref),
+    )
+    return find_message_by_interview_id(row["id"], interview_id) if row else None
+
+
+def latest_interview_question(interview_id: str) -> dict | None:
+    row = one(
+        """
+        SELECT id
+        FROM interview_messages
+        WHERE interview_id = ? AND sender_type = 'agent' AND message_type IN ('question', 'follow_up')
+        ORDER BY order_index DESC, created_at DESC
+        LIMIT 1
+        """,
+        (interview_id,),
+    )
+    return find_message_by_interview_id(row["id"], interview_id) if row else None
 
 
 def next_message_order_index(interview_id: str) -> int:
@@ -977,6 +1060,7 @@ def build_agent_feedback(agents: list[dict], evaluations: list[dict]) -> list[di
 
 def build_timeline_review(messages: list[dict], evaluations: list[dict]) -> list[dict]:
     evaluation_by_message_id = {evaluation["message_id"]: evaluation for evaluation in evaluations}
+    message_by_id = {message["id"]: message for message in messages}
     timeline = []
     latest_question = None
     for message in messages:
@@ -987,14 +1071,15 @@ def build_timeline_review(messages: list[dict], evaluations: list[dict]) -> list
         if message["sender_type"] != "candidate":
             continue
         evaluation = evaluation_by_message_id.get(message["id"], {})
-        question_content = (latest_question or {}).get("content") or ""
+        linked_question = message_by_id.get(message.get("reply_to_message_id")) or latest_question
+        question_content = (linked_question or {}).get("content") or ""
         timeline.append(
             {
                 "message_id": message["id"],
                 "order_index": message["order_index"],
                 "sender_type": "candidate",
                 "message_type": "answer",
-                "agent_name": (latest_question or {}).get("agent_name"),
+                "agent_name": (linked_question or {}).get("agent_name"),
                 "question_preview": f"{question_content[:160]}..." if len(question_content) > 160 else question_content,
                 "answer_preview": f"{content[:240]}..." if len(content) > 240 else content,
                 "content_preview": f"{content[:80]}..." if len(content) > 80 else content,
@@ -1068,7 +1153,12 @@ def create_initial_question(interview: dict, agent: dict | None) -> str:
     return f"{agent_name}：请结合你的{focus}，介绍一个最能体现你胜任{role}的项目。"
 
 
-def build_realtime_session_config(interview: dict, agents: list[dict], messages: list[dict]) -> dict:
+def build_realtime_session_config(
+    interview: dict,
+    agents: list[dict],
+    messages: list[dict],
+    resume_analysis: dict[str, Any] | None = None,
+) -> dict:
     current_agent = next((agent for agent in agents if agent.get("status") == "active"), agents[0] if agents else None)
     latest_questions = [
         message
@@ -1087,7 +1177,7 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
 
     recent_context = "\n".join(
         [
-            f"{speaker_label(message)}：{message.get('content') or ''}"
+            f"{speaker_label(message)}：{str(message.get('content') or '')[:600]}"
             for message in recent_messages
         ]
     ) or "暂无历史对话。"
@@ -1117,9 +1207,10 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
                 f"难度：{interview.get('difficulty') or '标准'}",
                 f"面试官风格：{interview.get('interviewer_style') or '专业追问'}",
                 f"练习重点：{interview.get('focus_areas') or '项目经历'}",
-                f"候选人简历与项目材料：\n{str(interview.get('resume_context') or '未填写')[:12000]}",
                 f"当前面试官：{current_agent.get('agent_name') if current_agent else '技术面试 Agent'}",
                 f"当前问题：{latest_question}",
+                f"候选人结构化简历分析：\n{format_resume_analysis(resume_analysis)[:3500]}",
+                f"候选人简历与项目补充材料：\n{str(interview.get('resume_context') or '未填写')[:2000]}",
                 f"最近对话：\n{recent_context}",
                 f"已问过的问题，避免复述：\n{asked_questions}",
                 "如果刚接通，请从当前问题开始，不要重复介绍系统功能。",
@@ -1133,8 +1224,47 @@ def build_realtime_session_config(interview: dict, agents: list[dict], messages:
     }
 
 
-def build_openai_realtime_session_config(interview: dict, agents: list[dict], messages: list[dict]) -> dict:
-    session_config = build_realtime_session_config(interview, agents, messages)
+def build_rtc_ai_agent_prompt(
+    interview: dict,
+    agents: list[dict],
+    messages: list[dict],
+    resume_analysis: dict[str, Any] | None,
+) -> str:
+    session = build_realtime_session_config(interview, agents, messages, resume_analysis)
+    recent_context = "\n".join(
+        f"{item['speaker']}：{str(item['content'])[:320]}"
+        for item in session["recent_messages"][-6:]
+    ) or "暂无历史对话。"
+    asked_questions = "\n".join(
+        f"- {str(question)[:240]}" for question in session["asked_questions"][-5:]
+    ) or "- 暂无"
+    # Order the important state before bounded resume/history sections so the
+    # provider's 5,000-character limit can never remove the current question.
+    return "\n".join(
+        [
+            "你是中文 AI 电话面试官。每次只问一个问题，候选人回答后先给一句简短反馈，再进行一层具体追问。",
+            "必须基于候选人的简历分析和真实回答提问，不得虚构经历，不要重复已问问题。",
+            "追问优先覆盖：候选人职责、方案取舍、量化结果、风险边界、失败复盘和协作冲突。",
+            f"目标岗位：{interview.get('target_role') or '未填写'}",
+            f"面试类型/难度：{interview.get('interview_type') or '综合模拟'} / {interview.get('difficulty') or '标准'}",
+            f"当前面试官：{session['active_agent']}",
+            f"当前问题：{str(session['current_question'])[:700]}",
+            f"候选人结构化简历分析：\n{format_resume_analysis(resume_analysis)[:2400]}",
+            f"简历与项目补充材料：\n{str(interview.get('resume_context') or '未填写')[:700]}",
+            f"最近对话：\n{recent_context}",
+            f"已问问题，避免重复：\n{asked_questions}",
+            "如果刚接通，从当前问题开始；如果是重连，从最近对话继续，不要回到第一题。",
+        ]
+    )[:5000]
+
+
+def build_openai_realtime_session_config(
+    interview: dict,
+    agents: list[dict],
+    messages: list[dict],
+    resume_analysis: dict[str, Any] | None = None,
+) -> dict:
+    session_config = build_realtime_session_config(interview, agents, messages, resume_analysis)
     return {
         key: session_config[key]
         for key in ("type", "model", "instructions", "audio")
@@ -1635,6 +1765,26 @@ def list_reports_by_user_id(user_id: str) -> list[dict]:
                reports.generation_status, reports.generation_error, reports.fallback,
                reports.generated_at, reports.review_status, reports.reviewed_by, reports.reviewed_at,
                reports.created_at, reports.updated_at,
+               (
+                 SELECT COUNT(*)
+                 FROM interview_messages AS messages
+                 WHERE messages.interview_id = reports.interview_id
+                   AND messages.sender_type = 'agent'
+                   AND messages.message_type IN ('question', 'follow_up')
+                   AND TRIM(messages.content) <> ''
+               ) AS question_count,
+               (
+                 SELECT COUNT(*)
+                 FROM interview_messages AS messages
+                 WHERE messages.interview_id = reports.interview_id
+                   AND messages.sender_type = 'candidate'
+                   AND TRIM(messages.content) <> ''
+               ) AS candidate_answer_count,
+               (
+                 SELECT COUNT(*)
+                 FROM interview_evaluations AS evaluations
+                 WHERE evaluations.interview_id = reports.interview_id
+               ) AS evaluation_count,
                EXISTS (
                  SELECT 1
                  FROM interview_messages AS messages
@@ -1867,12 +2017,10 @@ def auth_me(request: Request):
     return {"user": sanitize_user(find_user_by_session(request))}
 
 
-@app.post("/api/auth/student-login")
-async def auth_student_login(request: Request, response: Response, body: dict | None = None):
-    """学生登录：学号 + 姓名，与管理端导入的注册白名单比对。
-
-    首次匹配成功时自动创建关联账号并绑定，之后沿用同一账号。
-    """
+@app.post("/api/auth/register", status_code=201)
+async def auth_register(request: Request, response: Response, body: dict | None = None):
+    if os.environ.get("APP_ENV", "development").strip().lower() != "test":
+        raise error(403, "学生自主注册已关闭，请使用学校分配的学号和临时密码登录。")
     body = json_body(body)
     student_no = str(body.get("studentNo") or "").strip()
     name = str(body.get("name") or "").strip()
@@ -1915,24 +2063,79 @@ async def auth_student_login(request: Request, response: Response, body: dict | 
 @app.post("/api/auth/login")
 async def auth_login(request: Request, response: Response, body: dict | None = None):
     body = json_body(body)
-    email = normalize_email(body.get("email"))
+    student_no = normalize_student_no(body.get("student_no") or body.get("studentNo"))
     password = str(body.get("password") or "")
-    if not is_valid_email(email) or not password:
-        raise error(400, "请输入邮箱和密码。")
-    if is_login_limited(request, email):
+    if not is_valid_student_no(student_no) or not password:
+        raise error(400, "请输入正确的学号和密码。")
+    if is_login_limited(request, student_no):
         raise error(429, "登录尝试过于频繁，请稍后再试。")
 
-    user = one("SELECT id, email, password_hash, name, status, created_at, last_login_at FROM users WHERE email = ?", (email,))
+    user = one(
+        """
+        SELECT id, email, student_no, password_hash, name, college, class_name, counselor,
+               student_status, must_change_password, status, created_at, last_login_at
+        FROM users WHERE student_no = ?
+        """,
+        (student_no,),
+    )
     if not user or user["status"] != "normal" or not verify_password(password, user["password_hash"]):
-        record_failed_login(request, email)
-        raise error(401, "邮箱或密码不正确。")
+        record_failed_login(request, student_no)
+        raise error(401, "学号或密码不正确，或账号已被停用。")
 
-    clear_failed_logins(request, email)
+    clear_failed_logins(request, student_no)
     db.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (user["id"],))
     db.commit()
     create_session(response, user["id"], request.headers.get("user-agent"))
-    current_user = one("SELECT id, email, name, status, created_at, last_login_at FROM users WHERE id = ?", (user["id"],))
+    current_user = one(
+        """
+        SELECT id, email, student_no, name, college, class_name, counselor, student_status,
+               must_change_password, status, created_at, last_login_at
+        FROM users WHERE id = ?
+        """,
+        (user["id"],),
+    )
     return {"user": sanitize_user(current_user)}
+
+
+@app.post("/api/auth/change-initial-password")
+def change_initial_password(request: Request, response: Response, body: dict | None = None):
+    user = find_user_by_session(request)
+    if not user:
+        raise error(401, "请先使用学号和临时密码登录。")
+    if not bool(user.get("must_change_password")):
+        raise error(409, "当前账号不需要修改临时密码。")
+
+    payload = json_body(body)
+    password = str(payload.get("password") or "")
+    confirmation = str(payload.get("confirm_password") or payload.get("confirmPassword") or "")
+    password_error = validate_new_password(password, confirmation)
+    if password_error:
+        raise error(400, password_error)
+
+    with db:
+        db.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, must_change_password = 0, temp_password_encrypted = NULL,
+                temp_password_created_at = NULL, activated_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (hash_password(password), user["id"]),
+        ).close()
+        db.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],)).close()
+
+    clear_session(response)
+    create_session(response, user["id"], request.headers.get("user-agent"))
+    current_user = one(
+        """
+        SELECT id, email, student_no, name, college, class_name, counselor, student_status,
+               must_change_password, status, created_at, last_login_at
+        FROM users WHERE id = ?
+        """,
+        (user["id"],),
+    )
+    return {"user": sanitize_user(current_user), "message": "密码修改成功。"}
 
 
 @app.post("/api/auth/logout")
@@ -2469,6 +2672,10 @@ def finish_interview(interview_id: str, user: dict = Depends(require_auth)):
     if not interview:
         raise error(404, "面试不存在。")
     if interview["status"] == "completed":
+        try:
+            stop_interview_rtc_session_if_present(interview["id"])
+        except Exception as exc:
+            print(f"Alibaba RTC stop retry on completed interview deferred: {type(exc).__name__}: {exc}", flush=True)
         return {"interview": interview}
     db.execute(
         """
@@ -2480,6 +2687,12 @@ def finish_interview(interview_id: str, user: dict = Depends(require_auth)):
         (interview["id"], user["id"]),
     )
     db.commit()
+    try:
+        stop_interview_rtc_session_if_present(interview["id"])
+    except Exception as exc:
+        # The stop intent is persisted before the provider call. Recovery will
+        # continue even if Alibaba Cloud is temporarily unavailable here.
+        print(f"Alibaba RTC stop on interview finish deferred: {type(exc).__name__}: {exc}", flush=True)
     return {"interview": find_interview_by_user_id(interview["id"], user["id"])}
 
 
@@ -2594,7 +2807,12 @@ def list_messages(interview_id: str, user: dict = Depends(require_auth)):
 
 
 @app.post("/api/interviews/{interview_id}/messages", status_code=201)
-def create_message(interview_id: str, body: dict | None = None, user: dict = Depends(require_auth)):
+def create_message(
+    interview_id: str,
+    response: Response,
+    body: dict | None = None,
+    user: dict = Depends(require_auth),
+):
     interview = find_interview_by_user_id(interview_id, user["id"])
     if not interview:
         raise error(404, "面试不存在。")
@@ -2603,28 +2821,56 @@ def create_message(interview_id: str, body: dict | None = None, user: dict = Dep
     message = parse_message_input(json_body(body))
     if message["agent_id"] and not find_agent_by_interview_id(message["agent_id"], interview["id"]):
         raise error(400, "Agent 不属于当前面试。")
+    existing = find_message_by_source_ref(interview["id"], message["source"], message["source_ref"])
+    if existing:
+        response.status_code = 200
+        return {"message": existing, "duplicate": True}
+
+    reply_to_message_id = None
+    round_agent_id = None
+    if message["sender_type"] == "candidate":
+        question = latest_interview_question(interview["id"])
+        if question:
+            reply_to_message_id = question["id"]
+            round_agent_id = question.get("agent_id")
     message_id = str(uuid4())
-    db.execute(
-        """
-        INSERT INTO interview_messages (
-          id, interview_id, agent_id, sender_type, message_type, content, transcript_text, order_index
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            message_id,
-            interview["id"],
-            message["agent_id"],
-            message["sender_type"],
-            message["message_type"],
-            message["content"],
-            message["transcript_text"],
-            next_message_order_index(interview["id"]),
-        ),
-    )
-    db.execute("UPDATE interview_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?", (interview["id"], user["id"]))
-    db.commit()
-    return {"message": find_message_by_interview_id(message_id, interview["id"])}
+    try:
+        with db:
+            db.execute(
+                """
+                INSERT INTO interview_messages (
+                  id, interview_id, agent_id, sender_type, message_type, content, transcript_text,
+                  source, source_ref, reply_to_message_id, round_agent_id, order_index
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    interview["id"],
+                    message["agent_id"],
+                    message["sender_type"],
+                    message["message_type"],
+                    message["content"],
+                    message["transcript_text"],
+                    message["source"],
+                    message["source_ref"],
+                    reply_to_message_id,
+                    round_agent_id,
+                    next_message_order_index(interview["id"]),
+                ),
+            ).close()
+            db.execute(
+                "UPDATE interview_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
+                (interview["id"], user["id"]),
+            ).close()
+    except Exception:
+        # A retried RTC final-caption request may race with the first request.
+        existing = find_message_by_source_ref(interview["id"], message["source"], message["source_ref"])
+        if existing:
+            response.status_code = 200
+            return {"message": existing, "duplicate": True}
+        raise
+    return {"message": find_message_by_interview_id(message_id, interview["id"]), "duplicate": False}
 
 
 @app.post("/api/interviews/{interview_id}/follow-up")
@@ -2683,9 +2929,16 @@ async def realtime_sdp(interview_id: str, request: Request, user: dict = Depends
 
     agents = list_agents_by_interview_id(interview["id"])
     messages = list_messages_by_interview_id(interview["id"])
+    resume_analysis = resume_analysis_for_prompt(user)
     files = {
         "sdp": (None, sdp),
-        "session": (None, json.dumps(build_openai_realtime_session_config(interview, agents, messages), ensure_ascii=False)),
+        "session": (
+            None,
+            json.dumps(
+                build_openai_realtime_session_config(interview, agents, messages, resume_analysis),
+                ensure_ascii=False,
+            ),
+        ),
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -2770,7 +3023,8 @@ async def qwen_omni_realtime_sdp(interview_id: str, body: dict | None = None, us
 
     agents = list_agents_by_interview_id(interview["id"])
     messages = list_messages_by_interview_id(interview["id"])
-    session_config = build_realtime_session_config(interview, agents, messages)
+    resume_analysis = resume_analysis_for_prompt(user)
+    session_config = build_realtime_session_config(interview, agents, messages, resume_analysis)
     session_config["provider"] = "qwen-omni-realtime-webrtc"
     session_config["interview_id"] = interview_id
     start_payload = {
@@ -2936,7 +3190,7 @@ async def qwen_omni_realtime_ws(websocket: WebSocket, interview_id: str):
     await websocket.accept()
 
     user = find_user_by_session_token(websocket.cookies.get(SESSION_COOKIE_NAME))
-    if not user:
+    if not user or bool(user.get("must_change_password")):
         await websocket.send_json({"type": "error", "message": "请先登录后再连接千问 Omni 实时通话。"})
         await websocket.close(code=1008)
         return
@@ -2953,7 +3207,8 @@ async def qwen_omni_realtime_ws(websocket: WebSocket, interview_id: str):
 
     agents = list_agents_by_interview_id(interview["id"])
     messages = list_messages_by_interview_id(interview["id"])
-    session_config = build_realtime_session_config(interview, agents, messages)
+    resume_analysis = resume_analysis_for_prompt(user)
+    session_config = build_realtime_session_config(interview, agents, messages, resume_analysis)
     session_config["provider"] = "qwen-omni-self-hosted"
     session_config["interview_id"] = interview_id
 
@@ -2987,7 +3242,13 @@ async def qwen_omni_realtime_ws(websocket: WebSocket, interview_id: str):
                     latest_interview = find_interview_by_user_id(interview_id, user["id"]) or interview
                     latest_agents = list_agents_by_interview_id(interview["id"])
                     latest_messages = list_messages_by_interview_id(interview["id"])
-                    round_session_config = build_realtime_session_config(latest_interview, latest_agents, latest_messages)
+                    round_resume_analysis = resume_analysis_for_prompt(user)
+                    round_session_config = build_realtime_session_config(
+                        latest_interview,
+                        latest_agents,
+                        latest_messages,
+                        round_resume_analysis,
+                    )
                     round_session_config["provider"] = "qwen-omni-http"
                     round_session_config["interview_id"] = interview_id
                     await _stream_qwen_omni_http_response(websocket, b"".join(audio_chunks), mime_type, round_session_config, start_payload)
@@ -3083,14 +3344,19 @@ def create_evaluation(
             response.status_code = 200
         return {"evaluation": existing}
     messages = list_messages_by_interview_id(interview["id"])
-    prior_questions = [
-        item for item in messages
-        if item["order_index"] < message["order_index"]
-        and item["sender_type"] == "agent"
-        and item["message_type"] in AGENT_QUESTION_MESSAGE_TYPES
-    ]
-    question_message = prior_questions[-1] if prior_questions else None
-    agent = find_agent_by_interview_id(question_message["agent_id"], interview["id"]) if question_message and question_message.get("agent_id") else None
+    question_message = None
+    if message.get("reply_to_message_id"):
+        question_message = find_message_by_interview_id(message["reply_to_message_id"], interview["id"])
+    if not question_message:
+        prior_questions = [
+            item for item in messages
+            if item["order_index"] < message["order_index"]
+            and item["sender_type"] == "agent"
+            and item["message_type"] in AGENT_QUESTION_MESSAGE_TYPES
+        ]
+        question_message = prior_questions[-1] if prior_questions else None
+    evaluation_agent_id = message.get("round_agent_id") or (question_message or {}).get("agent_id")
+    agent = find_agent_by_interview_id(evaluation_agent_id, interview["id"]) if evaluation_agent_id else None
     resume_row = find_resume_analysis_by_user_id(user["id"])
     resume_analysis = parse_json_object(resume_row.get("analysis_json"), {}) if resume_row else None
     try:
@@ -3163,6 +3429,7 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
     agents = list_agents_by_interview_id(interview["id"])
     messages = list_messages_by_interview_id(interview["id"])
     evaluations = list_evaluations_by_interview_id(interview["id"])
+    resume_analysis = resume_analysis_for_prompt(user)
     existing = find_report_by_interview_id(interview["id"], user["id"])
     report_id = existing["id"] if existing else str(uuid4())
     local_report = generate_mock_report(interview, agents, messages, evaluations)
@@ -3176,6 +3443,7 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
                 messages=messages,
                 evaluations=evaluations,
                 fallback_report=local_report,
+                resume_analysis=resume_analysis,
             )
         except AiEvaluationError as exc:
             report = {
@@ -3404,43 +3672,451 @@ def get_dimensions(user: dict = Depends(require_auth)):
 
 # ==================== Alibaba Cloud RTC ====================
 
-from .rtc_token_service import generate_rtc_token
+from .rtc_ai_agent_service import (
+    RtcAiAgentConfigurationError,
+    generate_rtc_ai_agent_task_id,
+    get_rtc_ai_agent,
+    notify_rtc_ai_agent,
+    rtc_ai_agent_client_config,
+    rtc_ai_agent_user_id,
+    start_rtc_ai_agent,
+    stop_rtc_ai_agent,
+)
+from .rtc_token_service import generate_rtc_token, normalize_rtc_user_name
+from .rtc_session_store import (
+    claim_rtc_start,
+    claim_stuck_rtc_stop,
+    complete_rtc_start,
+    complete_rtc_stop,
+    defer_rtc_start_reconciliation,
+    ensure_rtc_session,
+    fail_rtc_start,
+    fail_rtc_stop,
+    get_rtc_session,
+    heartbeat_rtc_session,
+    list_rtc_recovery_candidates,
+    mark_rtc_active_from_recovery,
+    request_rtc_stop,
+    update_rtc_token_expiry,
+)
 
 
-class RTCTokenRequest(BaseModel):
-    channel_id: str
-    expires_in: int = 3600
+RTC_SESSION_HEARTBEAT_INTERVAL_SECONDS = bounded_env_int(
+    "RTC_SESSION_HEARTBEAT_INTERVAL_SECONDS", 15, 5, 60
+)
+RTC_SESSION_HEARTBEAT_TIMEOUT_SECONDS = bounded_env_int(
+    "RTC_SESSION_HEARTBEAT_TIMEOUT_SECONDS", 60, 20, 600
+)
+RTC_SESSION_START_TIMEOUT_SECONDS = bounded_env_int(
+    "RTC_SESSION_START_TIMEOUT_SECONDS", 45, 15, 300
+)
+RTC_SESSION_STOP_TIMEOUT_SECONDS = bounded_env_int(
+    "RTC_SESSION_STOP_TIMEOUT_SECONDS", 30, 10, 300
+)
+RTC_SESSION_RECOVERY_INTERVAL_SECONDS = bounded_env_int(
+    "RTC_SESSION_RECOVERY_INTERVAL_SECONDS", 20, 5, 300
+)
 
 
-@app.post("/api/rtc/token")
-def api_rtc_token(
-    body: RTCTokenRequest,
+def public_rtc_session(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": session["id"],
+        "interview_id": session["interview_id"],
+        "channel_id": session["channel_id"],
+        "candidate_user_id": session["candidate_user_id"],
+        "agent_user_id": session["agent_user_id"],
+        "desired_state": session["desired_state"],
+        "state": session["state"],
+        "task_id": session.get("current_task_id"),
+        "revision": int(session.get("revision") or 0),
+        "last_heartbeat_at": session.get("last_heartbeat_at"),
+        "token_expires_at": session.get("token_expires_at"),
+        "last_error": session.get("last_error"),
+        "started_at": session.get("started_at"),
+        "stopped_at": session.get("stopped_at"),
+        "heartbeat_interval_seconds": RTC_SESSION_HEARTBEAT_INTERVAL_SECONDS,
+    }
+
+
+def ensure_interview_rtc_session(interview: dict[str, Any], user_id: str) -> dict[str, Any]:
+    return ensure_rtc_session(
+        interview_id=interview["id"],
+        user_id=user_id,
+        channel_id=f"interview_{interview['id']}",
+        candidate_user_id=f"user_{user_id}",
+        agent_user_id=rtc_ai_agent_user_id(interview["id"]),
+    )
+
+
+def rtc_agent_missing_error(exc: Exception) -> bool:
+    parts = [str(exc)]
+    for attribute in ("code", "message", "data"):
+        value = getattr(exc, attribute, None)
+        if value:
+            parts.append(str(value))
+    normalized = " ".join(parts).lower().replace("_", "")
+    return any(
+        marker in normalized
+        for marker in ("notfound", "not found", "does not exist", "tasknotexist", "invalidtaskid")
+    )
+
+
+def stop_rtc_provider_task(session: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(session.get("current_task_id") or "")
+    if not task_id:
+        return session
+    try:
+        stopped = stop_rtc_ai_agent(channel_id=session["channel_id"], task_id=task_id)
+    except Exception as exc:
+        if rtc_agent_missing_error(exc):
+            return complete_rtc_stop(session["id"], task_id, None)
+        fail_rtc_stop(session["id"], task_id, f"{type(exc).__name__}: {exc}")
+        raise
+    return complete_rtc_stop(session["id"], task_id, stopped.get("request_id"))
+
+
+def stop_interview_rtc_session_if_present(interview_id: str) -> dict[str, Any] | None:
+    session = get_rtc_session(interview_id)
+    if not session:
+        return None
+    requested, should_call_provider = request_rtc_stop(session["id"])
+    if should_call_provider:
+        return stop_rtc_provider_task(requested)
+    return requested
+
+
+@app.post("/api/interviews/{interview_id}/rtc/token")
+def create_interview_rtc_token(
+    interview_id: str,
     user: dict = Depends(require_auth),
 ):
-    channel_id = body.channel_id.strip()
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能开启 RTC 通话。")
 
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", channel_id):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid RTC channel_id",
-        )
-
-    expires_in = max(60, min(int(body.expires_in), 86400))
-
-    # RTC UserID 直接绑定当前登录用户，前端不能冒充其他用户
-    rtc_user_id = f"user-{user['id']}"
+    # Channel and user IDs are derived server-side so an authenticated client
+    # cannot request a token for an arbitrary RTC room or impersonate another user.
+    rtc_session = ensure_interview_rtc_session(interview, user["id"])
 
     try:
         result = generate_rtc_token(
-            channel_id=channel_id,
-            user_id=rtc_user_id,
-            expires_in=expires_in,
+            channel_id=rtc_session["channel_id"],
+            user_id=rtc_session["candidate_user_id"],
         )
-    except Exception as exc:
-        print(f"[RTC] token generation failed: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to generate RTC token",
-        )
+    except RuntimeError as exc:
+        print(f"Alibaba RTC configuration error: {exc}", flush=True)
+        raise error(503, "服务端阿里云 RTC 配置不完整或无效。") from exc
+    except (TypeError, ValueError) as exc:
+        print(f"Alibaba RTC token input error: {exc}", flush=True)
+        raise error(500, "RTC 频道配置无效，请联系管理员。") from exc
 
-    return result
+    token_expires_at = datetime.fromtimestamp(int(result["timestamp"]), timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    rtc_session = update_rtc_token_expiry(rtc_session["id"], token_expires_at) or rtc_session
+    return {
+        **result,
+        "user_name": normalize_rtc_user_name(user.get("name")),
+        "ai_agent": rtc_ai_agent_client_config(interview["id"]),
+        "rtc_session": public_rtc_session(rtc_session),
+    }
+
+
+@app.get("/api/interviews/{interview_id}/rtc/session")
+def get_interview_rtc_session(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    session = get_rtc_session(interview["id"])
+    return {"rtc_session": public_rtc_session(session) if session else None}
+
+
+@app.post("/api/interviews/{interview_id}/rtc/session/heartbeat")
+def heartbeat_interview_rtc_session(interview_id: str, user: dict = Depends(require_auth)):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    session = get_rtc_session(interview["id"])
+    if not session:
+        raise error(409, "当前面试还没有 RTC 会话。")
+    if interview["status"] == "completed":
+        stopped = stop_interview_rtc_session_if_present(interview["id"])
+        raise error(409, f"面试已结束，RTC 状态为 {stopped['state'] if stopped else 'stopped'}。")
+    return {"rtc_session": public_rtc_session(heartbeat_rtc_session(session["id"]))}
+
+
+@app.post("/api/interviews/{interview_id}/rtc/agent/start")
+def start_interview_rtc_ai_agent(
+    interview_id: str,
+    user: dict = Depends(require_auth),
+):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+    if interview["status"] == "completed":
+        raise error(409, "已完成的面试不能启动 RTC 智能体。")
+
+    current_question = latest_interview_question(interview["id"])
+    rtc_session = ensure_interview_rtc_session(interview, user["id"])
+    if rtc_session["state"] in {"starting", "active"}:
+        return {
+            "task_id": rtc_session.get("current_task_id"),
+            "agent_user_id": rtc_session["agent_user_id"],
+            "status": rtc_session["state"],
+            "idempotent": True,
+            "current_question_id": (current_question or {}).get("id"),
+            "rtc_session": public_rtc_session(rtc_session),
+        }
+    if rtc_session["state"] in {"stop_requested", "stopping", "stop_failed"}:
+        raise error(409, "上一条 RTC 智能体任务仍在停止，请稍后重试。")
+
+    task_id = generate_rtc_ai_agent_task_id(interview["id"])
+    rtc_session, claimed = claim_rtc_start(rtc_session["id"], task_id)
+    if not claimed:
+        return {
+            "task_id": rtc_session.get("current_task_id"),
+            "agent_user_id": rtc_session["agent_user_id"],
+            "status": rtc_session["state"],
+            "idempotent": True,
+            "current_question_id": (current_question or {}).get("id"),
+            "rtc_session": public_rtc_session(rtc_session),
+        }
+    try:
+        agents = list_agents_by_interview_id(interview["id"])
+        messages = list_messages_by_interview_id(interview["id"])
+        resume_analysis = resume_analysis_for_prompt(user)
+        rtc_prompt = build_rtc_ai_agent_prompt(
+            interview,
+            agents,
+            messages,
+            resume_analysis,
+        )
+        started = start_rtc_ai_agent(
+            channel_id=rtc_session["channel_id"],
+            candidate_user_id=rtc_session["candidate_user_id"],
+            agent_user_id=rtc_session["agent_user_id"],
+            task_id=task_id,
+            greeting=(current_question or {}).get("content"),
+            prompt=rtc_prompt,
+        )
+    except HTTPException:
+        # Prompt preparation failed before Alibaba Cloud received StartAgent,
+        # so this task can be released immediately instead of being reconciled
+        # as an ambiguous provider timeout.
+        fail_rtc_start(rtc_session["id"], task_id, "RTC prompt preparation failed")
+        raise
+    except RtcAiAgentConfigurationError as exc:
+        fail_rtc_start(rtc_session["id"], task_id, str(exc))
+        print(f"Alibaba RTC AI Agent configuration error: {exc}", flush=True)
+        raise error(503, "RTC AI 智能体尚未完成服务端配置。") from exc
+    except (TypeError, ValueError) as exc:
+        fail_rtc_start(rtc_session["id"], task_id, str(exc))
+        print(f"Alibaba RTC AI Agent input error: {exc}", flush=True)
+        raise error(500, "RTC AI 智能体参数无效，请联系管理员。") from exc
+    except Exception as exc:
+        # A transport timeout is ambiguous: Alibaba Cloud may have accepted the
+        # task even though this process did not receive the response. Keep the
+        # task fenced as starting and let GetAgent reconcile it.
+        defer_rtc_start_reconciliation(rtc_session["id"], task_id, f"{type(exc).__name__}: {exc}")
+        print(f"Alibaba RTC AI Agent start failed: {type(exc).__name__}: {exc}", flush=True)
+        raise error(502, "RTC AI 智能体启动结果待确认，服务端正在自动核对。") from exc
+
+    rtc_session, activated = complete_rtc_start(rtc_session["id"], task_id, started.get("request_id"))
+    if not activated:
+        try:
+            rtc_session = stop_rtc_provider_task(rtc_session)
+        except Exception:
+            rtc_session = get_rtc_session(interview["id"]) or rtc_session
+    return {
+        **started,
+        "status": rtc_session["state"],
+        "idempotent": False,
+        "current_question_id": (current_question or {}).get("id"),
+        "resume_analysis_injected": bool(resume_analysis),
+        "rtc_session": public_rtc_session(rtc_session),
+    }
+
+
+@app.post("/api/interviews/{interview_id}/rtc/agent/notify")
+def notify_interview_rtc_ai_agent(
+    interview_id: str,
+    payload: dict[str, Any],
+    user: dict = Depends(require_auth),
+):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+
+    rtc_session = get_rtc_session(interview["id"])
+    if not rtc_session or not rtc_session.get("current_task_id"):
+        raise error(409, "当前面试没有运行中的 RTC 智能体任务。")
+    task_id = str(rtc_session["current_task_id"])
+    message_id = str(payload.get("message_id") or "").strip()
+    if rtc_session["state"] != "active":
+        raise error(409, f"RTC AI 智能体当前状态为 {rtc_session['state']}，暂时不能播报。")
+    message = find_message_by_interview_id(message_id, interview["id"])
+    if not message or message.get("sender_type") != "agent":
+        raise error(400, "只能播报当前面试中已保存的面试官消息。")
+
+    try:
+        return notify_rtc_ai_agent(
+            channel_id=f"interview_{interview['id']}",
+            task_id=task_id,
+            message=message["content"],
+            priority=1,
+            interruptable=True,
+        )
+    except RtcAiAgentConfigurationError as exc:
+        print(f"Alibaba RTC AI Agent configuration error: {exc}", flush=True)
+        raise error(503, "RTC AI 智能体尚未完成服务端配置。") from exc
+    except (TypeError, ValueError) as exc:
+        print(f"Alibaba RTC AI Agent notify input error: {exc}", flush=True)
+        raise error(400, "RTC AI 智能体播报参数无效。") from exc
+    except Exception as exc:
+        print(f"Alibaba RTC AI Agent notify failed: {type(exc).__name__}: {exc}", flush=True)
+        raise error(502, "阿里云 RTC AI 智能体播报失败，请稍后重试。") from exc
+
+
+@app.post("/api/interviews/{interview_id}/rtc/agent/stop")
+def stop_interview_rtc_ai_agent(
+    interview_id: str,
+    response: Response,
+    _payload: dict[str, Any] | None = None,
+    user: dict = Depends(require_auth),
+):
+    interview = find_interview_by_user_id(interview_id, user["id"])
+    if not interview:
+        raise error(404, "面试不存在。")
+
+    rtc_session = get_rtc_session(interview["id"])
+    if not rtc_session:
+        return {"status": "stopped", "idempotent": True, "rtc_session": None}
+    try:
+        requested, should_call_provider = request_rtc_stop(rtc_session["id"])
+        stopped = stop_rtc_provider_task(requested) if should_call_provider else requested
+    except RtcAiAgentConfigurationError as exc:
+        print(f"Alibaba RTC AI Agent configuration error: {exc}", flush=True)
+        response.status_code = 202
+        stopped = get_rtc_session(interview["id"]) or rtc_session
+    except (TypeError, ValueError) as exc:
+        print(f"Alibaba RTC AI Agent input error: {exc}", flush=True)
+        response.status_code = 202
+        stopped = get_rtc_session(interview["id"]) or rtc_session
+    except Exception as exc:
+        print(f"Alibaba RTC AI Agent stop failed: {type(exc).__name__}: {exc}", flush=True)
+        response.status_code = 202
+        stopped = get_rtc_session(interview["id"]) or rtc_session
+    if stopped["state"] != "stopped":
+        response.status_code = 202
+    return {
+        "task_id": stopped.get("current_task_id"),
+        "status": stopped["state"],
+        "idempotent": not should_call_provider if 'should_call_provider' in locals() else False,
+        "rtc_session": public_rtc_session(stopped),
+    }
+
+
+def _rtc_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=value.tzinfo or timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc)
+
+
+def _rtc_is_older_than(value: Any, seconds: int) -> bool:
+    parsed = _rtc_datetime(value)
+    return parsed is None or parsed <= datetime.now(timezone.utc) - timedelta(seconds=seconds)
+
+
+def reconcile_rtc_sessions_once() -> int:
+    recovered = 0
+    active_statuses = {"active", "running", "started", "starting", "success", "succeeded"}
+    terminal_statuses = {"stopped", "finished", "completed", "failed", "error"}
+    now = datetime.now(timezone.utc)
+
+    for session in list_rtc_recovery_candidates():
+        try:
+            state = session["state"]
+            task_id = str(session.get("current_task_id") or "")
+            if session.get("interview_status") == "completed":
+                stopped = stop_interview_rtc_session_if_present(session["interview_id"])
+                recovered += int(bool(stopped))
+                continue
+
+            if state == "active" and _rtc_is_older_than(
+                session.get("last_heartbeat_at"), RTC_SESSION_HEARTBEAT_TIMEOUT_SECONDS
+            ):
+                stop_interview_rtc_session_if_present(session["interview_id"])
+                recovered += 1
+                continue
+
+            if state == "stop_failed":
+                retry_at = _rtc_datetime(session.get("next_retry_at"))
+                if retry_at is None or retry_at <= now:
+                    stop_interview_rtc_session_if_present(session["interview_id"])
+                    recovered += 1
+                continue
+
+            if state == "stopping" and _rtc_is_older_than(
+                session.get("updated_at"), RTC_SESSION_STOP_TIMEOUT_SECONDS
+            ):
+                claimed, should_retry = claim_stuck_rtc_stop(session["id"])
+                if should_retry:
+                    stop_rtc_provider_task(claimed)
+                    recovered += 1
+                continue
+
+            if state not in {"starting", "stop_requested"} or not _rtc_is_older_than(
+                session.get("updated_at"), RTC_SESSION_START_TIMEOUT_SECONDS
+            ):
+                continue
+
+            remote = get_rtc_ai_agent(channel_id=session["channel_id"], task_id=task_id)
+            remote_status = str(remote.get("status") or "").strip().lower()
+            if remote_status in active_statuses:
+                if session["desired_state"] == "stopped" or state == "stop_requested":
+                    claimed, should_retry = claim_stuck_rtc_stop(session["id"])
+                    if should_retry:
+                        stop_rtc_provider_task(claimed)
+                else:
+                    mark_rtc_active_from_recovery(session["id"], task_id, remote.get("request_id"))
+                recovered += 1
+            elif remote_status in terminal_statuses:
+                if session["desired_state"] == "stopped":
+                    complete_rtc_stop(session["id"], task_id, remote.get("request_id"))
+                else:
+                    fail_rtc_start(session["id"], task_id, remote.get("message") or remote_status)
+                recovered += 1
+        except Exception as exc:
+            if str(session.get("current_task_id") or "") and rtc_agent_missing_error(exc):
+                task_id = str(session["current_task_id"])
+                if session.get("desired_state") == "stopped":
+                    complete_rtc_stop(session["id"], task_id, None)
+                else:
+                    fail_rtc_start(session["id"], task_id, f"remote task missing: {exc}")
+                recovered += 1
+                continue
+            print(
+                f"Alibaba RTC recovery deferred for {session.get('interview_id')}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+    return recovered
+
+
+rtc_recovery_task: asyncio.Task | None = None
+
+
+async def rtc_recovery_loop() -> None:
+    while True:
+        try:
+            await run_in_threadpool(reconcile_rtc_sessions_once)
+        except Exception as exc:
+            print(f"Alibaba RTC recovery pass failed: {type(exc).__name__}: {exc}", flush=True)
+        await asyncio.sleep(RTC_SESSION_RECOVERY_INTERVAL_SECONDS)

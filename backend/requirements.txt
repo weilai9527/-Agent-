@@ -5,6 +5,7 @@ pymysql
 dashscope
 websocket-client
 websockets
+alibabacloud_rtc20180111==5.3.5
 python-multipart
 pypdf
 PyMuPDF

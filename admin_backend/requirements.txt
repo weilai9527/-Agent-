@@ -3,3 +3,4 @@ uvicorn[standard]
 pymysql
 python-multipart
 openpyxl
+cryptography

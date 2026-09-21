@@ -148,3 +148,41 @@ def test_report_without_repeated_timeline_uses_deterministic_fallback_data(monke
 
     assert result["agent_feedback"] == fallback_report["agent_feedback"]
     assert result["timeline_review"] == fallback_report["timeline_review"]
+
+
+def test_report_prompt_contains_structured_resume_analysis(monkeypatch):
+    provider = FollowupProvider("qwen", "key", "https://example.test", "model", 1, 0, 10)
+    fallback_report = {
+        "total_score": 72,
+        "grade": "C",
+        "pass_recommendation": "borderline",
+        "ability_radar": {name: 72 for name in DIMENSIONS},
+        "agent_feedback": [],
+        "timeline_review": [],
+        "summary": "本地摘要",
+        "suggestions": "本地建议",
+    }
+    captured = {}
+
+    def fake_call(_providers, messages, **_kwargs):
+        captured["messages"] = messages
+        return fallback_report, provider, False, None
+
+    monkeypatch.setattr("backend.src.ai_evaluation.get_task_providers", lambda *args, **kwargs: [provider])
+    monkeypatch.setattr("backend.src.ai_evaluation._call_with_fallback", fake_call)
+
+    generate_ai_report(
+        interview={"target_role": "RTC 工程师"},
+        agents=[],
+        messages=[],
+        evaluations=[],
+        fallback_report=fallback_report,
+        resume_analysis={
+            "candidate_summary": "有实时音视频落地经验",
+            "projects": [{"name": "RTC 智能面试项目"}],
+        },
+    )
+
+    user_prompt = captured["messages"][1]["content"]
+    assert "候选人结构化简历分析" in user_prompt
+    assert "RTC 智能面试项目" in user_prompt

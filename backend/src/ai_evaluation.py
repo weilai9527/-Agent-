@@ -12,7 +12,7 @@ from .kimi_followup import call_provider_json, get_task_providers
 
 
 EVALUATION_PROMPT_VERSION = "evaluation-v2"
-REPORT_PROMPT_VERSION = "report-v3"
+REPORT_PROMPT_VERSION = "report-v4-resume-analysis"
 DIMENSIONS = (
     "technical_accuracy",
     "technical_depth",
@@ -175,6 +175,7 @@ def generate_ai_report(
     messages: list[dict[str, Any]],
     evaluations: list[dict[str, Any]],
     fallback_report: dict[str, Any],
+    resume_analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     system = """你是中文招聘面试报告审核员。只输出一个完整 JSON 对象，不得输出 Markdown。必须以单题评价和真实对话为证据，保持评分一致性，不得虚构经历。摘要不超过 300 个汉字；建议最多 3 条，每条不超过 80 个汉字。不要复述完整对话、时间线或输入数据。"""
     compact_evaluations = [
@@ -197,6 +198,7 @@ def generate_ai_report(
         [
             f"目标岗位：{interview.get('target_role') or '未填写'}",
             f"面试配置：{interview.get('interview_type') or '综合面试'} / {interview.get('difficulty') or '标准'}",
+            f"候选人结构化简历分析：{json.dumps(resume_analysis or {}, ensure_ascii=False)[:4000]}",
             f"面试官：{json.dumps([{k: a.get(k) for k in ('id', 'agent_name', 'agent_type')} for a in agents], ensure_ascii=False)}",
             f"单题评价：{json.dumps(compact_evaluations, ensure_ascii=False)[:12000]}",
             f"对话：\n{_compact_messages(messages, 30)}",

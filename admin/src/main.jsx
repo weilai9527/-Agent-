@@ -14,6 +14,8 @@ import {
   CheckCircle2,
   ClipboardList,
   Copy,
+  Download,
+  Eye,
   FileText,
   Filter,
   GraduationCap,
@@ -110,6 +112,26 @@ async function adminRequest(path, options = {}) {
     throw requestError;
   }
   return data;
+}
+
+async function adminDownload(path, fallbackFilename) {
+  const response = await fetch(adminApiUrl(path), { credentials: 'include' });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const requestError = new Error(data.error || data.detail || '文件下载失败。');
+    requestError.status = response.status;
+    throw requestError;
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const matchedFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  const anchor = document.createElement('a');
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = matchedFilename || fallbackFilename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(anchor.href);
 }
 
 const navItems = [
@@ -403,7 +425,7 @@ function DataWorkspace({
           </select>
           {hasFilters && <button type="button" className="clear-filter" onClick={resetFilters}>清空筛选</button>}
         </div>
-        <span className="data-scope-note">当前数据源最多返回最近 50 条记录</span>
+        <span className="data-scope-note">列表内容来自当前管理端数据范围</span>
       </div>
       <AdminTable columns={columns} rows={visibleRows} allRows={filteredRows} onView={onView} sort={sort} onSort={handleSort} />
       <footer className="table-pagination">
@@ -426,7 +448,7 @@ function DataWorkspace({
   );
 }
 
-function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, onMove, position }) {
+function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, onMove, position, onRevealTemporaryPassword, onResetStudentPassword }) {
   const isOpen = Boolean(detail || loading || error);
 
   useEffect(() => {
@@ -505,6 +527,23 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
             </div>
           </footer>
         )}
+        {detail?.type === 'candidate' && !error && (
+          <footer className="detail-actions student-password-actions">
+            <span>
+              {detail.temporaryPassword
+                ? <>当前临时密码：<code>{detail.temporaryPassword}</code></>
+                : detail.mustChangePassword
+                  ? '学生首次登录后必须修改临时密码'
+                  : '该学生已完成首次改密，临时密码不可查看'}
+            </span>
+            <div>
+              {detail.canViewTemporaryPassword && (
+                <button type="button" disabled={loading} onClick={onRevealTemporaryPassword}><Eye size={15} />查看临时密码</button>
+              )}
+              <button type="button" className="danger" disabled={loading} onClick={onResetStudentPassword}><KeyRound size={15} />重置临时密码</button>
+            </div>
+          </footer>
+        )}
       </section>
     </div>
   );
@@ -523,13 +562,17 @@ function formatDetail(type, payload, fallbackRow) {
       type: 'candidate',
       id: item.id || fallbackRow.id,
       title: `学生 · ${item.name || item.nickname || fallbackRow.name}`,
+      mustChangePassword: Boolean(item.must_change_password ?? fallbackRow.canViewTemporaryPassword),
+      canViewTemporaryPassword: Boolean(item.can_view_temp_password ?? fallbackRow.canViewTemporaryPassword),
       rows: [
-        { label: '邮箱', value: item.email },
+        { label: '学号', value: item.student_no || item.studentNo },
+        { label: '学院', value: item.college },
+        { label: '班级', value: item.class_name || item.className },
+        { label: '辅导员', value: item.counselor },
+        { label: '学生状态', value: item.student_status },
         { label: '状态', value: item.status },
+        { label: '激活状态', value: (item.must_change_password ?? fallbackRow.canViewTemporaryPassword) ? '待首次改密' : ((item.student_no || item.studentNo) ? '已激活' : '待绑定学号') },
         { label: '目标岗位', value: item.target_role || item.role },
-        { label: '经验水平', value: item.experience_level },
-        { label: '目标城市', value: item.target_city },
-        { label: '期望薪资', value: item.expected_salary },
         { label: '最后登录', value: item.last_login_at || item.lastLogin },
       ],
       blocks: [
@@ -3177,6 +3220,43 @@ function AdminApp({ admin, onSignedOut }) {
     }
   };
 
+  const revealTemporaryPassword = async () => {
+    if (!detail?.id) return;
+    setDetailLoading(true);
+    setDetailError('');
+    try {
+      const payload = await adminRequest(`/api/admin/student-accounts/${encodeURIComponent(detail.id)}/temporary-password`);
+      setDetail((current) => ({ ...current, temporaryPassword: payload.temporaryPassword }));
+    } catch (requestError) {
+      setDetailError(requestError.message);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const resetStudentPassword = async () => {
+    if (!detail?.id || !window.confirm('重置后学生当前密码和全部登录状态都会失效，确定继续吗？')) return;
+    setDetailLoading(true);
+    setDetailError('');
+    try {
+      const payload = await adminRequest(`/api/admin/student-accounts/${encodeURIComponent(detail.id)}/reset-password`, { method: 'POST' });
+      setDetail((current) => ({
+        ...current,
+        mustChangePassword: true,
+        canViewTemporaryPassword: true,
+        temporaryPassword: payload.temporaryPassword,
+        rows: current.rows.map((row) => row.label === '激活状态' ? { ...row, value: '待首次改密' } : row),
+      }));
+      setNotice('已生成新的临时密码并撤销学生原有登录状态');
+      const data = await adminRequest('/api/admin/snapshot');
+      setAdminData({ ...emptyAdminData, ...data });
+    } catch (requestError) {
+      setDetailError(requestError.message);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   const renderContent = () => {
     if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
@@ -3191,6 +3271,7 @@ function AdminApp({ admin, onSignedOut }) {
       onQueryChange: setCurrentQuery,
       presetFilter: viewPreset.view === activeView ? viewPreset.value : '',
     };
+    if (activeView === 'candidates') return <CandidatesPage {...listProps} onAccountsChanged={refreshSnapshot} />;
     if (activeView === 'interviews') return <InterviewsPage {...listProps} />;
     if (activeView === 'reports') return <ReportsPage {...listProps} />;
     if (activeView === 'agents') return <AgentsPage {...listProps} />;
@@ -3269,7 +3350,13 @@ function AdminApp({ admin, onSignedOut }) {
         loading={detailLoading}
         error={detailError}
         onReview={reviewReport}
-        canReview={adminData.permissions?.canViewReports}
+canReview={adminData.permissions?.canViewReports}
+onRevealTemporaryPassword={revealTemporaryPassword}
+onResetStudentPassword={resetStudentPassword}
+onClose={closeDetail}
+onMove={moveDetail}
+position={detailPosition}
+/>
         onClose={closeDetail}
         onMove={moveDetail}
         position={detailPosition}

@@ -19,8 +19,12 @@ import {
   GraduationCap,
   KeyRound,
   LayoutDashboard,
+  Lightbulb,
+  ListOrdered,
   LockKeyhole,
   LogOut,
+  MousePointerClick,
+  Network,
   Plus,
   RefreshCw,
   Rocket,
@@ -57,6 +61,8 @@ const emptyAdminData = {
     canViewReports: true,
     canViewAgents: false,
     canViewConnectionLogs: false,
+    canManageStudents: false,
+    canManageOrganization: false,
     canManageCampus: false,
     canManageSettings: false,
     canViewAudit: false,
@@ -108,22 +114,20 @@ async function adminRequest(path, options = {}) {
 
 const navItems = [
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard, group: '工作台' },
+  { key: 'guide', label: '使用流程指引', icon: ListOrdered, group: '工作台' },
   { key: 'interviews', label: '训练记录', icon: ClipboardList, permission: 'canViewInterviews', group: '工作台' },
   { key: 'reports', label: '报告质检', icon: FileText, permission: 'canViewReports', group: '工作台' },
-  { key: 'organization', label: '组织与学生', icon: School, permission: 'canManageCampus', group: '学生成长' },
-  { key: 'registrations', label: '用户注册', icon: UserPlus, permission: 'canManageCampus', group: '学生成长' },
-  { key: 'resumeFormSettings', label: '填写简历设置', icon: GraduationCap, permission: 'canManageCampus', group: '学生成长' },
-  { key: 'candidates', label: '学生成长', icon: UsersRound, permission: 'canViewCandidates', group: '学生成长' },
-  { key: 'catalog', label: '岗位与能力', icon: BookOpen, permission: 'canViewCatalog', group: '训练内容' },
-  { key: 'agents', label: 'AI 陪练角色', icon: Bot, permission: 'canViewAgents', group: '训练内容' },
+  { key: 'organization', label: '学生', icon: School, permission: 'canManageStudents', group: '学生成长' },
+  { key: 'organizationConfig', label: '组织', icon: Network, permission: 'canManageOrganization', group: '学生成长' },
+  { key: 'catalog', label: '岗位知识库', icon: BookOpen, permission: 'canViewCatalog', group: '训练内容' },
+  { key: 'agents', label: '面试模型配置', icon: Bot, permission: 'canViewAgents', group: '训练内容' },
   { key: 'connectionLogs', label: '连接日志', icon: Wifi, permission: 'canViewConnectionLogs', group: '系统' },
+  { key: 'permission', label: '权限管理', icon: ShieldCheck, group: '系统' },
   { key: 'settings', label: '系统管理', icon: Settings, permission: 'canManageSettings', group: '系统' },
 ];
 
 const roleLabels = {
   super_admin: '超级管理员',
-  operations: '运营管理员',
-  reviewer: '报告审核员',
 };
 
 const statusTone = {
@@ -635,15 +639,13 @@ function Dashboard({ data, admin, onNavigate, onView }) {
   const mediumScoreCount = data.reports.filter((item) => Number(item.score) >= 70 && Number(item.score) < 85).length;
   const queueReports = data.reports.filter((report) => report.reviewStatus === '待复核').slice(0, 5);
   const queueInterviews = data.interviews.filter((interview) => interview.status === '进行中').slice(0, 5);
-  const reviewer = admin?.role === 'reviewer';
-  const queueItems = reviewer || queueReports.length ? queueReports : queueInterviews;
-  const queueType = reviewer || queueReports.length ? 'report' : 'interview';
+  const queueItems = queueReports.length ? queueReports : queueInterviews;
+  const queueType = queueReports.length ? 'report' : 'interview';
 
   const metrics = [
     { label: '待复核报告', value: reviewCount, note: '进入审核队列', tone: reviewCount ? 'red' : 'green', view: 'reports', filter: '待复核' },
     ...(data.permissions?.canViewInterviews ? [{ label: '进行中面试', value: runningCount, note: '查看实时进度', tone: 'blue', view: 'interviews', filter: '进行中' }] : []),
     { label: '低分报告', value: lowScoreCount, note: '低于 70 分', tone: lowScoreCount ? 'amber' : 'green', view: 'reports', filter: '' },
-    ...(data.permissions?.canViewCandidates ? [{ label: '候选人', value: data.candidates.length, note: '最近活跃记录', tone: 'neutral', view: 'candidates', filter: '' }] : []),
   ];
 
   return (
@@ -651,8 +653,8 @@ function Dashboard({ data, admin, onNavigate, onView }) {
       <section className="dashboard-welcome">
         <div>
           <span>{roleLabels[admin?.role] || '管理员'}工作台</span>
-          <h2>{reviewer ? '优先完成待复核报告' : '先处理今天最需要关注的事项'}</h2>
-          <p>{reviewer ? '审核结果会实时同步到报告列表。' : '指标卡和任务队列都可以直接进入对应记录。'}</p>
+          <h2>先处理今天最需要关注的事项</h2>
+          <p>指标卡和任务队列都可以直接进入对应记录。</p>
         </div>
         <span className="connection-pill"><i /> 服务正常</span>
       </section>
@@ -708,19 +710,6 @@ function Dashboard({ data, admin, onNavigate, onView }) {
       </section>
     </div>
   );
-}
-
-function CandidatesPage({ data, onView, query, onQueryChange, presetFilter }) {
-  const columns = [
-    { key: 'name', label: '候选人' },
-    { key: 'email', label: '邮箱', className: 'wide-cell' },
-    { key: 'role', label: '目标岗位' },
-    { key: 'status', label: '状态', render: (row) => <StatusBadge>{row.status}</StatusBadge> },
-    { key: 'interviews', label: '面试数' },
-    { key: 'averageScore', label: '均分' },
-    { key: 'lastLogin', label: '最后登录' },
-  ];
-  return <DataWorkspace title="学生成长列表" icon={<UsersRound size={18} />} columns={columns} rows={data.candidates} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部账号状态" presetFilter={presetFilter} onView={(row, rows) => onView('candidate', row, rows)} />;
 }
 
 function InterviewsPage({ data, onView, query, onQueryChange, presetFilter }) {
@@ -888,7 +877,7 @@ function RegistrationsPage() {
       </section>
 
       <SectionCard
-        title="用户注册"
+        title="学生注册"
         icon={<UserPlus size={18} />}
         action={<span className="record-count">候选人端凭学号 + 姓名登录</span>}
       >
@@ -967,169 +956,6 @@ function RegistrationsPage() {
             </table>
           </div>
         )}
-      </SectionCard>
-    </div>
-  );
-}
-
-function ResumeFormSettingsPage() {
-  const [colleges, setColleges] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [pageError, setPageError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  const loadSettings = async () => {
-    setLoading(true);
-    setPageError('');
-    try {
-      const data = await adminRequest('/api/admin/resume-form-settings');
-      setColleges(data.colleges || []);
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadSettings();
-  }, []);
-
-  const newId = () => `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-  const addCollege = () => {
-    setColleges((current) => [...current, { id: newId(), name: '', majors: [] }]);
-  };
-
-  const updateCollegeName = (id, name) => {
-    setColleges((current) => current.map((college) => (college.id === id ? { ...college, name } : college)));
-  };
-
-  const removeCollege = (id) => {
-    if (!window.confirm('确认删除该学院及其下所有专业？')) return;
-    setColleges((current) => current.filter((college) => college.id !== id));
-  };
-
-  const addMajor = (collegeId) => {
-    setColleges((current) => current.map((college) => (college.id === collegeId
-      ? { ...college, majors: [...college.majors, { id: newId(), name: '' }] }
-      : college)));
-  };
-
-  const updateMajorName = (collegeId, majorId, name) => {
-    setColleges((current) => current.map((college) => (college.id === collegeId
-      ? { ...college, majors: college.majors.map((major) => (major.id === majorId ? { ...major, name } : major)) }
-      : college)));
-  };
-
-  const removeMajor = (collegeId, majorId) => {
-    setColleges((current) => current.map((college) => (college.id === collegeId
-      ? { ...college, majors: college.majors.filter((major) => major.id !== majorId) }
-      : college)));
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    setPageError('');
-    setNotice('');
-    try {
-      const data = await adminRequest('/api/admin/resume-form-settings', {
-        method: 'PUT',
-        body: JSON.stringify({ colleges }),
-      });
-      setColleges(data.colleges || colleges);
-      setNotice('已保存填写简历的学院 / 专业配置，候选人端下拉选项已更新');
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const majorCount = colleges.reduce((sum, college) => sum + (college.majors || []).length, 0);
-
-  return (
-    <div className="registrations-page">
-      <section className="connection-log-summary">
-        <article><span>学院</span><strong>{colleges.length}</strong></article>
-        <article><span>专业</span><strong>{majorCount}</strong></article>
-      </section>
-
-      <SectionCard
-        title="填写简历设置"
-        icon={<GraduationCap size={18} />}
-        action={<span className="record-count">候选人端“简历分析 → 填写简历”的学院 / 专业下拉来源</span>}
-      >
-        <div className="connection-log-toolbar">
-          <button className="secondary-button" type="button" onClick={addCollege}>
-            <Plus size={15} />添加学院
-          </button>
-          <button className="secondary-button" type="button" onClick={loadSettings} disabled={loading}>
-            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
-          </button>
-          <button className="primary-action admin-save-button" type="button" onClick={handleSave} disabled={saving}>
-            <Save size={15} className={saving ? 'spin' : ''} />
-            {saving ? '保存中…' : '保存配置'}
-          </button>
-        </div>
-
-        <p className="form-hint">
-          配置候选人填写简历时的学院与专业下拉选项。候选人登录后可在“简历分析 → 填写简历”中选择。
-        </p>
-
-        {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
-        {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
-
-        {!pageError && loading && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取配置</div>}
-        {!pageError && !loading && colleges.length === 0 && (
-          <div className="page-message">还没有配置学院，点击“添加学院”开始设置。</div>
-        )}
-
-        <div className="resume-settings-grid">
-          {colleges.map((college) => (
-            <article className="resume-settings-college" key={college.id}>
-              <div className="resume-settings-college-head">
-                <label className="field-block">
-                  <span>学院名称</span>
-                  <input
-                    value={college.name}
-                    onChange={(event) => updateCollegeName(college.id, event.target.value)}
-                    placeholder="例如：计算机学院"
-                  />
-                </label>
-                <button className="icon-button danger" type="button" title="删除学院" onClick={() => removeCollege(college.id)}>
-                  <Trash2 size={16} />
-                </button>
-              </div>
-
-              <div className="resume-settings-majors">
-                <div className="resume-settings-majors-head">
-                  <span>专业</span>
-                  <button className="secondary-button" type="button" onClick={() => addMajor(college.id)}>
-                    <Plus size={14} />添加专业
-                  </button>
-                </div>
-                {college.majors.length === 0 && <p className="form-hint">暂未添加专业。</p>}
-                {college.majors.map((major) => (
-                  <div className="resume-settings-major" key={major.id}>
-                    <label className="field-block">
-                      <span>专业名称</span>
-                      <input
-                        value={major.name}
-                        onChange={(event) => updateMajorName(college.id, major.id, event.target.value)}
-                        placeholder="例如：软件工程"
-                      />
-                    </label>
-                    <button className="icon-button danger" type="button" title="删除专业" onClick={() => removeMajor(college.id, major.id)}>
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </article>
-          ))}
-        </div>
       </SectionCard>
     </div>
   );
@@ -1313,16 +1139,7 @@ function OrganizationPage({ onView }) {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState('');
-  const [selectedNode, setSelectedNode] = useState({ type: 'all', id: '' });
   const [studentQuery, setStudentQuery] = useState('');
-  const [creator, setCreator] = useState('college');
-  const [collegeForm, setCollegeForm] = useState({ code: '', name: '' });
-  const [programForm, setProgramForm] = useState({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
-  const [classForm, setClassForm] = useState({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
-  const [mappingProgramId, setMappingProgramId] = useState('');
-  const [selectedJobIds, setSelectedJobIds] = useState([]);
-  const [importClassId, setImportClassId] = useState('');
-  const [importFile, setImportFile] = useState(null);
 
   const loadCampus = async () => {
     setLoading(true);
@@ -1341,55 +1158,14 @@ function OrganizationPage({ onView }) {
     loadCampus();
   }, []);
 
-  useEffect(() => {
-    const selectedProgram = campus.programs.find((item) => item.id === mappingProgramId);
-    setSelectedJobIds((selectedProgram?.jobs || []).map((item) => item.job_role_id));
-  }, [campus.programs, mappingProgramId]);
-
-  const selectedLabel = useMemo(() => {
-    if (selectedNode.type === 'unassigned') return '未归班学生';
-    if (selectedNode.type === 'college') return campus.colleges.find((item) => item.id === selectedNode.id)?.name || '学院';
-    if (selectedNode.type === 'program') return campus.programs.find((item) => item.id === selectedNode.id)?.name || '专业';
-    if (selectedNode.type === 'class') return campus.classes.find((item) => item.id === selectedNode.id)?.name || '班级';
-    return '全部学生';
-  }, [campus, selectedNode]);
-
   const filteredStudents = useMemo(() => {
     const keyword = studentQuery.trim().toLowerCase();
+    if (!keyword) return campus.students;
     return campus.students.filter((student) => {
-      const matchesNode = selectedNode.type === 'all'
-        || (selectedNode.type === 'unassigned' && !student.classId)
-        || (selectedNode.type === 'college' && student.collegeId === selectedNode.id)
-        || (selectedNode.type === 'program' && student.programId === selectedNode.id)
-        || (selectedNode.type === 'class' && student.classId === selectedNode.id);
       const searchable = [student.name, student.email, student.studentNo, student.targetRole, student.program, student.className].join(' ').toLowerCase();
-      return matchesNode && (!keyword || searchable.includes(keyword));
+      return searchable.includes(keyword);
     });
-  }, [campus.students, selectedNode, studentQuery]);
-
-  const createOrganizationItem = async (event) => {
-    event.preventDefault();
-    const config = {
-      college: { path: '/api/admin/campus/colleges', body: collegeForm, label: '学院' },
-      program: { path: '/api/admin/campus/programs', body: programForm, label: '专业' },
-      class: { path: '/api/admin/campus/classes', body: classForm, label: '班级' },
-    }[creator];
-    setBusy(`create-${creator}`);
-    setError('');
-    setMessage('');
-    try {
-      await adminRequest(config.path, { method: 'POST', body: JSON.stringify(config.body) });
-      setCollegeForm({ code: '', name: '' });
-      setProgramForm({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
-      setClassForm({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
-      setMessage(`${config.label}创建成功`);
-      await loadCampus();
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBusy('');
-    }
-  };
+  }, [campus.students, studentQuery]);
 
   const updateStudent = async (student, updates) => {
     setBusy(`student-${student.id}`);
@@ -1400,44 +1176,6 @@ function OrganizationPage({ onView }) {
         body: JSON.stringify(updates),
       });
       setMessage(updates.focus !== undefined ? (updates.focus ? '已标记为重点关注' : '已取消重点关注') : '学生归属已更新');
-      await loadCampus();
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const saveProgramJobs = async () => {
-    if (!mappingProgramId) return;
-    setBusy('mapping');
-    setError('');
-    try {
-      await adminRequest(`/api/admin/campus/programs/${encodeURIComponent(mappingProgramId)}/jobs`, {
-        method: 'PUT',
-        body: JSON.stringify({ jobRoleIds: selectedJobIds }),
-      });
-      setMessage('专业推荐岗位已更新');
-      await loadCampus();
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const importStudents = async (event) => {
-    event.preventDefault();
-    if (!importClassId || !importFile) return;
-    const formData = new FormData();
-    formData.append('file', importFile);
-    setBusy('import');
-    setError('');
-    try {
-      const result = await adminRequest(`/api/admin/campus/students/import?class_id=${encodeURIComponent(importClassId)}`, { method: 'POST', body: formData });
-      setMessage(`导入完成：成功归班 ${result.matched} 人，未匹配 ${result.unmatched?.length || 0} 人`);
-      setImportFile(null);
-      event.currentTarget.reset();
       await loadCampus();
     } catch (requestError) {
       setError(requestError.message);
@@ -1470,54 +1208,8 @@ function OrganizationPage({ onView }) {
     <div className="campus-page">
       {(error || message) && <div className={`campus-feedback ${error ? 'error' : 'success'}`}>{error || message}</div>}
 
-      <section className="campus-summary-grid">
-        {[
-          ['学院', campus.summary.colleges, Building2],
-          ['专业', campus.summary.programs, GraduationCap],
-          ['学生', campus.summary.students, UsersRound],
-          ['需要关注', campus.summary.focus, AlertCircle],
-        ].map(([label, value, Icon]) => (
-          <article key={label}><Icon size={18} /><span>{label}</span><strong>{value}</strong></article>
-        ))}
-      </section>
-
       <section className="campus-workspace">
-        <SectionCard title="组织结构" icon={<School size={18} />} className="campus-tree-card">
-          <div className="campus-tree">
-            <button type="button" className={selectedNode.type === 'all' ? 'active' : ''} onClick={() => setSelectedNode({ type: 'all', id: '' })}>
-              <span><UsersRound size={15} />全部学生</span><b>{campus.summary.students}</b>
-            </button>
-            <button type="button" className={selectedNode.type === 'unassigned' ? 'active warning' : 'warning'} onClick={() => setSelectedNode({ type: 'unassigned', id: '' })}>
-              <span><AlertCircle size={15} />未归班</span><b>{campus.summary.unassigned}</b>
-            </button>
-            {campus.colleges.map((college) => (
-              <div className="campus-college-node" key={college.id}>
-                <button type="button" className={selectedNode.type === 'college' && selectedNode.id === college.id ? 'active' : ''} onClick={() => setSelectedNode({ type: 'college', id: college.id })}>
-                  <span><Building2 size={15} />{college.name}</span><b>{college.studentCount}</b>
-                </button>
-                <div>
-                  {campus.programs.filter((program) => program.college_id === college.id).map((program) => (
-                    <div className="campus-program-node" key={program.id}>
-                      <button type="button" className={selectedNode.type === 'program' && selectedNode.id === program.id ? 'active' : ''} onClick={() => setSelectedNode({ type: 'program', id: program.id })}>
-                        <span><GraduationCap size={14} />{program.name}{program.direction ? ` · ${program.direction}` : ''}</span><b>{program.studentCount}</b>
-                      </button>
-                      <div>
-                        {campus.classes.filter((classItem) => classItem.program_id === program.id).map((classItem) => (
-                          <button type="button" key={classItem.id} className={selectedNode.type === 'class' && selectedNode.id === classItem.id ? 'active' : ''} onClick={() => setSelectedNode({ type: 'class', id: classItem.id })}>
-                            <span>{classItem.graduation_year ? `${classItem.graduation_year}届 · ` : ''}{classItem.name}</span><b>{classItem.studentCount}</b>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-            {campus.colleges.length === 0 && <EmptyState text="还没有组织结构，请先创建学院" />}
-          </div>
-        </SectionCard>
-
-        <SectionCard title={selectedLabel} icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
+        <SectionCard title="学生" icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
           <div className="campus-student-toolbar">
             <label><Search size={15} /><input value={studentQuery} onChange={(event) => setStudentQuery(event.target.value)} placeholder="搜索姓名、学号、邮箱或目标岗位" /></label>
           </div>
@@ -1547,59 +1239,6 @@ function OrganizationPage({ onView }) {
               </tbody>
             </table>
           </div>
-        </SectionCard>
-      </section>
-
-      <section className="campus-config-grid">
-        <SectionCard title="组织配置" icon={<Plus size={18} />}>
-          <div className="campus-config-tabs">
-            {[['college', '添加学院'], ['program', '添加专业'], ['class', '添加班级']].map(([key, label]) => <button type="button" key={key} className={creator === key ? 'active' : ''} onClick={() => setCreator(key)}>{label}</button>)}
-          </div>
-          <form className="campus-create-form" onSubmit={createOrganizationItem}>
-            {creator === 'college' && (
-              <>
-                <label className="field-block"><span>学院编码</span><input value={collegeForm.code} onChange={(event) => setCollegeForm((current) => ({ ...current, code: event.target.value }))} placeholder="例如 CS" required /></label>
-                <label className="field-block"><span>学院名称</span><input value={collegeForm.name} onChange={(event) => setCollegeForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 计算机学院" required /></label>
-              </>
-            )}
-            {creator === 'program' && (
-              <>
-                <label className="field-block"><span>所属学院</span><select value={programForm.collegeId} onChange={(event) => setProgramForm((current) => ({ ...current, collegeId: event.target.value }))} required><option value="">请选择学院</option>{campus.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-                <label className="field-block"><span>标准专业</span><select value={programForm.standardMajorCode} onChange={(event) => { const major = campus.standardMajors.find((item) => item.code === event.target.value); setProgramForm((current) => ({ ...current, standardMajorCode: event.target.value, name: major?.name || current.name })); }}><option value="">自定义专业</option>{campus.standardMajors.map((item) => <option value={item.code} key={item.id}>{item.name} · {item.code}</option>)}</select></label>
-                <label className="field-block"><span>学校专业名称</span><input value={programForm.name} onChange={(event) => setProgramForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程" required /></label>
-                <label className="field-block"><span>培养方向</span><input value={programForm.direction} onChange={(event) => setProgramForm((current) => ({ ...current, direction: event.target.value }))} placeholder="例如 Java 开发" /></label>
-                <label className="field-block"><span>专业负责人</span><input value={programForm.coordinator} onChange={(event) => setProgramForm((current) => ({ ...current, coordinator: event.target.value }))} placeholder="姓名" /></label>
-              </>
-            )}
-            {creator === 'class' && (
-              <>
-                <label className="field-block"><span>所属专业</span><select value={classForm.programId} onChange={(event) => setClassForm((current) => ({ ...current, programId: event.target.value }))} required><option value="">请选择专业</option>{campus.programs.map((item) => <option value={item.id} key={item.id}>{item.college_name} · {item.name}</option>)}</select></label>
-                <label className="field-block"><span>班级名称</span><input value={classForm.name} onChange={(event) => setClassForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程1班" required /></label>
-                <label className="field-block"><span>毕业年份</span><input type="number" min="2000" max="2100" value={classForm.graduationYear} onChange={(event) => setClassForm((current) => ({ ...current, graduationYear: event.target.value }))} placeholder="2026" /></label>
-                <label className="field-block"><span>辅导员</span><input value={classForm.advisor} onChange={(event) => setClassForm((current) => ({ ...current, advisor: event.target.value }))} placeholder="姓名" /></label>
-                <label className="field-block"><span>邀请码（可选）</span><input value={classForm.inviteCode} onChange={(event) => setClassForm((current) => ({ ...current, inviteCode: event.target.value }))} placeholder="留空自动生成" /></label>
-              </>
-            )}
-            <button className="primary-button" type="submit" disabled={busy === `create-${creator}`}>{busy === `create-${creator}` ? '创建中…' : '确认创建'}</button>
-          </form>
-        </SectionCard>
-
-        <SectionCard title="专业推荐岗位" icon={<GraduationCap size={18} />}>
-          <div className="program-job-editor">
-            <label className="field-block"><span>选择专业</span><select value={mappingProgramId} onChange={(event) => setMappingProgramId(event.target.value)}><option value="">请选择专业</option>{campus.programs.map((item) => <option value={item.id} key={item.id}>{item.college_name} · {item.name}</option>)}</select></label>
-            {mappingProgramId && <div className="job-role-picker">{campus.jobRoles.map((job) => <label key={job.id} className={selectedJobIds.includes(job.id) ? 'selected' : ''}><input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={(event) => setSelectedJobIds((current) => event.target.checked ? [...current, job.id] : current.filter((id) => id !== job.id))} />{job.name}</label>)}</div>}
-            {mappingProgramId && <button className="primary-button" type="button" disabled={busy === 'mapping'} onClick={saveProgramJobs}>{busy === 'mapping' ? '保存中…' : '保存岗位关联'}</button>}
-            {!mappingProgramId && <EmptyState text="选择专业后配置推荐岗位" />}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="批量归班" icon={<Upload size={18} />}>
-          <form className="campus-import-form" onSubmit={importStudents}>
-            <p>上传 UTF-8 CSV，至少包含“邮箱”列；可选“学号”列。已注册学生会加入目标班级，未注册学生会出现在结果提示中。</p>
-            <label className="field-block"><span>目标班级</span><select value={importClassId} onChange={(event) => setImportClassId(event.target.value)} required><option value="">请选择班级</option>{campus.classes.map((item) => <option value={item.id} key={item.id}>{item.program_name} · {item.name}</option>)}</select></label>
-            <label className="campus-file-field"><input type="file" accept=".csv,text/csv" onChange={(event) => setImportFile(event.target.files?.[0] || null)} required /><span>{importFile?.name || '选择学生 CSV 文件'}</span></label>
-            <button className="secondary-button" type="submit" disabled={busy === 'import'}><Upload size={15} />{busy === 'import' ? '导入中…' : '开始导入'}</button>
-          </form>
         </SectionCard>
       </section>
     </div>
@@ -2215,11 +1854,6 @@ function SettingsPage({ data, onSettingsSaved }) {
   const [testingProviders, setTestingProviders] = useState(false);
   const [providerTestResults, setProviderTestResults] = useState([]);
   const [providerTestError, setProviderTestError] = useState('');
-  const [adminUsers, setAdminUsers] = useState(data.adminUsers || []);
-  const [adminForm, setAdminForm] = useState({ email: '', name: '', password: '', role: 'reviewer' });
-  const [adminMessage, setAdminMessage] = useState('');
-  const [adminError, setAdminError] = useState('');
-  const [adminSaving, setAdminSaving] = useState(false);
   const openaiReady = Boolean(settings.openaiApiKeyConfigured);
   const reportOpenaiReady = Boolean(settings.reportOpenaiApiKeyConfigured);
   const reportQwenReady = Boolean(settings.reportQwenApiKeyConfigured);
@@ -2266,42 +1900,7 @@ function SettingsPage({ data, onSettingsSaved }) {
   ]);
 
   const updateForm = (key, value) => setForm((current) => ({ ...current, [key]: value }));
-  const updateAdminForm = (key, value) => setAdminForm((current) => ({ ...current, [key]: value }));
 
-  const createAdmin = async (event) => {
-    event.preventDefault();
-    setAdminSaving(true);
-    setAdminMessage('');
-    setAdminError('');
-    try {
-      const result = await adminRequest('/api/admin/users', {
-        method: 'POST',
-        body: JSON.stringify(adminForm),
-      });
-      setAdminUsers((current) => [...current, result.admin]);
-      setAdminForm({ email: '', name: '', password: '', role: 'reviewer' });
-      setAdminMessage('管理员账号已创建。');
-    } catch (requestError) {
-      setAdminError(requestError.message);
-    } finally {
-      setAdminSaving(false);
-    }
-  };
-
-  const toggleAdminStatus = async (item) => {
-    setAdminMessage('');
-    setAdminError('');
-    try {
-      const result = await adminRequest(`/api/admin/users/${encodeURIComponent(item.id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status: item.status === 'normal' ? 'disabled' : 'normal' }),
-      });
-      setAdminUsers((current) => current.map((adminItem) => (adminItem.id === item.id ? result.admin : adminItem)));
-      setAdminMessage(`管理员 ${item.email} 状态已更新。`);
-    } catch (requestError) {
-      setAdminError(requestError.message);
-    }
-  };
   const handleSave = async (event) => {
     event.preventDefault();
     setSaving(true);
@@ -2581,90 +2180,828 @@ function SettingsPage({ data, onSettingsSaved }) {
           </div>
         </form>
       </SectionCard>
-      <SectionCard title="管理员与审计" icon={<UserCog size={18} />}>
-        <form className="admin-account-form" onSubmit={createAdmin}>
-          <h3>创建管理员</h3>
-          <div className="field-grid">
-            <label className="field-block">
-              <span>姓名</span>
-              <input value={adminForm.name} onChange={(event) => updateAdminForm('name', event.target.value)} required />
+    </section>
+  );
+}
+
+const PERMISSION_OPTIONS = [
+  { key: 'manageCatalog', label: '岗位知识库', desc: '维护目标岗位、专业方向与能力模型，含发布与导入' },
+  { key: 'manageStudents', label: '学生管理', desc: '查看与维护学生信息、归班与重点关注，需选择数据范围' },
+  { key: 'manageOrganization', label: '组织管理', desc: '维护学院、专业、班级组织结构' },
+  { key: 'manageModelConfig', label: '面试模型配置', desc: '查看与配置 AI 陪练角色' },
+  { key: 'viewInterviews', label: '查看训练记录', desc: '查看学生模拟训练进度与详情' },
+  { key: 'viewReports', label: '报告质检', desc: '查看成长报告并执行质量复核' },
+];
+
+const permissionLabel = (key) => (PERMISSION_OPTIONS.find((option) => option.key === key) || {}).label || key;
+
+function scopeCovers(entries, collegeId, programId, classId) {
+  return (entries || []).some(
+    (entry) =>
+      entry.college === collegeId &&
+      (!entry.program || entry.program === programId) &&
+      (!entry.class || entry.class === classId),
+  );
+}
+
+function ScopeTree({ colleges, programs, classes, value, onChange }) {
+  const programsByCollege = useMemo(() => {
+    const map = {};
+    (programs || []).forEach((program) => {
+      (map[program.college_id] = map[program.college_id] || []).push(program);
+    });
+    return map;
+  }, [programs]);
+  const classesByProgram = useMemo(() => {
+    const map = {};
+    (classes || []).forEach((classItem) => {
+      (map[classItem.program_id] = map[classItem.program_id] || []).push(classItem);
+    });
+    return map;
+  }, [classes]);
+
+  const toggle = (entry, add) => {
+    const next = (value || []).filter(
+      (item) =>
+        !(
+          item.college === entry.college &&
+          (!entry.program || item.program === entry.program) &&
+          (!entry.class || item.class === entry.class)
+        ),
+    );
+    if (add) next.push(entry);
+    onChange(next);
+  };
+
+  if (!(colleges || []).length) {
+    return <p className="settings-message">暂无组织结构数据，请先在「组织」页维护学院、专业与班级。</p>;
+  }
+
+  return (
+    <div className="scope-tree">
+      {(colleges || []).map((college) => {
+        const collegeCovered = scopeCovers(value, college.id, null, null);
+        const collegePrograms = programsByCollege[college.id] || [];
+        return (
+          <div className="scope-tree-college" key={college.id}>
+            <label>
+              <input
+                type="checkbox"
+                checked={collegeCovered}
+                onChange={(event) => toggle({ college: college.id, program: '', class: '' }, event.target.checked)}
+              />
+              <strong>{college.name}</strong>
+              <small>（整个学院）</small>
             </label>
-            <label className="field-block">
-              <span>邮箱</span>
-              <input type="email" value={adminForm.email} onChange={(event) => updateAdminForm('email', event.target.value)} required />
-            </label>
+            {!collegeCovered &&
+              collegePrograms.map((program) => {
+                const programCovered = scopeCovers(value, college.id, program.id, null);
+                const programClasses = classesByProgram[program.id] || [];
+                return (
+                  <div className="scope-tree-program" key={program.id}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={programCovered}
+                        onChange={(event) => toggle({ college: college.id, program: program.id, class: '' }, event.target.checked)}
+                      />
+                      {program.name}
+                      <small>（整个专业）</small>
+                    </label>
+                    {!programCovered &&
+                      programClasses.map((classItem) => (
+                        <label className="scope-tree-class" key={classItem.id}>
+                          <input
+                            type="checkbox"
+                            checked={scopeCovers(value, college.id, program.id, classItem.id)}
+                            onChange={(event) => toggle({ college: college.id, program: program.id, class: classItem.id }, event.target.checked)}
+                          />
+                          {classItem.name}
+                        </label>
+                      ))}
+                  </div>
+                );
+              })}
           </div>
-          <div className="field-grid">
-            <label className="field-block">
-              <span>初始密码</span>
-              <input type="password" minLength={12} value={adminForm.password} onChange={(event) => updateAdminForm('password', event.target.value)} required />
-              <small>至少 12 位，创建后请通过安全渠道交付。</small>
-            </label>
-            <label className="field-block">
-              <span>角色</span>
-              <select value={adminForm.role} onChange={(event) => updateAdminForm('role', event.target.value)}>
-                <option value="reviewer">报告审核员</option>
-                <option value="operations">运营管理员</option>
-                <option value="super_admin">超级管理员</option>
-              </select>
-            </label>
-          </div>
-          {adminMessage && <p className="settings-message success">{adminMessage}</p>}
-          {adminError && <p className="settings-message error">{adminError}</p>}
-          <button className="primary-button" type="submit" disabled={adminSaving}>
-            {adminSaving ? '创建中...' : '创建管理员'}
+        );
+      })}
+    </div>
+  );
+}
+
+function PermissionChecklist({ options, value, onChange }) {
+  return (
+    <div className="permission-checklist">
+      {options.map((option) => (
+        <label className="permission-check" key={option.key}>
+          <input
+            type="checkbox"
+            checked={(value || []).includes(option.key)}
+            onChange={(event) => {
+              const next = (value || []).filter((key) => key !== option.key);
+              if (event.target.checked) next.push(option.key);
+              onChange(next);
+            }}
+          />
+          <span>
+            <strong>{option.label}</strong>
+            <small>{option.desc}</small>
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+const PERMISSION_STATUS_LABELS = { pending: '待审核', approved: '已通过', rejected: '已驳回' };
+
+function PermissionPage({ data }) {
+  const isSuper = data.admin?.role === 'super_admin';
+  const [tab, setTab] = useState(isSuper ? 'admins' : 'requests');
+  const [adminUsers, setAdminUsers] = useState(data.adminUsers || []);
+  const [requests, setRequests] = useState([]);
+  const [org, setOrg] = useState({ colleges: [], programs: [], classes: [] });
+  const [adminForm, setAdminForm] = useState({ email: '', name: '', password: '', role: '' });
+  const [adminPermissions, setAdminPermissions] = useState([]);
+  const [adminScope, setAdminScope] = useState([]);
+  const [adminMessage, setAdminMessage] = useState('');
+  const [adminError, setAdminError] = useState('');
+  const [adminSaving, setAdminSaving] = useState(false);
+  const [reqPermissions, setReqPermissions] = useState([]);
+  const [reqScope, setReqScope] = useState([]);
+  const [reqReason, setReqReason] = useState('');
+  const [reqMessage, setReqMessage] = useState('');
+  const [reqError, setReqError] = useState('');
+  const [reqSaving, setReqSaving] = useState(false);
+  const [reviewing, setReviewing] = useState('');
+  const [editingAdmin, setEditingAdmin] = useState(null);
+  const [editPermissions, setEditPermissions] = useState([]);
+  const [editScope, setEditScope] = useState([]);
+  const [editMessage, setEditMessage] = useState('');
+  const [editError, setEditError] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+
+  useEffect(() => {
+    adminRequest('/api/admin/organization/structure')
+      .then((structure) => setOrg({ colleges: structure.colleges || [], programs: structure.programs || [], classes: structure.classes || [] }))
+      .catch(() => {});
+    adminRequest('/api/admin/permission-requests')
+      .then((result) => setRequests(result.requests || []))
+      .catch(() => {});
+  }, []);
+
+  const refreshRequests = async () => {
+    const result = await adminRequest('/api/admin/permission-requests');
+    setRequests(result.requests || []);
+  };
+
+  const createAdmin = async (event) => {
+    event.preventDefault();
+    setAdminSaving(true);
+    setAdminMessage('');
+    setAdminError('');
+    try {
+      const result = await adminRequest('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...adminForm,
+          permissions: adminPermissions,
+          studentScope: adminScope,
+        }),
+      });
+      setAdminUsers((current) => [...current, result.admin]);
+      setAdminForm({ email: '', name: '', password: '', role: '' });
+      setAdminPermissions([]);
+      setAdminScope([]);
+      setAdminMessage('管理员账号已创建。');
+    } catch (requestError) {
+      setAdminError(requestError.message);
+    } finally {
+      setAdminSaving(false);
+    }
+  };
+
+  const toggleAdminStatus = async (item) => {
+    setAdminMessage('');
+    setAdminError('');
+    try {
+      const result = await adminRequest(`/api/admin/users/${encodeURIComponent(item.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: item.status === 'normal' ? 'disabled' : 'normal' }),
+      });
+      setAdminUsers((current) => current.map((adminItem) => (adminItem.id === item.id ? result.admin : adminItem)));
+      setAdminMessage(`管理员 ${item.email} 状态已更新。`);
+    } catch (requestError) {
+      setAdminError(requestError.message);
+    }
+  };
+
+  const openEdit = (item) => {
+    setEditingAdmin(item);
+    setEditPermissions(item.permissions || []);
+    setEditScope(item.student_scope || []);
+    setEditMessage('');
+    setEditError('');
+  };
+
+  const closeEdit = () => {
+    setEditingAdmin(null);
+    setEditMessage('');
+    setEditError('');
+  };
+
+  const saveEdit = async (event) => {
+    event.preventDefault();
+    setEditSaving(true);
+    setEditMessage('');
+    setEditError('');
+    try {
+      const result = await adminRequest(`/api/admin/users/${encodeURIComponent(editingAdmin.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ permissions: editPermissions, studentScope: editScope }),
+      });
+      setAdminUsers((current) => current.map((adminItem) => (adminItem.id === result.admin.id ? result.admin : adminItem)));
+      setEditingAdmin(null);
+      setAdminMessage(`已更新 ${editingAdmin.email} 的权限。`);
+    } catch (requestError) {
+      setEditError(requestError.message);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const submitRequest = async (event) => {
+    event.preventDefault();
+    setReqSaving(true);
+    setReqMessage('');
+    setReqError('');
+    try {
+      await adminRequest('/api/admin/permission-requests', {
+        method: 'POST',
+        body: JSON.stringify({ permissions: reqPermissions, studentScope: reqScope, reason: reqReason }),
+      });
+      setReqPermissions([]);
+      setReqScope([]);
+      setReqReason('');
+      setReqMessage('权限申请已提交，等待超级管理员审核。');
+      await refreshRequests();
+    } catch (requestError) {
+      setReqError(requestError.message);
+    } finally {
+      setReqSaving(false);
+    }
+  };
+
+  const reviewRequest = async (item, action) => {
+    setAdminMessage('');
+    setAdminError('');
+    setReviewing(item.id);
+    try {
+      await adminRequest(`/api/admin/permission-requests/${encodeURIComponent(item.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ action }),
+      });
+      await refreshRequests();
+      const usersResult = await adminRequest('/api/admin/users');
+      setAdminUsers(usersResult.admins || []);
+      setAdminMessage(`已${action === 'approve' ? '通过' : '驳回'} ${item.requesterEmail} 的权限申请。`);
+    } catch (requestError) {
+      setAdminError(requestError.message);
+    } finally {
+      setReviewing('');
+    }
+  };
+
+  const scopeText = (scope) => {
+    if (!scope || scope.length === 0) return '全部';
+    return scope
+      .map((entry) => {
+        const classItem = org.classes.find((item) => item.id === entry.class);
+        if (classItem) return classItem.name;
+        const program = org.programs.find((item) => item.id === entry.program);
+        const college = org.colleges.find((item) => item.id === entry.college);
+        if (program) return `${college?.name || ''} / ${program.name}`;
+        return college?.name || entry.college;
+      })
+      .join('、');
+  };
+
+  return (
+    <section className="settings-page">
+      <div className="perm-tabs">
+        {isSuper && (
+          <button type="button" className={tab === 'admins' ? 'active' : ''} onClick={() => setTab('admins')}>
+            <UserCog size={16} />管理员管理
           </button>
-        </form>
-        <div className="admin-account-list">
-          {adminUsers.map((item) => (
-            <article key={item.id}>
-              <div>
-                <strong>{item.name}</strong>
-                <span>{item.email}</span>
-                <small>{roleLabels[item.role] || item.role} · {item.status === 'normal' ? '正常' : '已禁用'}</small>
-              </div>
-              <button
-                type="button"
-                disabled={item.id === data.admin?.id}
-                onClick={() => toggleAdminStatus(item)}
-              >
-                {item.status === 'normal' ? '禁用' : '启用'}
-              </button>
-            </article>
-          ))}
-        </div>
-        <h3 className="audit-title">最近审计记录</h3>
-        <div className="audit-list">
-          {data.auditLogs.length === 0 && <EmptyState text="暂无审计记录" />}
-          {data.auditLogs.map((log) => (
-            <div key={log.id || `${log.action}-${log.time}`}>
-              <span>{log.actor}</span>
-              <strong>{log.action}</strong>
-              <small>{log.target} · {log.time}</small>
-              {log.summary && <small>{log.summary}</small>}
+        )}
+        <button type="button" className={tab === 'requests' ? 'active' : ''} onClick={() => setTab('requests')}>
+          <KeyRound size={16} />权限申请
+        </button>
+        {isSuper && (
+          <button type="button" className={tab === 'review' ? 'active' : ''} onClick={() => setTab('review')}>
+            <ShieldCheck size={16} />申请审核
+          </button>
+        )}
+      </div>
+
+      {tab === 'admins' && (
+        <SectionCard title="管理员管理" icon={<UserCog size={18} />}>
+          <form className="admin-account-form" onSubmit={createAdmin}>
+            <h3>创建管理员</h3>
+            <div className="field-grid">
+              <label className="field-block">
+                <span>姓名</span>
+                <input value={adminForm.name} onChange={(event) => setAdminForm((current) => ({ ...current, name: event.target.value }))} required />
+              </label>
+              <label className="field-block">
+                <span>邮箱</span>
+                <input type="email" value={adminForm.email} onChange={(event) => setAdminForm((current) => ({ ...current, email: event.target.value }))} required />
+              </label>
             </div>
-          ))}
+            <div className="field-grid">
+              <label className="field-block">
+                <span>初始密码</span>
+                <input type="password" minLength={12} value={adminForm.password} onChange={(event) => setAdminForm((current) => ({ ...current, password: event.target.value }))} required />
+                <small>至少 12 位，创建后请通过安全渠道交付。</small>
+              </label>
+              <label className="field-block">
+                <span>角色名称</span>
+                <input value={adminForm.role} onChange={(event) => setAdminForm((current) => ({ ...current, role: event.target.value }))} placeholder="例如 系统管理员 / 报告审核员" />
+                <small>角色名称仅作展示标签，权限由下方权限点决定。</small>
+              </label>
+            </div>
+            <div className="field-block">
+              <span>授予权限</span>
+              <PermissionChecklist options={PERMISSION_OPTIONS} value={adminPermissions} onChange={setAdminPermissions} />
+            </div>
+            <div className="field-block">
+              <span>学生数据范围</span>
+              <small className="field-hint">勾选「学生管理」权限时，需指定该管理员可管理的学院 / 专业 / 班级（可多选，跨范围）。</small>
+              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={adminScope} onChange={setAdminScope} />
+            </div>
+            {adminMessage && <p className="settings-message success">{adminMessage}</p>}
+            {adminError && <p className="settings-message error">{adminError}</p>}
+            <button className="primary-button" type="submit" disabled={adminSaving}>
+              {adminSaving ? '创建中...' : '创建管理员'}
+            </button>
+          </form>
+          <div className="admin-account-list">
+            <h3>管理员账号（{adminUsers.length}）</h3>
+            {adminUsers.length === 0 && <EmptyState text="暂无管理员账号" />}
+            {adminUsers.map((item) => (
+              <article key={item.id}>
+                <div>
+                  <strong>{item.name}</strong>
+                  <span>{item.email}</span>
+                  <small>
+                    {item.role || '管理员'} · {item.status === 'normal' ? '正常' : '已禁用'}
+                  </small>
+                  <small className="perm-badge">
+                    {(item.permissions || []).map(permissionLabel).join('、') || '无权限'}
+                  </small>
+                  <small className="perm-badge">范围：{scopeText(item.student_scope)}</small>
+                </div>
+                <div className="admin-row-actions">
+                  <button
+                    className="edit-perm-btn"
+                    type="button"
+                    disabled={item.email === data.admin?.email}
+                    onClick={() => openEdit(item)}
+                  >
+                    编辑权限
+                  </button>
+                  <button
+                    type="button"
+                    disabled={item.email === data.admin?.email}
+                    onClick={() => toggleAdminStatus(item)}
+                  >
+                    {item.status === 'normal' ? '禁用' : '启用'}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+          <h3 className="audit-title">最近审计记录</h3>
+          <div className="audit-list">
+            {data.auditLogs.length === 0 && <EmptyState text="暂无审计记录" />}
+            {data.auditLogs.map((log) => (
+              <div key={log.id || `${log.action}-${log.time}`}>
+                <span>{log.actor}</span>
+                <strong>{log.action}</strong>
+                <small>{log.target} · {log.time}</small>
+                {log.summary && <small>{log.summary}</small>}
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      {tab === 'requests' && (
+        <SectionCard title="权限申请" icon={<KeyRound size={18} />}>
+          {!isSuper && (
+            <p className="settings-message">
+              作为下级管理员，你可以提交权限与数据范围申请，由超级管理员审核后生效。
+            </p>
+          )}
+          <form className="admin-account-form" onSubmit={submitRequest}>
+            <h3>申请权限或数据范围</h3>
+            <div className="field-block">
+              <span>申请权限</span>
+              <PermissionChecklist options={PERMISSION_OPTIONS} value={reqPermissions} onChange={setReqPermissions} />
+            </div>
+            <div className="field-block">
+              <span>申请数据范围</span>
+              <small className="field-hint">仅当申请「学生管理」相关能力时填写。</small>
+              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={reqScope} onChange={setReqScope} />
+            </div>
+            <label className="field-block">
+              <span>申请理由</span>
+              <textarea rows={3} maxLength={500} value={reqReason} onChange={(event) => setReqReason(event.target.value)} placeholder="请说明为什么需要这些权限，便于超级管理员审核。" />
+            </label>
+            {reqMessage && <p className="settings-message success">{reqMessage}</p>}
+            {reqError && <p className="settings-message error">{reqError}</p>}
+            <button className="primary-button" type="submit" disabled={reqSaving || (reqPermissions.length === 0 && reqScope.length === 0)}>
+              {reqSaving ? '提交中...' : '提交申请'}
+            </button>
+          </form>
+          <div className="admin-account-list">
+            <h3>我的申请记录</h3>
+            {requests.length === 0 && <EmptyState text="暂无申请记录" />}
+            {requests.map((item) => (
+              <article key={item.id}>
+                <div>
+                  <strong>{item.requesterName || item.requesterEmail}</strong>
+                  <small>
+                    {(item.permissions || []).map(permissionLabel).join('、') || '无权限'} · 范围：
+                    {scopeText(item.studentScope) || '全部'}
+                  </small>
+                  {item.reason && <small>{item.reason}</small>}
+                  <small>{item.createdAt} · {item.reviewedBy ? `审核人：${item.reviewedBy}` : ''}</small>
+                </div>
+                <b className={`perm-status ${item.status}`}>{PERMISSION_STATUS_LABELS[item.status] || item.status}</b>
+              </article>
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      {tab === 'review' && (
+        <SectionCard title="申请审核" icon={<ShieldCheck size={18} />}>
+          {(adminMessage || adminError) && (
+            <p className={`settings-message ${adminError ? 'error' : 'success'}`}>{adminError || adminMessage}</p>
+          )}
+          <div className="admin-account-list">
+            <h3>待审核申请</h3>
+            {requests.filter((item) => item.status === 'pending').length === 0 && (
+              <EmptyState text="暂无待审核的权限申请" />
+            )}
+            {requests
+              .filter((item) => item.status === 'pending')
+              .map((item) => (
+                <article key={item.id}>
+                  <div>
+                    <strong>{item.requesterName || item.requesterEmail}</strong>
+                    <span>{item.requesterEmail}</span>
+                    <small>
+                      {(item.permissions || []).map(permissionLabel).join('、') || '无权限'} · 范围：
+                      {scopeText(item.studentScope) || '全部'}
+                    </small>
+                    {item.reason && <small>{item.reason}</small>}
+                    <small>{item.createdAt}</small>
+                  </div>
+                  <div className="review-actions">
+                    <button type="button" disabled={reviewing === item.id} onClick={() => reviewRequest(item, 'approve')}>
+                      {reviewing === item.id ? '处理中...' : '通过'}
+                    </button>
+                    <button type="button" disabled={reviewing === item.id} onClick={() => reviewRequest(item, 'reject')}>
+                      驳回
+                    </button>
+                  </div>
+                </article>
+              ))}
+          </div>
+          <div className="admin-account-list">
+            <h3>已处理申请</h3>
+            {requests.filter((item) => item.status !== 'pending').length === 0 && <EmptyState text="暂无已处理的申请" />}
+            {requests
+              .filter((item) => item.status !== 'pending')
+              .map((item) => (
+                <article key={item.id}>
+                  <div>
+                    <strong>{item.requesterName || item.requesterEmail}</strong>
+                    <small>
+                      {(item.permissions || []).map(permissionLabel).join('、') || '无权限'} · 范围：
+                      {scopeText(item.studentScope) || '全部'}
+                    </small>
+                    <small>{item.createdAt} · 审核人：{item.reviewedBy || '-'} · {item.reviewedAt}</small>
+                  </div>
+                  <b className={`perm-status ${item.status}`}>{PERMISSION_STATUS_LABELS[item.status] || item.status}</b>
+                </article>
+              ))}
+          </div>
+        </SectionCard>
+      )}
+
+      {editingAdmin && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="编辑管理员权限" onClick={closeEdit}>
+          <div className="modal-card perm-edit-modal" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <span><ShieldCheck size={18} />编辑权限 · {editingAdmin.email}</span>
+              <button className="icon-button" type="button" title="关闭" onClick={closeEdit}><X size={17} /></button>
+            </header>
+            <p>取消勾选权限点即可回收对应权限，调整学生数据范围；保存后立即生效。</p>
+            <form className="admin-account-form" onSubmit={saveEdit}>
+              <div className="field-block">
+                <span>授予权限</span>
+                <PermissionChecklist options={PERMISSION_OPTIONS} value={editPermissions} onChange={setEditPermissions} />
+              </div>
+              <div className="field-block">
+                <span>学生数据范围</span>
+                <small className="field-hint">仅当勾选「学生管理」权限时生效。</small>
+                <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={editScope} onChange={setEditScope} />
+              </div>
+              {editMessage && <p className="settings-message success">{editMessage}</p>}
+              {editError && <p className="settings-message error">{editError}</p>}
+              <footer>
+                <button type="button" onClick={closeEdit}>取消</button>
+                <button className="primary-button" type="submit" disabled={editSaving}>
+                  {editSaving ? '保存中...' : '保存权限'}
+                </button>
+              </footer>
+            </form>
+          </div>
         </div>
-      </SectionCard>
+      )}
     </section>
   );
 }
 
 const pageDescriptions = {
   dashboard: '集中处理今天最需要关注的任务',
+  guide: '按步骤了解管理端从初始化到日常运营的完整流程',
   interviews: '查看学生模拟训练进度与 AI 陪练运行情况',
   reports: '抽检成长报告的准确性与建议质量',
   organization: '维护学院、专业、班级和学生组织归属',
-  registrations: '导入学生注册信息，候选人端凭学号与姓名登录',
-  resumeFormSettings: '配置候选人填写简历的学院 / 专业下拉选项',
-  candidates: '查看学生训练记录与成长表现',
+  organizationConfig: '组织结构一览，从用户注册导入表一键生成组织结构',
+  registrations: '学生注册：导入学生，候选人端凭学号与姓名登录',
   catalog: '维护目标岗位、专业方向与能力模型',
   agents: '查看 AI 陪练角色及使用情况',
   connectionLogs: '排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路',
   settings: '管理服务配置、管理员与审计记录',
+  permission: '创建下级管理员、分配权限与数据范围，审核下级权限申请',
 };
 
-const searchableViews = new Set(['candidates', 'interviews', 'reports', 'agents']);
+const searchableViews = new Set(['interviews', 'reports', 'agents']);
+
+const roleCapabilityHints = {
+  super_admin: '（超级管理员）可访问本页全部模块，负责系统初始化与全局配置',
+};
+
+const guideFlow = [
+  {
+    key: 'setup',
+    title: '第一步 · 系统初始化',
+    icon: 'Lightbulb',
+    desc: '在上线前先把基础配置、组织结构和账号体系准备好，候选人才有可用的登录与训练环境。',
+    steps: [
+      { view: 'settings', text: '在「系统管理」中配置报告大模型 / 供应商，以及质检相关规则。' },
+      { view: 'organization', text: '在「组织与学生」中维护学院、专业、班级等组织归属，保证学生归班准确。' },
+      { view: 'registrations', text: '在「学生」页点击「学生注册」导入学生，候选人端凭学号与姓名即可登录。' },
+    ],
+  },
+  {
+    key: 'content',
+    title: '第二步 · 搭建训练内容',
+    icon: 'BookOpen',
+    desc: '训练内容决定学生练什么、AI 以什么角色陪练，是训练质量的基础。',
+    steps: [
+      { view: 'catalog', text: '在「岗位与能力」中维护目标岗位、专业方向与能力模型。' },
+      { view: 'agents', text: '在「AI 陪练角色」中查看陪练角色配置与实际使用情况。' },
+    ],
+  },
+  {
+    key: 'operation',
+    title: '第三步 · 日常运营',
+    icon: 'Activity',
+    desc: '上线后每天从工作台入口开始，跟进训练进度与报告质量。',
+    steps: [
+      { view: 'dashboard', text: '在「工作台」集中处理今日待办：待复核报告、进行中的面试。' },
+      { view: 'interviews', text: '在「训练记录」查看学生模拟训练进度与 AI 陪练运行情况。' },
+      { view: 'reports', text: '在「报告质检」抽检成长报告的准确性与建议质量。' },
+    ],
+  },
+  {
+    key: 'maintain',
+    title: '第四步 · 系统维护',
+    icon: 'Wifi',
+    desc: '出现链路异常或需要审计时，在系统模块定位和排查问题。',
+    steps: [
+      { view: 'connectionLogs', text: '在「连接日志」排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路。' },
+      { view: 'settings', text: '在「系统管理」管理全局配置、管理员账号并查看审计记录。' },
+    ],
+  },
+];
+
+function GuidePage({ onNavigate, admin }) {
+  return (
+    <div className="guide-page">
+      <section className="dashboard-welcome guide-welcome">
+        <div>
+          <span><ListOrdered size={16} /> 使用流程指引</span>
+          <h2>管理端完整使用流程</h2>
+          <p>从系统初始化到日常运营，按步骤完成即可顺畅运行 AI 面试陪练平台。{roleCapabilityHints[admin?.role] || ''}</p>
+        </div>
+        <span className="connection-pill"><i /> 流程概览</span>
+      </section>
+
+      <div className="guide-flow">
+        {guideFlow.map((phase) => {
+          const Icon = phase.icon === 'Lightbulb' ? Lightbulb : phase.icon === 'BookOpen' ? BookOpen : phase.icon === 'Activity' ? Activity : Wifi;
+          return (
+            <section className="guide-phase" key={phase.key}>
+              <header className="guide-phase-header">
+                <div className="guide-phase-icon"><Icon size={18} /></div>
+                <div>
+                  <h3>{phase.title}</h3>
+                  <p>{phase.desc}</p>
+                </div>
+              </header>
+              <div className="guide-steps">
+                {phase.steps.map((step) => (
+                  <button
+                    className="guide-step"
+                    key={step.view}
+                    type="button"
+                    onClick={() => onNavigate(step.view)}
+                    title={`前往「${step.view}」`}
+                  >
+                    <span className="guide-step-index"><MousePointerClick size={14} /></span>
+                    <span className="guide-step-text">{step.text}</span>
+                    <ChevronRight size={15} className="guide-step-arrow" />
+                  </button>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const emptyOrgStructure = {
+  colleges: [],
+  programs: [],
+  classes: [],
+  standardMajors: [],
+  summary: { colleges: 0, programs: 0, classes: 0, students: 0, unassigned: 0, focus: 0 },
+};
+
+function OrganizationConfigPage({ onNavigate }) {
+  const [structure, setStructure] = useState(emptyOrgStructure);
+  const [loading, setLoading] = useState(true);
+  const [pageError, setPageError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [creator, setCreator] = useState('college');
+  const [collegeForm, setCollegeForm] = useState({ code: '', name: '' });
+  const [programForm, setProgramForm] = useState({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
+  const [classForm, setClassForm] = useState({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
+  const [configBusy, setConfigBusy] = useState('');
+
+  const loadStructure = async () => {
+    setLoading(true);
+    setPageError('');
+    try {
+      const data = await adminRequest('/api/admin/organization/structure');
+      setStructure({
+        colleges: data.colleges || [],
+        programs: data.programs || [],
+        classes: data.classes || [],
+        standardMajors: data.standardMajors || [],
+        summary: { ...emptyOrgStructure.summary, ...(data.summary || {}) },
+      });
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadStructure();
+  }, []);
+
+  const createOrganizationItem = async (event) => {
+    event.preventDefault();
+    const config = {
+      college: { path: '/api/admin/campus/colleges', body: collegeForm, label: '学院' },
+      program: { path: '/api/admin/campus/programs', body: programForm, label: '专业' },
+      class: { path: '/api/admin/campus/classes', body: classForm, label: '班级' },
+    }[creator];
+    setConfigBusy(`create-${creator}`);
+    setPageError('');
+    setNotice('');
+    try {
+      await adminRequest(config.path, { method: 'POST', body: JSON.stringify(config.body) });
+      setCollegeForm({ code: '', name: '' });
+      setProgramForm({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
+      setClassForm({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
+      setNotice(`${config.label}创建成功`);
+      await loadStructure();
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setConfigBusy('');
+    }
+  };
+
+  const { colleges, programs, classes } = structure;
+
+  return (
+    <div className="org-page">
+      <SectionCard
+        title="组织结构"
+        icon={<Network size={18} />}
+        action={<button className="section-link" type="button" onClick={() => onNavigate('organization')}>进入学生管理 <ChevronRight size={14} /></button>}
+      >
+        {loading ? (
+          <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取组织结构</div>
+        ) : pageError ? (
+          <div className="page-message error"><AlertCircle size={18} />{pageError}<button type="button" onClick={loadStructure}>重新加载</button></div>
+        ) : colleges.length === 0 ? (
+          <div className="page-message">当前还没有组织结构，请先导入用户注册表一键生成。</div>
+        ) : (
+          <div className="campus-tree">
+            <button type="button" className="active">
+              <span><UsersRound size={15} />全部学生</span><b>{structure.summary.students}</b>
+            </button>
+            <button type="button" className="warning">
+              <span><AlertCircle size={15} />未归班</span><b>{structure.summary.unassigned}</b>
+            </button>
+            {colleges.map((college) => (
+              <div className="campus-college-node" key={college.id}>
+                <button type="button">
+                  <span><Building2 size={15} />{college.name}</span><b>{college.studentCount || 0}</b>
+                </button>
+                <div>
+                  {programs.filter((program) => program.college_id === college.id).map((program) => (
+                    <div className="campus-program-node" key={program.id}>
+                      <button type="button">
+                        <span><GraduationCap size={14} />{program.name}{program.direction ? ` · ${program.direction}` : ''}</span><b>{program.studentCount || 0}</b>
+                      </button>
+                      <div>
+                        {classes.filter((classItem) => classItem.program_id === program.id).map((classItem) => (
+                          <button type="button" key={classItem.id}>
+                            <span>{classItem.graduation_year ? `${classItem.graduation_year}届 · ` : ''}{classItem.name}</span><b>{classItem.studentCount || 0}</b>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </SectionCard>
+
+      <section className="org-config-single">
+        <SectionCard title="组织配置" icon={<Plus size={18} />}>
+          <div className="campus-config-tabs">
+            {[['college', '添加学院'], ['program', '添加专业'], ['class', '添加班级']].map(([key, label]) => <button type="button" key={key} className={creator === key ? 'active' : ''} onClick={() => setCreator(key)}>{label}</button>)}
+          </div>
+          <form className="campus-create-form" onSubmit={createOrganizationItem}>
+            {creator === 'college' && (
+              <>
+                <label className="field-block"><span>学院编码</span><input value={collegeForm.code} onChange={(event) => setCollegeForm((current) => ({ ...current, code: event.target.value }))} placeholder="例如 CS" required /></label>
+                <label className="field-block"><span>学院名称</span><input value={collegeForm.name} onChange={(event) => setCollegeForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 计算机学院" required /></label>
+              </>
+            )}
+            {creator === 'program' && (
+              <>
+                <label className="field-block"><span>所属学院</span><select value={programForm.collegeId} onChange={(event) => setProgramForm((current) => ({ ...current, collegeId: event.target.value }))} required><option value="">请选择学院</option>{structure.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+                <label className="field-block"><span>标准专业</span><select value={programForm.standardMajorCode} onChange={(event) => { const major = structure.standardMajors.find((item) => item.code === event.target.value); setProgramForm((current) => ({ ...current, standardMajorCode: event.target.value, name: major?.name || current.name })); }}><option value="">自定义专业</option>{structure.standardMajors.map((item) => <option value={item.code} key={item.id}>{item.name} · {item.code}</option>)}</select></label>
+                <label className="field-block"><span>学校专业名称</span><input value={programForm.name} onChange={(event) => setProgramForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程" required /></label>
+                <label className="field-block"><span>培养方向</span><input value={programForm.direction} onChange={(event) => setProgramForm((current) => ({ ...current, direction: event.target.value }))} placeholder="例如 Java 开发" /></label>
+                <label className="field-block"><span>专业负责人</span><input value={programForm.coordinator} onChange={(event) => setProgramForm((current) => ({ ...current, coordinator: event.target.value }))} placeholder="姓名" /></label>
+              </>
+            )}
+            {creator === 'class' && (
+              <>
+                <label className="field-block"><span>所属专业</span><select value={classForm.programId} onChange={(event) => setClassForm((current) => ({ ...current, programId: event.target.value }))} required><option value="">请选择专业</option>{structure.programs.map((item) => <option value={item.id} key={item.id}>{item.college_name} · {item.name}</option>)}</select></label>
+                <label className="field-block"><span>班级名称</span><input value={classForm.name} onChange={(event) => setClassForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程1班" required /></label>
+                <label className="field-block"><span>毕业年份</span><input type="number" min="2000" max="2100" value={classForm.graduationYear} onChange={(event) => setClassForm((current) => ({ ...current, graduationYear: event.target.value }))} placeholder="2026" /></label>
+                <label className="field-block"><span>辅导员</span><input value={classForm.advisor} onChange={(event) => setClassForm((current) => ({ ...current, advisor: event.target.value }))} placeholder="姓名" /></label>
+                <label className="field-block"><span>邀请码（可选）</span><input value={classForm.inviteCode} onChange={(event) => setClassForm((current) => ({ ...current, inviteCode: event.target.value }))} placeholder="留空自动生成" /></label>
+              </>
+            )}
+            <button className="primary-button" type="submit" disabled={configBusy === `create-${creator}`}>{configBusy === `create-${creator}` ? '创建中…' : '确认创建'}</button>
+          </form>
+        </SectionCard>
+      </section>
+    </div>
+  );
+}
 
 function initialAdminView() {
   const hashView = window.location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -2674,6 +3011,7 @@ function initialAdminView() {
 function AdminApp({ admin, onSignedOut }) {
   const [activeView, setActiveView] = useState(initialAdminView);
   const [adminData, setAdminData] = useState(emptyAdminData);
+  const [registrationsOpen, setRegistrationsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -2842,10 +3180,10 @@ function AdminApp({ admin, onSignedOut }) {
   const renderContent = () => {
     if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
+    if (activeView === 'guide') return <GuidePage onNavigate={navigateTo} admin={admin} />;
     if (activeView === 'catalog') return <CatalogPage permissions={adminData.permissions || {}} />;
     if (activeView === 'organization') return <OrganizationPage onView={openDetail} />;
-    if (activeView === 'registrations') return <RegistrationsPage />;
-    if (activeView === 'resumeFormSettings') return <ResumeFormSettingsPage />;
+    if (activeView === 'organizationConfig') return <OrganizationConfigPage onNavigate={navigateTo} />;
     const listProps = {
       data: adminData,
       onView: openDetail,
@@ -2853,11 +3191,11 @@ function AdminApp({ admin, onSignedOut }) {
       onQueryChange: setCurrentQuery,
       presetFilter: viewPreset.view === activeView ? viewPreset.value : '',
     };
-    if (activeView === 'candidates') return <CandidatesPage {...listProps} />;
     if (activeView === 'interviews') return <InterviewsPage {...listProps} />;
     if (activeView === 'reports') return <ReportsPage {...listProps} />;
     if (activeView === 'agents') return <AgentsPage {...listProps} />;
     if (activeView === 'connectionLogs') return <ConnectionLogsPage />;
+    if (activeView === 'permission') return <PermissionPage data={adminData} />;
     if (activeView === 'settings') return <SettingsPage data={adminData} onSettingsSaved={handleSettingsSaved} />;
     return <Dashboard data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
   };
@@ -2865,42 +3203,6 @@ function AdminApp({ admin, onSignedOut }) {
   return (
     <main className="admin-shell">
       <aside className="admin-sidebar">
-        <div className="admin-brand">
-          <div><ShieldCheck size={22} /></div>
-          <section>
-            <strong>AI Interview Admin</strong>
-            <span>多 Agent 面试管理端</span>
-          </section>
-        </div>
-
-        <nav className="admin-nav" aria-label="管理端导航">
-          {['工作台', '学生成长', '训练内容', '系统'].map((group) => {
-            const groupItems = visibleNavItems.filter((item) => item.group === group);
-            if (groupItems.length === 0) return null;
-            return (
-              <section className="nav-group" key={group}>
-                <span>{group}</span>
-                {groupItems.map((item) => {
-                  const Icon = item.icon;
-                  const badge = item.key === 'reports' ? pendingReportCount : item.key === 'interviews' ? runningInterviewCount : 0;
-                  return (
-                    <button
-                      className={activeView === item.key ? 'active' : ''}
-                      key={item.key}
-                      type="button"
-                      onClick={() => navigateTo(item.key)}
-                    >
-                      <Icon size={17} />
-                      <span>{item.label}</span>
-                      {badge > 0 && <b>{badge}</b>}
-                    </button>
-                  );
-                })}
-              </section>
-            );
-          })}
-        </nav>
-
         <div className="admin-user">
           <LockKeyhole size={16} />
           <span>
@@ -2911,6 +3213,25 @@ function AdminApp({ admin, onSignedOut }) {
             <LogOut size={15} />
           </button>
         </div>
+
+        <nav className="admin-nav" aria-label="管理端导航">
+          {visibleNavItems.map((item) => {
+            const Icon = item.icon;
+            const badge = item.key === 'reports' ? pendingReportCount : item.key === 'interviews' ? runningInterviewCount : 0;
+            return (
+              <button
+                className={activeView === item.key ? 'active' : ''}
+                key={item.key}
+                type="button"
+                onClick={() => navigateTo(item.key)}
+              >
+                <Icon size={17} />
+                <span>{item.label}</span>
+                {badge > 0 && <b>{badge}</b>}
+              </button>
+            );
+          })}
+        </nav>
       </aside>
 
       <section className="admin-main">
@@ -2921,6 +3242,9 @@ function AdminApp({ admin, onSignedOut }) {
             <span>{pageDescriptions[activeView]}</span>
           </div>
           <div className="topbar-actions">
+            {activeView === 'organization' && (
+              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生注册</button>
+            )}
             {searchableViews.has(activeView) && (
               <label className="admin-search">
                 <Search size={16} />
@@ -2945,11 +3269,23 @@ function AdminApp({ admin, onSignedOut }) {
         loading={detailLoading}
         error={detailError}
         onReview={reviewReport}
-        canReview={admin?.role === 'super_admin' || admin?.role === 'reviewer'}
+        canReview={adminData.permissions?.canViewReports}
         onClose={closeDetail}
         onMove={moveDetail}
         position={detailPosition}
       />
+
+      {registrationsOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生注册" onClick={() => setRegistrationsOpen(false)}>
+          <div className="modal-card resg-modal" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <span><UserPlus size={18} />学生注册</span>
+              <button className="icon-button" type="button" title="关闭" onClick={() => setRegistrationsOpen(false)}><X size={17} /></button>
+            </header>
+            <RegistrationsPage />
+          </div>
+        </div>
+      )}
     </main>
   );
 }

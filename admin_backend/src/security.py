@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import re
 import secrets
 
@@ -64,6 +65,18 @@ def hash_token(token: object) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
+def _json_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        return data if isinstance(data, list) else []
+    return []
+
+
 def sanitize_admin(admin: dict | None) -> dict | None:
     if not admin:
         return None
@@ -73,5 +86,7 @@ def sanitize_admin(admin: dict | None) -> dict | None:
         "name": admin.get("name"),
         "role": admin.get("role"),
         "status": admin.get("status"),
+        "permissions": _json_list(admin.get("permissions")),
+        "student_scope": _json_list(admin.get("student_scope")),
         "last_login_at": admin.get("last_login_at"),
     }

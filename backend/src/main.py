@@ -2022,6 +2022,37 @@ async def auth_register(request: Request, response: Response, body: dict | None 
     if os.environ.get("APP_ENV", "development").strip().lower() != "test":
         raise error(403, "学生自主注册已关闭，请使用学校分配的学号和临时密码登录。")
     body = json_body(body)
+
+    # Keep the legacy email registration path available only in tests. A number
+    # of API tests use it to create an isolated authenticated user, while every
+    # non-test environment continues to reject self-registration above.
+    email = normalize_email(body.get("email"))
+    password = str(body.get("password") or "")
+    if email or password:
+        name = str(body.get("name") or "").strip() or (email.split("@")[0] if "@" in email else "新用户")
+        if not is_valid_email(email):
+            raise error(400, "请输入有效邮箱。")
+        if len(password) < 8:
+            raise error(400, "密码至少需要 8 位。")
+        if len(name) > 60:
+            raise error(400, "昵称不能超过 60 个字符。")
+        if one("SELECT id FROM users WHERE email = ?", (email,)):
+            raise error(409, "这个邮箱已经注册。")
+
+        user_id = str(uuid4())
+        with db:
+            db.execute(
+                "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
+                (user_id, email, hash_password(password), name),
+            )
+            db.execute(
+                "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
+                (str(uuid4()), user_id, name),
+            )
+        create_session(response, user_id, request.headers.get("user-agent"))
+        user = one("SELECT id, email, name, status, created_at, last_login_at FROM users WHERE id = ?", (user_id,))
+        return {"user": sanitize_user(user)}
+
     student_no = str(body.get("studentNo") or "").strip()
     name = str(body.get("name") or "").strip()
     if not student_no or not name:

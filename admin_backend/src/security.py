@@ -121,6 +121,20 @@ def decrypt_temporary_password(encrypted_password: str) -> str:
         raise ValueError("临时密码无法解密，请为该学生重新生成。") from exc
 
 
+def _json_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
 def sanitize_admin(admin: dict | None) -> dict | None:
     if not admin:
         return None

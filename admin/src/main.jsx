@@ -3350,13 +3350,9 @@ function AdminApp({ admin, onSignedOut }) {
         loading={detailLoading}
         error={detailError}
         onReview={reviewReport}
-canReview={adminData.permissions?.canViewReports}
-onRevealTemporaryPassword={revealTemporaryPassword}
-onResetStudentPassword={resetStudentPassword}
-onClose={closeDetail}
-onMove={moveDetail}
-position={detailPosition}
-/>
+        canReview={adminData.permissions?.canViewReports}
+        onRevealTemporaryPassword={revealTemporaryPassword}
+        onResetStudentPassword={resetStudentPassword}
         onClose={closeDetail}
         onMove={moveDetail}
         position={detailPosition}

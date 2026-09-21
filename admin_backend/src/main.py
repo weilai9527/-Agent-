@@ -36,6 +36,7 @@ from shared.career_catalog import (
     create_catalog_entity,
     create_version,
     delete_catalog_entity,
+    has_permission,
     import_catalog_excel,
     list_job_suggestions,
     list_versions,
@@ -53,9 +54,21 @@ USER_BACKEND_ENV_PATH = PROJECT_DIR / "backend" / ".env"
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = int(os.environ.get("ADMIN_SESSION_MAX_AGE", str(60 * 60 * 8)))
 # 超级管理员账号定义在代码中（可用环境变量覆盖），不存入数据库由界面创建/删除。
-MASTER_ADMIN_EMAIL = normalize_email(os.environ.get("ADMIN_MASTER_EMAIL", "admin@ai.local"))
-MASTER_ADMIN_PASSWORD = os.environ.get("ADMIN_MASTER_PASSWORD", "Admin@2026!Master")
-MASTER_ADMIN_NAME = (os.environ.get("ADMIN_MASTER_NAME", "超级管理员") or "超级管理员").strip()[:80] or "超级管理员"
+MASTER_ADMIN_EMAIL = normalize_email(
+    os.environ.get("ADMIN_MASTER_EMAIL")
+    or os.environ.get("ADMIN_BOOTSTRAP_EMAIL")
+    or "admin@ai.local"
+)
+MASTER_ADMIN_PASSWORD = (
+    os.environ.get("ADMIN_MASTER_PASSWORD")
+    or os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
+    or "Admin@2026!Master"
+)
+MASTER_ADMIN_NAME = (
+    os.environ.get("ADMIN_MASTER_NAME")
+    or os.environ.get("ADMIN_BOOTSTRAP_NAME")
+    or "超级管理员"
+).strip()[:80] or "超级管理员"
 # 固定权限点集合：下级管理员的权限通过这些权限点授予，角色名仅作展示标签。
 ALL_PERMISSIONS = (
     "manageCatalog",
@@ -253,9 +266,15 @@ def require_permission(*perms: str):
     return dependency
 
 
-def require_catalog_permission(_permission: str):
+def require_catalog_permission(permission: str):
     def dependency(admin: dict = Depends(require_admin)) -> dict:
-        if not is_super_admin(admin) and "manageCatalog" not in admin_permissions(admin):
+        has_new_permission = "manageCatalog" in admin_permissions(admin)
+        has_legacy_permission = has_permission(
+            db,
+            str(admin.get("role") or ""),
+            permission,
+        )
+        if not is_super_admin(admin) and not has_new_permission and not has_legacy_permission:
             raise error(403, "当前管理员没有岗位知识库管理权限。")
         return admin
 
@@ -811,7 +830,7 @@ def build_student_password_workbook(rows: list[dict[str, Any]]) -> io.BytesIO:
     return output
 
 
-def list_candidates() -> list[dict[str, Any]]:
+def list_candidates(scope: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     rows = all_rows(
         """
         SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
@@ -840,46 +859,46 @@ def list_candidates() -> list[dict[str, Any]]:
         ORDER BY users.updated_at DESC, users.created_at DESC
         LIMIT 5000
         """
-    ) 
-result = []
-
-for row in rows:
-    if scope is not None and not scope_allows(
-        scope,
-        row.get("college_id"),
-        row.get("program_id"),
-        row.get("class_id"),
-    ):
-        continue
-
-    result.append(
-        {
-            "id": row["id"],
-            "name": row["name"],
-            "email": row["email"],
-            "studentNo": row.get("student_no") or "-",
-            "admissionYear": student_admission_year(row.get("student_no") or ""),
-            "college": row.get("college") or "-",
-            "className": row.get("class_name") or "-",
-            "counselor": row.get("counselor") or "-",
-            "role": row.get("target_role") or "未填写",
-            "status": status_label(row.get("status")),
-            "activationStatus": (
-                "准备改密"
-                if row.get("must_change_password")
-                else ("已激活" if row.get("student_no") else "待绑定学号")
-            ),
-            "canViewTemporaryPassword": bool(
-                row.get("must_change_password")
-                and row.get("temp_password_encrypted")
-            ),
-            "interviews": int(row.get("interviews") or 0),
-            "averageScore": round(float(row.get("average_score") or 0), 1),
-            "lastLogin": str(row.get("last_login_at") or "-"),
-        }
     )
+    result = []
 
-return result
+    for row in rows:
+        if scope is not None and not scope_allows(
+            scope,
+            row.get("college_id"),
+            row.get("program_id"),
+            row.get("class_id"),
+        ):
+            continue
+
+        result.append(
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "email": row["email"],
+                "studentNo": row.get("student_no") or "-",
+                "admissionYear": student_admission_year(row.get("student_no") or ""),
+                "college": row.get("college") or "-",
+                "className": row.get("class_name") or "-",
+                "counselor": row.get("counselor") or "-",
+                "role": row.get("target_role") or "未填写",
+                "status": status_label(row.get("status")),
+                "activationStatus": (
+                    "准备改密"
+                    if row.get("must_change_password")
+                    else ("已激活" if row.get("student_no") else "待绑定学号")
+                ),
+                "canViewTemporaryPassword": bool(
+                    row.get("must_change_password")
+                    and row.get("temp_password_encrypted")
+                ),
+                "interviews": int(row.get("interviews") or 0),
+                "averageScore": round(float(row.get("average_score") or 0), 1),
+                "lastLogin": str(row.get("last_login_at") or "-"),
+            }
+        )
+
+    return result
 
 
 def get_candidate_detail(candidate_id: str) -> dict[str, Any]:
@@ -2362,7 +2381,7 @@ def snapshot(admin: dict = Depends(require_admin)):
 async def import_student_accounts(
     request: Request,
     file: UploadFile = File(...),
-    admin: dict = Depends(require_roles("super_admin", "operations")),
+    admin: dict = Depends(require_permission("manageStudents")),
 ):
     validate_admin_origin(request)
     filename = str(file.filename or "").lower()
@@ -2391,7 +2410,7 @@ def export_student_accounts(
     counselor: str = "",
     class_name: str = "",
     admission_year: str = "",
-    admin: dict = Depends(require_roles("super_admin", "operations")),
+    admin: dict = Depends(require_permission("manageStudents")),
 ):
     normalized_counselor = counselor.strip()[:120]
     normalized_class_name = class_name.strip()[:160]
@@ -2447,7 +2466,7 @@ def export_student_accounts(
 def reveal_student_temporary_password(
     request: Request,
     user_id: str,
-    admin: dict = Depends(require_roles("super_admin", "operations")),
+    admin: dict = Depends(require_permission("manageStudents")),
 ):
     user = one(
         """
@@ -2479,7 +2498,7 @@ def reveal_student_temporary_password(
 def reset_student_password(
     request: Request,
     user_id: str,
-    admin: dict = Depends(require_roles("super_admin", "operations")),
+    admin: dict = Depends(require_permission("manageStudents")),
 ):
     validate_admin_origin(request)
     user = one("SELECT id, student_no FROM users WHERE id = ?", (user_id,))

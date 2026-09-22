@@ -46,6 +46,22 @@ from shared.career_catalog import (
     review_job_suggestion,
     update_catalog_entity,
 )
+from shared.recruitment import (
+    create_jd_submission,
+    create_job_posting,
+    delete_jd_submission,
+    delete_job_posting,
+    get_jd_submission,
+    get_job_match,
+    get_job_posting,
+    list_jd_submissions,
+    list_job_matches,
+    list_job_postings,
+    mark_jd_submission_approved,
+    update_jd_submission,
+    update_job_posting,
+    upsert_job_posting_by_source,
+)
 
 
 app = FastAPI(title="Multi Agent Interview Admin API")
@@ -1518,6 +1534,146 @@ async def create_campus_class(request: Request, admin: dict = Depends(require_pe
     return {"class": one("SELECT * FROM campus_classes WHERE id = ?", (class_id,))}
 
 
+def _delete_campus_enrollments_for_classes(class_ids: list[str]) -> None:
+    """删除指定班级下学生的归班记录。"""
+    if not class_ids:
+        return
+    placeholders = ",".join("?" for _ in class_ids)
+    db.execute(f"DELETE FROM student_enrollments WHERE class_id IN ({placeholders})", class_ids)
+
+
+@app.put("/api/admin/campus/colleges/{college_id}")
+async def update_campus_college(request: Request, college_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_colleges WHERE id = ?", (college_id,)):
+        raise error(404, "学院不存在。")
+    body = await request.json()
+    code = _required_text(body, "code", "学院编码", 64).upper()
+    name = _required_text(body, "name", "学院名称")
+    dup = one("SELECT id FROM campus_colleges WHERE (code = ? OR name = ?) AND id != ?", (code, name, college_id))
+    if dup:
+        raise error(409, "学院编码或名称已存在。")
+    db.execute("UPDATE campus_colleges SET code = ?, name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (code, name, college_id))
+    db.commit()
+    record_audit(request, admin, "campus.college.update", target_type="campus_college", target_id=college_id, summary=f"更新学院：{name}")
+    return {"college": one("SELECT * FROM campus_colleges WHERE id = ?", (college_id,))}
+
+
+@app.delete("/api/admin/campus/colleges/{college_id}")
+def delete_campus_college(request: Request, college_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    college = one("SELECT id, name FROM campus_colleges WHERE id = ?", (college_id,))
+    if not college:
+        raise error(404, "学院不存在。")
+    class_rows = all_rows(
+        """
+        SELECT classes.id FROM campus_classes AS classes
+        JOIN campus_programs AS programs ON programs.id = classes.program_id
+        WHERE programs.college_id = ?
+        """,
+        (college_id,),
+    )
+    try:
+        db.begin()
+        _delete_campus_enrollments_for_classes([row["id"] for row in class_rows])
+        db.execute("DELETE FROM campus_colleges WHERE id = ?", (college_id,))  # 级联删除其下专业、班级
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "campus.college.delete", target_type="campus_college", target_id=college_id, summary=f"级联删除学院：{college['name']}")
+    return {"ok": True}
+
+
+@app.put("/api/admin/campus/programs/{program_id}")
+async def update_campus_program(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_programs WHERE id = ?", (program_id,)):
+        raise error(404, "专业不存在。")
+    body = await request.json()
+    name = _required_text(body, "name", "专业名称")
+    direction = str(body.get("direction") or "").strip()[:160]
+    coordinator = str(body.get("coordinator") or "").strip()[:120]
+    standard_major_code = str(body.get("standardMajorCode") or "").strip()[:64]
+    db.execute(
+        """
+        UPDATE campus_programs
+        SET standard_major_code = ?, name = ?, direction = ?, coordinator = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (standard_major_code or None, name, direction or None, coordinator or None, program_id),
+    )
+    db.commit()
+    record_audit(request, admin, "campus.program.update", target_type="campus_program", target_id=program_id, summary=f"更新专业：{name}")
+    return {"program": one("SELECT * FROM campus_programs WHERE id = ?", (program_id,))}
+
+
+@app.delete("/api/admin/campus/programs/{program_id}")
+def delete_campus_program(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    program = one("SELECT id, name FROM campus_programs WHERE id = ?", (program_id,))
+    if not program:
+        raise error(404, "专业不存在。")
+    class_rows = all_rows("SELECT id FROM campus_classes WHERE program_id = ?", (program_id,))
+    try:
+        db.begin()
+        _delete_campus_enrollments_for_classes([row["id"] for row in class_rows])
+        db.execute("DELETE FROM campus_programs WHERE id = ?", (program_id,))  # 级联删除其下班级
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "campus.program.delete", target_type="campus_program", target_id=program_id, summary=f"级联删除专业：{program['name']}")
+    return {"ok": True}
+
+
+@app.put("/api/admin/campus/classes/{class_id}")
+async def update_campus_class(request: Request, class_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_classes WHERE id = ?", (class_id,)):
+        raise error(404, "班级不存在。")
+    body = await request.json()
+    name = _required_text(body, "name", "班级名称")
+    advisor = str(body.get("advisor") or "").strip()[:120]
+    raw_year = body.get("graduationYear")
+    try:
+        graduation_year = int(raw_year) if raw_year not in {None, ""} else None
+    except (TypeError, ValueError) as exc:
+        raise error(400, "毕业年份格式不正确。") from exc
+    if graduation_year and not 2000 <= graduation_year <= 2100:
+        raise error(400, "毕业年份应在 2000 到 2100 之间。")
+    invite_code = str(body.get("inviteCode") or "").strip().upper()[:40]
+    if invite_code:
+        dup = one("SELECT id FROM campus_classes WHERE invite_code = ? AND id != ?", (invite_code, class_id))
+        if dup:
+            raise error(409, "班级邀请码已存在。")
+    db.execute(
+        "UPDATE campus_classes SET name = ?, graduation_year = ?, advisor = ?, invite_code = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (name, graduation_year, advisor or None, invite_code or None, class_id),
+    )
+    db.commit()
+    record_audit(request, admin, "campus.class.update", target_type="campus_class", target_id=class_id, summary=f"更新班级：{name}")
+    return {"class": one("SELECT * FROM campus_classes WHERE id = ?", (class_id,))}
+
+
+@app.delete("/api/admin/campus/classes/{class_id}")
+def delete_campus_class(request: Request, class_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    class_item = one("SELECT id, name FROM campus_classes WHERE id = ?", (class_id,))
+    if not class_item:
+        raise error(404, "班级不存在。")
+    try:
+        db.begin()
+        _delete_campus_enrollments_for_classes([class_id])
+        db.execute("DELETE FROM campus_classes WHERE id = ?", (class_id,))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "campus.class.delete", target_type="campus_class", target_id=class_id, summary=f"删除班级：{class_item['name']}")
+    return {"ok": True}
+
+
 @app.put("/api/admin/campus/programs/{program_id}/jobs")
 async def replace_program_jobs(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
     validate_admin_origin(request)
@@ -1649,13 +1805,160 @@ def _read_registration_rows(filename: str, content: bytes) -> list[dict[str, str
         raise error(400, "请上传 UTF-8 编码的 CSV 文件或 .xlsx 文件。") from exc
 
 
+def assign_registration_to_class(user_id: str, student_no: str, college: str | None, class_name: str | None) -> None:
+    """根据学院 + 班级名为学生建立班级归属，复用「编号+专业+班」的解析规则。
+
+    仅在学生尚未归班时执行；学院或班级缺失、或无法从班级名提取专业时跳过，
+    交由组织配置的「一键生成组织结构」人工处理，避免建立错误的专业/班级。
+    """
+    if not college or not class_name:
+        return
+    if one("SELECT id FROM student_enrollments WHERE user_id = ?", (user_id,)):
+        return
+    program, _ = split_registration_class_name(class_name)
+    if not program:
+        return
+
+    college_row = one("SELECT id FROM campus_colleges WHERE name = ?", (college,))
+    if college_row:
+        college_id = college_row["id"]
+    else:
+        college_id = str(uuid4())
+        db.execute(
+            "INSERT INTO campus_colleges (id, code, name, status) VALUES (?, ?, ?, 'active')",
+            (college_id, f"ORG-{uuid4().hex[:10]}", college),
+        )
+
+    program_row = one("SELECT id FROM campus_programs WHERE college_id = ? AND name = ?", (college_id, program))
+    if program_row:
+        program_id = program_row["id"]
+    else:
+        program_id = str(uuid4())
+        db.execute(
+            "INSERT INTO campus_programs (id, college_id, name, status) VALUES (?, ?, ?, 'active')",
+            (program_id, college_id, program),
+        )
+
+    class_row = one("SELECT id FROM campus_classes WHERE program_id = ? AND name = ?", (program_id, class_name))
+    if class_row:
+        class_id = class_row["id"]
+    else:
+        class_id = str(uuid4())
+        db.execute(
+            "INSERT INTO campus_classes (id, program_id, name, invite_code, status) VALUES (?, ?, ?, ?, 'active')",
+            (class_id, program_id, class_name, f"CAMPUS-{uuid4().hex[:10]}"),
+        )
+
+    upsert_student_enrollment(
+        user_id,
+        class_id=class_id,
+        student_no=student_no,
+        status="active",
+        focus_flag=False,
+        note="",
+    )
+
+
+def provision_registration_account(reg: dict[str, Any]) -> str:
+    """为一条学生注册信息开通候选人端账号，返回 created / existing / skipped。
+
+    - 学号或姓名缺失：返回 skipped。
+    - 已存在同号账号：只同步名单信息，不重置密码与改密标记，返回 existing。
+    - 新账号：使用随机临时密码并置为待改密状态，首次登录强制修改密码，返回 created。
+    """
+    student_no = str(reg.get("student_no") or "").strip()
+    name = str(reg.get("name") or "").strip()
+    if not student_no or not name:
+        return "skipped"
+
+    college = str(reg.get("college") or "").strip() or None
+    gender = str(reg.get("gender") or "").strip() or None
+    class_name = str(reg.get("class_name") or "").strip() or None
+    counselor = str(reg.get("counselor") or "").strip() or None
+
+    existing = one("SELECT id FROM users WHERE student_no = ?", (student_no,))
+    if existing:
+        user_id = existing["id"]
+        db.execute(
+            """
+            UPDATE users
+            SET name = ?, college = COALESCE(?, college), gender = COALESCE(?, gender),
+                class_name = COALESCE(?, class_name), counselor = COALESCE(?, counselor),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (name, college, gender, class_name, counselor, user_id),
+        ).close()
+        outcome = "existing"
+    else:
+        temporary_password = generate_temporary_password()
+        user_id = str(uuid4())
+        db.execute(
+            """
+            INSERT INTO users (
+              id, email, student_no, password_hash, name, college, gender, class_name,
+              counselor, must_change_password, temp_password_encrypted,
+              temp_password_created_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, 'normal')
+            """,
+            (
+                user_id,
+                student_account_email(student_no),
+                student_no,
+                hash_password(temporary_password),
+                name,
+                college,
+                gender,
+                class_name,
+                counselor,
+                encrypt_temporary_password(temporary_password),
+            ),
+        ).close()
+        db.execute(
+            "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
+            (str(uuid4()), user_id, name),
+        ).close()
+        outcome = "created"
+
+    if reg.get("id"):
+        db.execute(
+            "UPDATE student_registrations SET user_id = ? WHERE id = ?",
+            (user_id, reg["id"]),
+        ).close()
+    assign_registration_to_class(user_id, student_no, college, class_name)
+    return outcome
+
+
+ACCOUNT_SCOPED_TABLES = ("sessions", "password_reset_tokens", "profiles", "student_enrollments")
+
+
+def revoke_registration_account(user_id: str) -> bool:
+    """删除学生账号及其账号级数据（登录会话、临时密码、档案、归班记录）。
+
+    注册名单保留并解绑，学生回到「待激活」状态可再次开通；训练数据
+    （面试会话 / 报告等）按要求保留，不在本操作范围内。
+    """
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        return False
+    # 账号已不存在时只解绑名单，保证列表状态一致。
+    if not one("SELECT id FROM users WHERE id = ?", (normalized,)):
+        db.execute("UPDATE student_registrations SET user_id = NULL WHERE user_id = ?", (normalized,)).close()
+        return False
+    for table in ACCOUNT_SCOPED_TABLES:
+        db.execute(f"DELETE FROM {table} WHERE user_id = ?", (normalized,)).close()
+    db.execute("UPDATE student_registrations SET user_id = NULL WHERE user_id = ?", (normalized,)).close()
+    db.execute("DELETE FROM users WHERE id = ?", (normalized,)).close()
+    return True
+
+
 @app.post("/api/admin/student-registrations/import")
 async def import_student_registrations(
     request: Request,
     file: UploadFile = File(...),
     admin: dict = Depends(require_permission("manageStudents")),
 ):
-    """导入学生注册信息（学号 / 姓名），候选人端凭此登录。"""
+    """导入学生注册信息（学号 / 姓名），并自动开通候选人端账号。"""
     validate_admin_origin(request)
     content = await file.read()
     if len(content) > 5 * 1024 * 1024:
@@ -1668,6 +1971,7 @@ async def import_student_registrations(
 
     imported = 0
     updated = 0
+    activated = 0
     skipped: list[dict[str, str]] = []
     try:
         db.begin()
@@ -1677,32 +1981,50 @@ async def import_student_registrations(
             if not student_no or not name:
                 skipped.append({"row": str(index), "studentNo": student_no, "name": name, "reason": "缺少学号或姓名"})
                 continue
+            college = str(row.get("学院") or row.get("college") or "").strip()
+            gender = str(row.get("性别") or row.get("gender") or "").strip()
+            class_name = str(row.get("班级") or row.get("class_name") or "").strip()
+            counselor = str(row.get("辅导员") or row.get("counselor") or "").strip()
             existing = one("SELECT id, user_id FROM student_registrations WHERE student_no = ?", (student_no,))
             if existing:
+                registration_id = existing["id"]
                 db.execute(
-                    "UPDATE student_registrations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (name, existing["id"]),
+                    "UPDATE student_registrations SET name = ?, college = ?, gender = ?, class_name = ?, counselor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (name, college, gender, class_name, counselor, registration_id),
                 )
                 updated += 1
             else:
+                registration_id = str(uuid4())
                 db.execute(
-                    "INSERT INTO student_registrations (id, student_no, name, imported_by) VALUES (?, ?, ?, ?)",
-                    (str(uuid4()), student_no, name, str(admin.get("email") or "")),
+                    "INSERT INTO student_registrations (id, student_no, name, college, gender, class_name, counselor, imported_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (registration_id, student_no, name, college, gender, class_name, counselor, str(admin.get("email") or "")),
                 )
                 imported += 1
+
+            outcome = provision_registration_account({
+                "id": registration_id,
+                "student_no": student_no,
+                "name": name,
+                "college": college,
+                "gender": gender,
+                "class_name": class_name,
+                "counselor": counselor,
+            })
+            if outcome == "created":
+                activated += 1
         db.commit()
     except Exception:
         db.rollback()
         raise
-    record_audit(request, admin, "student_registrations.import", summary=f"导入学生注册信息：新增 {imported} 人，更新 {updated} 人，跳过 {len(skipped)} 行")
-    return {"imported": imported, "updated": updated, "skipped": skipped[:100], "total": len(rows)}
+    record_audit(request, admin, "student_registrations.import", summary=f"导入学生注册信息：新增 {imported} 人，更新 {updated} 人，开通账号 {activated} 个，跳过 {len(skipped)} 行")
+    return {"imported": imported, "updated": updated, "activated": activated, "skipped": skipped[:100], "total": len(rows)}
 
 
 @app.get("/api/admin/student-registrations")
 def list_student_registrations(admin: dict = Depends(require_permission("manageStudents"))):
     rows = all_rows(
         """
-        SELECT id, student_no, name, user_id, imported_by, created_at, updated_at
+        SELECT id, student_no, name, college, gender, class_name, counselor, user_id, imported_by, created_at, updated_at
         FROM student_registrations
         ORDER BY created_at DESC, student_no
         """
@@ -1713,6 +2035,18 @@ def list_student_registrations(admin: dict = Depends(require_permission("manageS
                 "id": row["id"],
                 "studentNo": row["student_no"],
                 "name": row["name"],
+                "college": row["college"] or "",
+                "gender": row["gender"] or "",
+                "className": row["class_name"] or "",
+                "counselor": row["counselor"] or "",
+                "missing": [field for field, value in (
+                    ("学院", row["college"]),
+                    ("学号", row["student_no"]),
+                    ("姓名", row["name"]),
+                    ("性别", row["gender"]),
+                    ("班级", row["class_name"]),
+                    ("辅导员", row["counselor"]),
+                ) if not (value or "").strip()],
                 "activated": bool(row["user_id"]),
                 "importedBy": row["imported_by"],
                 "createdAt": str(row["created_at"]),
@@ -1720,6 +2054,63 @@ def list_student_registrations(admin: dict = Depends(require_permission("manageS
             for row in rows
         ]
     }
+
+
+@app.delete("/api/admin/student-registrations/accounts")
+def revoke_all_registration_accounts(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
+    """批量删除全部已开通的学生账号，注册名单保留并回到「待激活」。"""
+    validate_admin_origin(request)
+    rows = all_rows(
+        "SELECT id, user_id FROM student_registrations WHERE user_id IS NOT NULL AND user_id != '' ORDER BY student_no"
+    )
+    revoked = 0
+    try:
+        db.begin()
+        for row in rows:
+            if revoke_registration_account(row["user_id"]):
+                revoked += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(
+        request,
+        admin,
+        "student_registrations.accounts_revoke",
+        summary=f"批量删除学生账号：实际删除 {revoked} 个，名单保留 {len(rows)} 条",
+    )
+    return {"revoked": revoked, "total": len(rows)}
+
+
+@app.delete("/api/admin/student-registrations/{registration_id}/account")
+def revoke_student_registration_account(
+    request: Request,
+    registration_id: str,
+    admin: dict = Depends(require_permission("manageStudents")),
+):
+    """删除单个已激活学生的账号，注册名单保留并回到「待激活」。"""
+    validate_admin_origin(request)
+    existing = one("SELECT id, student_no, name, user_id FROM student_registrations WHERE id = ?", (registration_id,))
+    if not existing:
+        raise error(404, "该注册信息不存在。")
+    if not existing.get("user_id"):
+        raise error(409, "该学生尚未开通账号，无需删除。")
+    try:
+        db.begin()
+        revoke_registration_account(existing["user_id"])
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(
+        request,
+        admin,
+        "student_registrations.account_revoke",
+        target_type="student_registration",
+        target_id=registration_id,
+        summary=f"删除学生账号：{existing['name']}（{existing['student_no']}），注册名单保留",
+    )
+    return {"ok": True}
 
 
 @app.delete("/api/admin/student-registrations/{registration_id}")
@@ -1732,6 +2123,52 @@ def delete_student_registration(request: Request, registration_id: str, admin: d
     db.commit()
     record_audit(request, admin, "student_registrations.delete", target_type="student_registration", target_id=registration_id, summary=f"删除学生注册信息：{existing['name']}（{existing['student_no']}）")
     return {"ok": True}
+
+
+@app.delete("/api/admin/student-registrations")
+def clear_student_registrations(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
+    validate_admin_origin(request)
+    db.execute("DELETE FROM student_registrations")
+    db.commit()
+    record_audit(request, admin, "student_registrations.clear", summary="清空全部学生注册信息")
+    return {"ok": True}
+
+
+@app.post("/api/admin/student-registrations/activate")
+def activate_student_registrations(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
+    """为尚未开通账号的注册学生批量开通候选人端账号（随机临时密码 + 首次登录强制改密）。"""
+    validate_admin_origin(request)
+    rows = all_rows(
+        """
+        SELECT id, student_no, name, college, gender, class_name, counselor, user_id
+        FROM student_registrations
+        ORDER BY student_no
+        """
+    )
+    created = 0
+    existing = 0
+    skipped = 0
+    try:
+        db.begin()
+        for reg in rows:
+            outcome = provision_registration_account(reg)
+            if outcome == "created":
+                created += 1
+            elif outcome == "existing":
+                existing += 1
+            else:
+                skipped += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(
+        request,
+        admin,
+        "student_registrations.activate",
+        summary=f"批量开通学生账号：新建 {created} 个，已存在 {existing} 个，跳过 {skipped} 条",
+    )
+    return {"created": created, "existing": existing, "skipped": skipped, "total": len(rows)}
 
 
 # ---------- 组织（组织结构一览 + 一键生成） ----------
@@ -1956,6 +2393,207 @@ async def import_organization_structure(
     }
 
 
+def split_registration_class_name(class_name: str) -> tuple[str | None, str]:
+    """按固定格式「编号+专业+班」解析班级名，返回 (专业名, 编号) 或 (None, 原样)。
+
+    例：2301软件工程班 -> ("软件工程", "2301")；1计算机1班 -> ("计算机", "1")。
+    当班级名不以「班」结尾、编号缺失，或中间段不含可识别专业名时返回 (None, 原样)。
+    """
+    raw = (class_name or "").strip()
+    if not raw.endswith("班"):
+        return None, raw
+    body = raw[:-1]
+    match = re.match(r"^[0-9A-Za-z_-]+", body)
+    if not match:
+        return None, raw
+    program = body[match.end():].strip("-_ ")
+    if not program or re.search(r"[0-9]", program) or re.fullmatch(r"[0-9A-Za-z_-]+", program):
+        return None, raw
+    return program, match.group(0)
+
+
+@app.post("/api/admin/organization/generate")
+async def generate_organization_structure(request: Request, admin: dict = Depends(require_permission("manageOrganization"))):
+    """根据「学生注册」已导入的数据一键生成组织结构（学院 / 专业 / 班级）并归班。
+
+    班级名按「编号+专业+班」固定格式解析出专业；解析失败的班级进入 unassigned 列表，
+    前端弹窗可为其指定专业名或忽略。apply=true 时执行写入。
+    """
+    payload = await request.json()
+    apply = bool(payload.get("apply"))
+    resolved_programs: dict[str, str] = {str(k).strip(): str(v).strip() for k, v in (payload.get("resolvedPrograms") or {}).items()}
+    ignored: set[str] = {str(v).strip() for v in (payload.get("ignored") or [])}
+
+    registrations = all_rows(
+        """
+        SELECT student_no, name, college, class_name, user_id
+        FROM student_registrations
+        WHERE student_no IS NOT NULL AND student_no != '' AND name IS NOT NULL AND name != ''
+        ORDER BY student_no
+        """
+    )
+
+    parsed: list[dict[str, Any]] = []
+    unassigned: list[dict[str, Any]] = []
+    for reg in registrations:
+        student_no = str(reg["student_no"] or "").strip()
+        college = str(reg["college"] or "").strip()
+        class_name = str(reg["class_name"] or "").strip()
+        program, _ = split_registration_class_name(class_name)
+        required = college and class_name
+        if not required:
+            unassigned.append({
+                "studentNo": student_no,
+                "name": str(reg["name"] or "").strip(),
+                "college": college,
+                "className": class_name,
+                "reason": "缺少学院或班级",
+                "suggestedProgram": "",
+            })
+            continue
+        if not program:
+            unassigned.append({
+                "studentNo": student_no,
+                "name": str(reg["name"] or "").strip(),
+                "college": college,
+                "className": class_name,
+                "reason": "班级名不满足「编号+专业+班」格式，无法提取专业",
+                "suggestedProgram": "",
+            })
+            continue
+        parsed.append({
+            "student_no": student_no,
+            "name": str(reg["name"] or "").strip(),
+            "college": college,
+            "program": program,
+            "class_name": class_name,
+            "user_id": reg["user_id"],
+        })
+
+    # 预览：返回待新增结构与未解析名单
+    if not apply:
+        pending_colleges = {row["college"] for row in parsed}
+        pending_programs = {(row["college"], row["program"]) for row in parsed}
+        pending_classes = {(row["college"], row["program"], row["class_name"]) for row in parsed}
+        return {
+            "apply": False,
+            "total": len(registrations),
+            "assignable": len(parsed),
+            "newColleges": sorted(pending_colleges),
+            "newPrograms": sorted(f"{c} / {p}" for c, p in pending_programs),
+            "newClasses": sorted(f"{c} / {p} / {cl}" for c, p, cl in pending_classes),
+            "unassigned": unassigned[:500],
+            "unassignedCount": len(unassigned),
+        }
+
+    # 把前端为未解析班级指定的专业名，并入对应学生的专业
+    program_override = {str(row["className"] or "").strip(): resolved for row in unassigned for resolved in [resolved_programs.get(str(row["className"] or "").strip(), "")] if resolved}
+    applied_rows: list[dict[str, Any]] = list(parsed)
+    for reg in registrations:
+        class_name = str(reg["class_name"] or "").strip()
+        student_no = str(reg["student_no"] or "").strip()
+        if student_no in ignored:
+            continue
+        program, _ = split_registration_class_name(class_name)
+        override = program_override.get(class_name)
+        if override:
+            program = override
+        college = str(reg["college"] or "").strip()
+        if not college or not class_name or not program:
+            continue
+        applied_rows.append({
+            "student_no": student_no,
+            "name": str(reg["name"] or "").strip(),
+            "college": college,
+            "program": program,
+            "class_name": class_name,
+            "user_id": reg["user_id"],
+        })
+    # 去重（忽略后可能重复追加）
+    seen: set[tuple[str, str, str, str]] = set()
+    unique_rows: list[dict[str, Any]] = []
+    for row in applied_rows:
+        key = (row["student_no"], row["college"], row["program"], row["class_name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_rows.append(row)
+
+    try:
+        db.begin()
+        college_ids: dict[str, str] = {row["name"]: row["id"] for row in all_rows("SELECT id, name FROM campus_colleges")}
+        program_ids: dict[tuple[str, str], str] = {
+            (row["college_id"], row["name"]): row["id"] for row in all_rows("SELECT id, college_id, name FROM campus_programs")
+        }
+        class_ids: dict[tuple[str, str], str] = {
+            (row["program_id"], row["name"]): row["id"] for row in all_rows("SELECT id, program_id, name FROM campus_classes")
+        }
+        new_colleges = 0
+        new_programs = 0
+        new_classes = 0
+        assigned = 0
+        for item in unique_rows:
+            college = item["college"]
+            college_id = college_ids.get(college)
+            if not college_id:
+                college_id = str(uuid4())
+                db.execute(
+                    "INSERT INTO campus_colleges (id, code, name, status) VALUES (?, ?, ?, 'active')",
+                    (college_id, f"ORG-{uuid4().hex[:10]}", college),
+                )
+                college_ids[college] = college_id
+                new_colleges += 1
+            program = item["program"]
+            program_id = program_ids.get((college_id, program))
+            if not program_id:
+                program_id = str(uuid4())
+                db.execute(
+                    "INSERT INTO campus_programs (id, college_id, name, status) VALUES (?, ?, ?, 'active')",
+                    (program_id, college_id, program),
+                )
+                program_ids[(college_id, program)] = program_id
+                new_programs += 1
+            class_name = item["class_name"]
+            class_id = class_ids.get((program_id, class_name))
+            if not class_id:
+                class_id = str(uuid4())
+                db.execute(
+                    "INSERT INTO campus_classes (id, program_id, name, invite_code, status) VALUES (?, ?, ?, ?, 'active')",
+                    (class_id, program_id, class_name, f"CAMPUS-{uuid4().hex[:10]}"),
+                )
+                class_ids[(program_id, class_name)] = class_id
+                new_classes += 1
+            if item["user_id"] and one("SELECT id FROM users WHERE id = ?", (item["user_id"],)):
+                upsert_student_enrollment(
+                    item["user_id"],
+                    class_id=class_id,
+                    student_no=item["student_no"],
+                    status="active",
+                    focus_flag=False,
+                    note="",
+                )
+                assigned += 1
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(
+        request,
+        admin,
+        "organization.generate",
+        summary=f"一键生成组织结构：新增学院 {new_colleges} 个、专业 {new_programs} 个、班级 {new_classes} 个，归班 {assigned} 人",
+    )
+    return {
+        "apply": True,
+        "newCollegesCount": new_colleges,
+        "newProgramsCount": new_programs,
+        "newClassesCount": new_classes,
+        "assigned": assigned,
+        "total": len(registrations),
+        "ignored": len(ignored),
+    }
+
+
 @app.get("/api/admin/resume-form-settings")
 def get_resume_form_settings(admin: dict = Depends(require_admin)):
     """读取候选人“填写简历”的学院/专业下拉配置。"""
@@ -2017,6 +2655,595 @@ async def update_resume_form_settings(request: Request, admin: dict = Depends(re
 @app.get("/api/admin/health")
 def health():
     return {"ok": True, "authRequired": True, "databasePath": get_database_path()}
+
+
+# ---------------------------------------------------------------------------
+# 招聘信息库：岗位管理 + 简历对比记录
+# ---------------------------------------------------------------------------
+
+JOB_POSTING_MAX_BYTES = 5 * 1024 * 1024
+
+JOB_POSTING_EXPORT_COLUMNS = [
+    ("title", "岗位名称"),
+    ("company", "公司"),
+    ("job_category", "岗位类别"),
+    ("city", "工作地点"),
+    ("graduation_year", "届次"),
+    ("employment_type", "招聘类型"),
+    ("salary", "薪资范围"),
+    ("education_requirement", "学历要求"),
+    ("experience_requirement", "经验要求"),
+    ("headcount", "招聘人数"),
+    ("deadline", "截止时间"),
+    ("skills", "技能要求"),
+    ("tags", "标签"),
+    ("description", "岗位描述"),
+    ("requirements", "任职要求"),
+    ("catalog_job_name", "关联标准岗位"),
+    ("status", "状态"),
+    ("source_ref", "外部编号"),
+]
+
+JOB_POSTING_IMPORT_ALIASES = {
+    "岗位名称": "title", "岗位": "title", "招聘岗位": "title", "职位名称": "title", "职位": "title",
+    "公司": "company", "公司名称": "company", "企业名称": "company", "招聘公司": "company",
+    "岗位类别": "job_category", "职位类别": "job_category", "岗位方向": "job_category",
+    "工作地点": "city", "城市": "city", "地点": "city",
+    "届次": "graduation_year", "毕业届次": "graduation_year", "招聘届次": "graduation_year",
+    "招聘类型": "employment_type", "用工类型": "employment_type", "职位类型": "employment_type",
+    "薪资": "salary", "薪资范围": "salary", "月薪": "salary", "待遇": "salary",
+    "学历要求": "education_requirement", "学历": "education_requirement",
+    "经验要求": "experience_requirement", "工作经验": "experience_requirement",
+    "招聘人数": "headcount", "人数": "headcount",
+    "截止时间": "deadline", "截止日期": "deadline", "招聘截止": "deadline", "有效期": "deadline",
+    "技能要求": "skills", "技能": "skills", "技术栈": "skills",
+    "标签": "tags",
+    "岗位描述": "description", "岗位职责": "description", "职位描述": "description", "工作内容": "description",
+    "任职要求": "requirements", "岗位要求": "requirements", "任职资格": "requirements",
+    "关联标准岗位": "catalog_job_name", "标准岗位": "catalog_job_name",
+    "状态": "status",
+    "外部编号": "source_ref", "编号": "source_ref", "岗位编号": "source_ref",
+}
+
+
+def _published_job_role_map() -> dict[str, dict]:
+    versions = list_versions(db, include_drafts=False)
+    if not versions:
+        return {}
+    version_id = versions[0]["id"]
+    rows = all_rows(
+        "SELECT id, code, name FROM catalog_job_roles WHERE version_id = ? AND enabled = 1",
+        (version_id,),
+    )
+    return {str(row["name"]).strip(): {"id": row["id"], "code": row["code"], "name": row["name"]} for row in rows}
+
+
+def build_job_posting_workbook(rows: list[dict], *, template: bool = False) -> io.BytesIO:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "招聘信息库"
+    headers = [label for _field, label in JOB_POSTING_EXPORT_COLUMNS]
+    worksheet.append(headers)
+    header_fill = PatternFill("solid", fgColor="17324D")
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row in rows:
+        worksheet.append([
+            (row.get("status") == "active" and "启用") or ("停用" if row.get("status") == "disabled" else (row.get("status") or ""))
+            if field == "status"
+            else (row.get(field) if row.get(field) is not None else "")
+            for field, _label in JOB_POSTING_EXPORT_COLUMNS
+        ])
+
+    widths = [24, 20, 16, 14, 10, 12, 14, 12, 12, 10, 14, 26, 18, 40, 40, 18, 10, 16]
+    for index, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[chr(64 + index)].width = width
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    if template:
+        notes = workbook.create_sheet("填写说明")
+        notes.append(["字段", "是否必填", "说明"])
+        for cell in notes[1]:
+            cell.fill = header_fill
+            cell.font = Font(color="FFFFFF", bold=True)
+        for field, label in JOB_POSTING_EXPORT_COLUMNS:
+            required = "是" if field == "title" else "否"
+            hint = {
+                "title": "招聘岗位名称，必填。",
+                "skills": "多个技能用中文逗号、或顿号分隔。",
+                "description": "岗位职责/工作内容，可多行。",
+                "requirements": "任职要求，建议每行一条，便于逐条对比。",
+                "catalog_job_name": "可选，填写岗位知识库中已发布的标准岗位名称即可自动关联。",
+                "status": "填“启用”或“停用”，默认启用。",
+                "source_ref": "外部唯一编号；相同编号再次导入会更新原记录，留空则按“岗位名称+公司”去重。",
+            }.get(field, "")
+            if hint:
+                notes.append([label, required, hint])
+        notes.column_dimensions["A"].width = 18
+        notes.column_dimensions["B"].width = 10
+        notes.column_dimensions["C"].width = 80
+
+    stream = io.BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    return stream
+
+
+def evaluate_job_posting_import(content: bytes) -> dict[str, Any]:
+    try:
+        workbook = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    except Exception as exc:
+        raise error(400, f"无法解析 Excel 文件：{exc}") from exc
+
+    worksheet = workbook.worksheets[0] if workbook.worksheets else None
+    if worksheet is None:
+        raise error(400, "Excel 中没有可读取的工作表。")
+
+    rows = worksheet.iter_rows(values_only=True)
+    try:
+        header_row = next(rows)
+    except StopIteration:
+        raise error(400, "Excel 内容为空。")
+
+    field_by_index: dict[int, str] = {}
+    for index, cell in enumerate(header_row or []):
+        label = str(cell or "").strip()
+        field = JOB_POSTING_IMPORT_ALIASES.get(label)
+        if field:
+            field_by_index[index] = field
+    if "title" not in field_by_index.values():
+        raise error(400, "Excel 缺少“岗位名称”列，请参考导入模板。")
+
+    job_roles = _published_job_role_map()
+    result = {"total": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}
+    for row_number, raw_row in enumerate(rows, start=2):
+        if raw_row is None:
+            continue
+        payload: dict[str, Any] = {}
+        for index, field in field_by_index.items():
+            if index >= len(raw_row):
+                continue
+            value = raw_row[index]
+            if value is None:
+                continue
+            payload[field] = value if field == "headcount" else str(value).strip()
+        if not str(payload.get("title") or "").strip():
+            result["skipped"] += 1
+            continue
+
+        result["total"] += 1
+        catalog_name = str(payload.pop("catalog_job_name", "") or "").strip()
+        if catalog_name:
+            matched = job_roles.get(catalog_name)
+            if matched:
+                payload["catalog_job_role_id"] = matched["id"]
+                payload["catalog_job_name"] = matched["name"]
+            else:
+                payload["catalog_job_role_id"] = None
+                payload["catalog_job_name"] = catalog_name
+
+        status_label = str(payload.get("status") or "").strip()
+        if status_label:
+            payload["status"] = "active" if status_label in {"启用", "正常", "active", "有效"} else "disabled"
+
+        source_ref = str(payload.get("source_ref") or "").strip()
+        if not source_ref:
+            source_ref = f"{payload.get('title')}|{payload.get('company') or ''}"
+        payload["source_ref"] = source_ref
+
+        try:
+            _posting, action = upsert_job_posting_by_source(
+                db,
+                payload,
+                source="excel",
+                source_ref=source_ref,
+            )
+            result["created" if action == "created" else "updated"] += 1
+        except ValueError as exc:
+            result["skipped"] += 1
+            if len(result["errors"]) < 20:
+                result["errors"].append(f"第 {row_number} 行：{exc}")
+    db.commit()
+    return result
+
+
+def _job_posting_scope_note() -> str:
+    return "招聘信息库包含手动录入与 Excel 导入的岗位，可选择性关联岗位知识库中的标准岗位。"
+
+
+@app.get("/api/admin/job-postings")
+def admin_list_job_postings(
+    keyword: str = "",
+    status: str = "",
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    postings = list_job_postings(db, keyword=keyword.strip() or None, status=status.strip() or None)
+    return {
+        "postings": postings,
+        "jobRoles": [
+            {"id": role["id"], "name": role["name"]}
+            for role in _published_job_role_map().values()
+        ],
+        "scopeNote": _job_posting_scope_note(),
+    }
+
+
+@app.get("/api/admin/job-postings/template")
+def admin_download_job_posting_template(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    output = build_job_posting_workbook([], template=True)
+    record_audit(request, admin, "job_postings.template", target_type="job_posting", summary="下载招聘信息导入模板")
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="job-posting-import-template.xlsx"'},
+    )
+
+
+@app.get("/api/admin/job-postings/export")
+def admin_export_job_postings(
+    request: Request,
+    keyword: str = "",
+    status: str = "",
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    postings = list_job_postings(db, keyword=keyword.strip() or None, status=status.strip() or None)
+    output = build_job_posting_workbook(postings)
+    record_audit(
+        request,
+        admin,
+        "job_postings.export",
+        target_type="job_posting",
+        summary=f"导出 {len(postings)} 条招聘岗位",
+    )
+    filename = f"job-postings-{datetime.now().strftime('%Y%m%d-%H%M')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/admin/job-postings/import")
+async def admin_import_job_postings(
+    request: Request,
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    filename = str(file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise error(400, "请上传 .xlsx 格式的招聘岗位表。")
+    content = await file.read(JOB_POSTING_MAX_BYTES + 1)
+    if not content:
+        raise error(400, "上传的文件为空。")
+    if len(content) > JOB_POSTING_MAX_BYTES:
+        raise error(413, "招聘岗位表不能超过 5MB。")
+
+    result = evaluate_job_posting_import(content)
+    record_audit(
+        request,
+        admin,
+        "job_postings.import",
+        target_type="job_posting",
+        summary=f"导入招聘岗位：新增 {result['created']} 条，更新 {result['updated']} 条，跳过 {result['skipped']} 条",
+    )
+    return {"ok": True, **result}
+
+
+@app.post("/api/admin/job-postings/sync")
+async def admin_sync_job_postings(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    """预留的第三方招聘数据源同步入口。"""
+    validate_admin_origin(request)
+    endpoint = str(os.environ.get("JOB_POSTING_SYNC_ENDPOINT") or "").strip()
+    if not endpoint:
+        raise error(
+            400,
+            "尚未配置第三方招聘数据源。请设置环境变量 JOB_POSTING_SYNC_ENDPOINT 后再使用同步功能。",
+        )
+    raise error(
+        501,
+        "第三方招聘数据源同步接口已预留，但当前版本尚未接入具体数据源（"
+        f"{endpoint}）。请先使用手动录入或 Excel 导入。",
+    )
+
+
+@app.post("/api/admin/job-postings", status_code=201)
+async def admin_create_job_posting(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    payload = dict(body)
+    catalog_name = str(payload.get("catalog_job_name") or "").strip()
+    if catalog_name:
+        matched = _published_job_role_map().get(catalog_name)
+        if matched:
+            payload["catalog_job_role_id"] = matched["id"]
+            payload["catalog_job_name"] = matched["name"]
+    try:
+        posting = create_job_posting(db, payload, created_by=str(admin.get("email") or ""))
+    except ValueError as exc:
+        raise error(400, str(exc)) from exc
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "job_postings.create",
+        target_type="job_posting",
+        target_id=posting.get("id"),
+        summary=f"新增招聘岗位：{posting.get('title')}",
+    )
+    return {"ok": True, "posting": posting}
+
+
+@app.put("/api/admin/job-postings/{posting_id}")
+async def admin_update_job_posting(
+    request: Request,
+    posting_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    payload = dict(body)
+    catalog_name = str(payload.get("catalog_job_name") or "").strip()
+    if catalog_name:
+        matched = _published_job_role_map().get(catalog_name)
+        payload["catalog_job_role_id"] = matched["id"] if matched else None
+        if matched:
+            payload["catalog_job_name"] = matched["name"]
+    try:
+        posting = update_job_posting(db, posting_id, payload)
+    except ValueError as exc:
+        raise error(400, str(exc)) from exc
+    if not posting:
+        raise error(404, "招聘岗位不存在或已被删除。")
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "job_postings.update",
+        target_type="job_posting",
+        target_id=posting_id,
+        summary=f"更新招聘岗位：{posting.get('title')}",
+    )
+    return {"ok": True, "posting": posting}
+
+
+@app.delete("/api/admin/job-postings/{posting_id}")
+def admin_delete_job_posting(
+    request: Request,
+    posting_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    posting = get_job_posting(db, posting_id)
+    if not posting:
+        raise error(404, "招聘岗位不存在或已被删除。")
+    delete_job_posting(db, posting_id)
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "job_postings.delete",
+        target_type="job_posting",
+        target_id=posting_id,
+        summary=f"删除招聘岗位：{posting.get('title')}",
+    )
+    return {"ok": True}
+
+
+@app.get("/api/admin/job-matches")
+def admin_list_job_matches(
+    keyword: str = "",
+    jobPostingId: str = "",
+    limit: int = Query(200, ge=1, le=1000),
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    matches = list_job_matches(
+        db,
+        keyword=keyword.strip() or None,
+        job_posting_id=jobPostingId.strip() or None,
+        limit=limit,
+    )
+    return {
+        "matches": matches,
+        "postings": [
+            {"id": posting["id"], "title": posting["title"], "company": posting.get("company")}
+            for posting in list_job_postings(db, limit=1000)
+        ],
+        "scopeNote": "对比记录仅保存简历摘要与匹配结论，用于就业指导，不包含完整简历正文。",
+    }
+
+
+@app.get("/api/admin/job-matches/{match_id}")
+def admin_get_job_match(
+    match_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    match = get_job_match(db, match_id)
+    if not match:
+        raise error(404, "对比记录不存在。")
+    return {"match": match}
+
+
+def _jd_submission_scope_note() -> str:
+    return "学生粘贴的岗位描述（JD）在此统一管理，审核通过后会写入招聘信息库的岗位管理列表。"
+
+
+@app.get("/api/admin/jd-submissions")
+def admin_list_jd_submissions(
+    keyword: str = "",
+    status: str = "",
+    limit: int = Query(200, ge=1, le=1000),
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    submissions = list_jd_submissions(
+        db,
+        keyword=keyword.strip() or None,
+        status=status.strip() or None,
+        limit=limit,
+    )
+    return {"submissions": submissions, "scopeNote": _jd_submission_scope_note()}
+
+
+@app.post("/api/admin/jd-submissions", status_code=201)
+async def admin_create_jd_submission(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    payload = dict(body)
+    title = str(payload.get("job_title") or "").strip()
+    if not title:
+        raise error(400, "岗位名称不能为空。")
+    submission = create_jd_submission(
+        db,
+        job_title=title,
+        company=str(payload.get("company") or "").strip(),
+        jd_text=str(payload.get("jd_text") or "").strip(),
+        student_name=str(payload.get("student_name") or "管理员录入").strip(),
+    )
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.create",
+        target_type="jd_submission",
+        target_id=submission.get("id"),
+        summary=f"新增粘贴 JD 记录：{submission.get('job_title')}",
+    )
+    return {"ok": True, "submission": submission}
+
+
+@app.put("/api/admin/jd-submissions/{submission_id}")
+async def admin_update_jd_submission(
+    request: Request,
+    submission_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    submission = update_jd_submission(
+        db,
+        submission_id,
+        dict(body),
+        decided_by=str(admin.get("email") or ""),
+    )
+    if not submission:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.update",
+        target_type="jd_submission",
+        target_id=submission_id,
+        summary=f"更新粘贴 JD 记录：{submission.get('job_title')}",
+    )
+    return {"ok": True, "submission": submission}
+
+
+@app.delete("/api/admin/jd-submissions/{submission_id}")
+def admin_delete_jd_submission(
+    request: Request,
+    submission_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    submission = get_jd_submission(db, submission_id)
+    if not submission:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+    delete_jd_submission(db, submission_id)
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.delete",
+        target_type="jd_submission",
+        target_id=submission_id,
+        summary=f"删除粘贴 JD 记录：{submission.get('job_title')}",
+    )
+    return {"ok": True}
+
+
+@app.post("/api/admin/jd-submissions/{submission_id}/approve")
+async def admin_approve_jd_submission(
+    request: Request,
+    submission_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    submission = get_jd_submission(db, submission_id)
+    if not submission:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    payload = dict(body) if isinstance(body, dict) else {}
+    title = str(payload.get("job_title") or submission.get("job_title") or "").strip() or "自定义岗位"
+    company = str(payload.get("company") or submission.get("company") or "").strip()
+    jd_text = str(payload.get("jd_text") or submission.get("jd_text") or "").strip()
+
+    updated = update_jd_submission(
+        db,
+        submission_id,
+        {"job_title": title, "company": company, "jd_text": jd_text},
+        decided_by=str(admin.get("email") or ""),
+    )
+    if not updated:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+
+    posting, action = upsert_job_posting_by_source(
+        db,
+        {
+            "title": title,
+            "company": company,
+            "description": jd_text,
+            "requirements": jd_text,
+            "status": "active",
+            "published": 1,
+        },
+        source="student_jd",
+        source_ref=submission_id,
+        created_by=str(admin.get("email") or ""),
+    )
+    submission = mark_jd_submission_approved(
+        db,
+        submission_id,
+        str(posting.get("id") or ""),
+        decided_by=str(admin.get("email") or ""),
+    )
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.approve",
+        target_type="jd_submission",
+        target_id=submission_id,
+        summary=f"粘贴 JD 审核入库：{title}",
+    )
+    return {"ok": True, "submission": submission, "posting": posting, "action": action}
 
 
 @app.get("/api/admin/catalog/versions")
@@ -2370,6 +3597,7 @@ def snapshot(admin: dict = Depends(require_admin)):
                 "canWriteCatalog": can_catalog,
                 "canImportCatalog": can_catalog,
                 "canPublishCatalog": can_catalog,
+                "canViewJobPostings": can_catalog or is_super,
             },
             "admin": sanitize_admin(admin),
         }

@@ -87,11 +87,38 @@ def send_password_reset_email(email: str, token: str) -> bool:
     return True
 
 
+WEAK_PASSWORDS = {
+    "12345678", "123456789", "1234567890", "123456", "1234567", "password", "password1",
+    "passw0rd", "qwertyui", "qwerty123", "abc12345", "a1234567", "11111111", "00000000",
+    "88888888", "66666666", "12341234", "11223344", "1qaz2wsx", "iloveyou", "admin123",
+    "student", "student123", "test1234", "abcd1234", "asdf1234", "woaini1314", "5201314520",
+}
+
+_SEQUENCES = ("0123456789", "9876543210", "abcdefghijklmnopqrstuvwxyz", "zyxwvutsrqponmlkjihgfedcba")
+
+
+def _is_weak_password(password: str) -> bool:
+    lowered = password.strip().lower()
+    if not lowered:
+        return True
+    if lowered in WEAK_PASSWORDS:
+        return True
+    if len(set(lowered)) == 1:
+        return True
+    for sequence in _SEQUENCES:
+        for start in range(len(sequence) - len(lowered) + 1):
+            if lowered == sequence[start:start + len(lowered)]:
+                return True
+    return False
+
+
 def validate_new_password(password: str, confirmation: str | None = None) -> str | None:
     if len(password) < 8:
         return "密码至少需要 8 位。"
     if len(password) > 256:
         return "密码不能超过 256 位。"
+    if _is_weak_password(password):
+        return "密码过于简单，请勿使用连续数字、重复字符或常见弱口令。"
     if confirmation is not None and password != confirmation:
         return "两次输入的密码不一致。"
     return None

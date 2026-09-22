@@ -307,6 +307,10 @@ def ensure_admin_schema() -> None:
               id TEXT PRIMARY KEY,
               student_no TEXT NOT NULL UNIQUE,
               name TEXT NOT NULL,
+              college TEXT,
+              gender TEXT,
+              class_name TEXT,
+              counselor TEXT,
               user_id TEXT,
               imported_by TEXT,
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -541,6 +545,7 @@ def ensure_admin_schema() -> None:
     db.commit()
 
     _migrate_admin_users()
+    _migrate_student_registrations()
     # Student accounts live in the candidate backend's users table.  The admin
     # service also applies these additive migrations so either service can be
     # started first during deployment.
@@ -584,8 +589,10 @@ def ensure_admin_schema() -> None:
     ensure_mysql_cross_schema_collations()
 
     from shared.career_catalog import ensure_catalog_schema, seed_computer_pilot
+    from shared.recruitment import ensure_recruitment_schema
 
     ensure_catalog_schema(db, DB_ENGINE)
+    ensure_recruitment_schema(db, DB_ENGINE)
     seed_computer_pilot(db)
 
 
@@ -616,3 +623,20 @@ def _migrate_admin_users() -> None:
     if missing:
         db.execute("DELETE FROM admin_users")
         db.commit()
+
+
+def _migrate_student_registrations() -> None:
+    """兼容升级：为 student_registrations 补充学院/性别/班级/辅导员等列。"""
+    if not _table_exists("student_registrations"):
+        return
+    reg_columns = [
+        ("college", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(160) NULL"),
+        ("gender", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(20) NULL"),
+        ("class_name", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(160) NULL"),
+        ("counselor", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(120) NULL"),
+    ]
+    for column_name, column_type in reg_columns:
+        if not _column_exists("student_registrations", column_name):
+            cursor = db.execute(f"ALTER TABLE student_registrations ADD COLUMN {column_name} {column_type}")
+            cursor.close()
+    db.commit()

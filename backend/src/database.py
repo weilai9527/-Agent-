@@ -673,6 +673,10 @@ def _init_sqlite_db() -> None:
                 db.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {column_type}")
     db.commit()
 
+    from shared.recruitment import ensure_recruitment_schema
+
+    ensure_recruitment_schema(db, "sqlite")
+
 
 def init_db() -> None:
     if DB_ENGINE == "sqlite":
@@ -1102,6 +1106,10 @@ def init_db() -> None:
     _ensure_index("interview_reports", "idx_interview_reports_interview_id", "interview_id")
     _ensure_index("user_skill_stats", "idx_user_skill_stats_user_id", "user_id")
     db.commit()
+
+    from shared.recruitment import ensure_recruitment_schema
+
+    ensure_recruitment_schema(db, "mysql")
 
 
 def get_database_path() -> str:

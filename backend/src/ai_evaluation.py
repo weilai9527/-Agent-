@@ -11,7 +11,7 @@ import httpx
 from .kimi_followup import call_provider_json, get_task_providers
 
 
-EVALUATION_PROMPT_VERSION = "evaluation-v2"
+EVALUATION_PROMPT_VERSION = "evaluation-v3-fast"
 REPORT_PROMPT_VERSION = "report-v4-resume-analysis"
 DIMENSIONS = (
     "technical_accuracy",
@@ -128,7 +128,7 @@ def generate_ai_evaluation(
     messages: list[dict[str, Any]],
     resume_analysis: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    system = """你是严谨的中文技术面试评分员。只输出 JSON，不得输出 Markdown。按统一锚点评分：1-30基本未回答或明显错误；31-50相关但缺细节；51-70完整且基本合理；71-90有深入分析、数据、风险和权衡；91-100达到优秀候选人水平。不得根据回答长度虚高评分，也不得臆造候选人未提到的事实。"""
+    system = """你是严谨的中文技术面试评分员。只输出 JSON，不得输出 Markdown。按统一锚点评分：1-30基本未回答或明显错误；31-50相关但缺细节；51-70完整且基本合理；71-90有深入分析、数据、风险和权衡；91-100达到优秀候选人水平。不得根据回答长度虚高评分，也不得臆造候选人未提到的事实。strengths、issues、suggestions 各最多 2 条，每条不超过 60 个汉字，优先快速给出简洁、可复核的结果。"""
     schema = {"score": 0, "strengths": [""], "issues": [""], "suggestions": [""], "dimension_scores": {name: 0 for name in DIMENSIONS}}
     user = "\n".join(
         [
@@ -148,13 +148,13 @@ def generate_ai_evaluation(
             "EVALUATION_PROVIDER_ORDER",
             max_tokens_env="AI_EVALUATION_MAX_TOKENS",
             timeout_env="AI_EVALUATION_TIMEOUT",
-            default_max_tokens=1200,
-            default_timeout=10,
+            default_max_tokens=700,
+            default_timeout=12,
             retries_env="AI_EVALUATION_HTTP_RETRIES",
             default_retries=0,
         ),
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        max_attempts=int(os.environ.get("AI_EVALUATION_PROVIDER_ATTEMPTS", "2")),
+        max_attempts=int(os.environ.get("AI_EVALUATION_PROVIDER_ATTEMPTS", "1")),
     )
     return {
         **normalize_evaluation(raw),

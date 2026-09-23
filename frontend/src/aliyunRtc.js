@@ -128,6 +128,19 @@ async function loadAiAgentSdk() {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+// A spoken notification does not replace the cloud model's role/history.
+// Confirm the old session has stopped before preparing and starting a new role.
+export async function handoffAliyunRtcSession({ stop, prepare, start, isCancelled }) {
+  const stopped = await stop();
+  if (isCancelled()) return;
+  if (stopped?.status !== 'stopped') {
+    throw new Error('上一位语音面试官尚未退出，请稍后重新连接；已保存的回答会保留。');
+  }
+  await prepare();
+  if (isCancelled()) return;
+  await start();
+}
+
 export async function ensureAiAgentMessagingReady(aiAgentClient, {
   timeoutMs = 2000,
   pollIntervalMs = 50,
@@ -149,7 +162,31 @@ export async function ensureAiAgentMessagingReady(aiAgentClient, {
   return Boolean(aiAgentClient.isInSession);
 }
 
-export async function createAliyunRtcAudioSession({
+function isRtcNetworkError(error) {
+  return Number(error?.code) === 40001 || /network error|networkerror/i.test(String(error?.message || ''));
+}
+
+export async function createAliyunRtcAudioSession(options) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const session = await createAliyunRtcAudioSessionOnce(options);
+      if (options.isCancelled?.()) {
+        await session.leave();
+        throw new Error('语音连接已取消');
+      }
+      return session;
+    } catch (error) {
+      if (attempt === 2 || options.isCancelled?.() || error.rtcStage !== 'join' || !isRtcNetworkError(error)) {
+        throw error;
+      }
+      options.onStartupStage?.('join_retry');
+      await wait(600);
+      if (options.isCancelled?.()) throw error;
+    }
+  }
+}
+
+async function createAliyunRtcAudioSessionOnce({
   credentials,
   onConnectionState,
   onRemoteAudio,
@@ -157,6 +194,7 @@ export async function createAliyunRtcAudioSession({
   onAgentStatus,
   onAgentMessage,
   onAgentMessagingReady,
+  onStartupStage,
   sdk,
   aiAgentSdk,
 }) {
@@ -172,6 +210,11 @@ export async function createAliyunRtcAudioSession({
   let aiAgentClient = null;
   let joined = false;
   let closed = false;
+  let stage = 'plugin';
+  const setStage = (next) => {
+    stage = next;
+    onStartupStage?.(next);
+  };
 
   const updateRemoteUserCount = () => {
     onRemoteUserCount?.(client.remoteUsers?.length || 0);
@@ -237,7 +280,7 @@ export async function createAliyunRtcAudioSession({
     if (aiAgentClient) {
       aiAgentClient.off('agent-status', handleAgentStatus);
       aiAgentClient.off('message', handleAgentMessage);
-      aiAgentClient.detach?.();
+      try { aiAgentClient.detach?.(); } catch { /* Continue releasing RTC resources. */ }
     }
 
     if (microphoneTrack) {
@@ -248,14 +291,18 @@ export async function createAliyunRtcAudioSession({
           // The signaling connection may already be gone; still release the device.
         }
       }
-      microphoneTrack.close();
+      try { microphoneTrack.close(); } catch { /* Still leave the channel. */ }
       microphoneTrack = null;
     }
 
-    remoteTracks.forEach((track) => track.stopPlay?.());
+    remoteTracks.forEach((track) => {
+      try { track.stopPlay?.(); } catch { /* Release the remaining tracks. */ }
+    });
     remoteTracks.clear();
     mcuAudioSubscription = null;
-    if (joined) await client.leave();
+    // join() can fail after opening signaling resources. The SDK's leave()
+    // also resets a partially connected client; do not gate it on success.
+    try { await client.leave(); } catch { /* Preserve the original startup error. */ }
     joined = false;
   };
 
@@ -268,6 +315,7 @@ export async function createAliyunRtcAudioSession({
       client.register(aiAgentClient);
     }
 
+    setStage('join');
     const joinResult = await client.join({
       appId: credentials.app_id,
       token: credentials.token,
@@ -279,6 +327,7 @@ export async function createAliyunRtcAudioSession({
     onRemoteUserCount?.(joinResult.remoteUsers?.length || 0);
 
     if (aiAgentClient) {
+      setStage('messaging');
       const messagingReady = await ensureAiAgentMessagingReady(aiAgentClient);
       onAgentMessagingReady?.(messagingReady);
       if (!messagingReady) {
@@ -293,12 +342,32 @@ export async function createAliyunRtcAudioSession({
         .map((user) => handleUserPublished(user, 'audio', false))
     );
 
+    setStage('microphone');
     microphoneTrack = await DingRTC.createMicrophoneAudioTrack();
+    setStage('publish');
     await client.publish(microphoneTrack);
   } catch (error) {
     await leave();
-    throw error;
+    const failure = new Error(String(error?.message || error || 'RTC 启动失败'), { cause: error });
+    failure.name = error?.name || 'Error';
+    failure.code = error?.code;
+    failure.rtcStage = stage;
+    throw failure;
   }
 
   return { client, microphoneTrack, aiAgentClient, leave };
+}
+
+export function formatAliyunRtcStartError(error) {
+  const message = String(error?.message || error || '');
+  if (isRtcNetworkError(error)) {
+    return '暂时无法连接阿里云语音服务，请检查网络或代理后点击“开始回答”重试；也可以切换文字继续面试，已保存的进度会保留。';
+  }
+  if (/remote task missing|CLIENT_ERROR_TASK_NOT_FOUND|task does not exist/i.test(message)) {
+    return '语音连接未建立，请点击“开始回答”重新连接，已保存的面试进度会保留。';
+  }
+  if (/启动确认超时|timeout|timed out/i.test(message)) {
+    return '语音连接超时，请稍后点击“开始回答”重试。';
+  }
+  return message || '阿里云 RTC 连接失败，请稍后重试。';
 }

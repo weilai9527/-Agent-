@@ -20,6 +20,8 @@ def test_admin_imports_reveals_exports_and_clears_temporary_passwords(tmp_path):
             "SQLITE_PATH": str(database_path),
             "ADMIN_BOOTSTRAP_EMAIL": "root@example.com",
             "ADMIN_BOOTSTRAP_PASSWORD": "RootAdminPassword123!",
+            "ADMIN_MASTER_EMAIL": "root@example.com",
+            "ADMIN_MASTER_PASSWORD": "RootAdminPassword123!",
             "ADMIN_BOOTSTRAP_ROLE": "super_admin",
             "ADMIN_COOKIE_SECURE": "false",
             "STUDENT_TEMP_PASSWORD_KEY": Fernet.generate_key().decode("ascii"),
@@ -114,6 +116,61 @@ def test_admin_imports_reveals_exports_and_clears_temporary_passwords(tmp_path):
         remaining_export = admin.get("/api/admin/student-accounts/export")
         remaining_workbook = load_workbook(BytesIO(remaining_export.content), data_only=True)
         assert remaining_workbook.active.max_row == 2
+
+        # Re-importing a legacy activated student adopts the existing user ID,
+        # keeping their profile and interview history attached to the account.
+        admin_main.db.execute(
+            "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
+            ("legacy-student", "20260003@student.local", "legacy-hash", "Legacy Student"),
+        )
+        admin_main.db.execute(
+            "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
+            ("legacy-profile", "legacy-student", "Legacy Student"),
+        )
+        admin_main.db.execute(
+            "INSERT INTO student_registrations (id, student_no, name, user_id) VALUES (?, ?, ?, ?)",
+            ("legacy-registration", "20260003", "Legacy Student", "legacy-student"),
+        )
+        admin_main.db.commit()
+        legacy_workbook = Workbook()
+        legacy_sheet = legacy_workbook.active
+        legacy_sheet.append(["\\u5b66\\u53f7", "\\u59d3\\u540d"])
+        legacy_sheet.append(["20260003", "Legacy Student"])
+        legacy_content = BytesIO()
+        legacy_workbook.save(legacy_content)
+        migrated = admin.post(
+            "/api/admin/student-accounts/import",
+            headers=origin,
+            files={"file": ("legacy.xlsx", legacy_content.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        assert migrated.status_code == 200, migrated.text
+        assert migrated.json()["result"]["migrated"] == 1
+        assert migrated.json()["result"]["created"] == 0
+        legacy = admin_main.one("SELECT id, student_no, must_change_password FROM users WHERE id = ?", ("legacy-student",))
+        assert legacy == {"id": "legacy-student", "student_no": "20260003", "must_change_password": 1}
+        assert admin_main.one("SELECT id FROM profiles WHERE user_id = ?", ("legacy-student",))["id"] == "legacy-profile"
+        assert admin.get("/api/admin/student-accounts/legacy-student/temporary-password").status_code == 200
+
+        # A deleted legacy registration may still leave its synthetic-email user.
+        admin_main.db.execute(
+            "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
+            ("orphan-student", "20260004@student.local", "legacy-hash", "Orphan Student"),
+        )
+        admin_main.db.commit()
+        orphan_workbook = Workbook()
+        orphan_sheet = orphan_workbook.active
+        orphan_sheet.append(["\\u5b66\\u53f7", "\\u59d3\\u540d"])
+        orphan_sheet.append(["20260004", "Orphan Student"])
+        orphan_content = BytesIO()
+        orphan_workbook.save(orphan_content)
+        adopted = admin.post(
+            "/api/admin/student-accounts/import",
+            headers=origin,
+            files={"file": ("orphan.xlsx", orphan_content.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        assert adopted.status_code == 200, adopted.text
+        assert adopted.json()["result"]["migrated"] == 1
+        assert admin_main.one("SELECT student_no FROM users WHERE id = ?", ("orphan-student",))["student_no"] == "20260004"
         '''
     )
     completed = subprocess.run(

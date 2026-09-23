@@ -51,6 +51,7 @@ def test_webrtc_diagnostics_are_sanitized_and_expire(tmp_path):
                 "metadata": {
                     "phase": "ice",
                     "elapsed_ms": 321,
+                    "error_code": "40001",
                     "sdp": "must-not-be-stored",
                     "api_key": "must-not-be-stored",
                 },
@@ -65,7 +66,7 @@ def test_webrtc_diagnostics_are_sanitized_and_expire(tmp_path):
         events = listed.json()["events"]
         assert len(events) == 1
         assert events[0]["event_type"] == "connection_state_changed"
-        assert events[0]["metadata"] == {"phase": "ice", "elapsed_ms": 321}
+        assert events[0]["metadata"] == {"phase": "ice", "elapsed_ms": 321, "error_code": "40001"}
 
         cursor = main.db.execute(
             "UPDATE webrtc_diagnostic_events SET created_at = datetime('now', '-30 days') WHERE id = ?",

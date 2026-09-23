@@ -126,8 +126,8 @@ def _create_client(configuration: RtcAiAgentConfiguration):
         access_key_secret=configuration.access_key_secret,
         endpoint=configuration.endpoint,
         region_id=configuration.region_id,
-        connect_timeout=10_000,
-        read_timeout=20_000,
+        connect_timeout=_bounded_env_int("RTC_AI_AGENT_CONNECT_TIMEOUT_MS", 10_000, 1_000, 120_000),
+        read_timeout=_bounded_env_int("RTC_AI_AGENT_READ_TIMEOUT_MS", 60_000, 5_000, 180_000),
     )
     return Client(config)
 

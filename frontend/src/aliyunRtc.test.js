@@ -3,12 +3,142 @@ import test from 'node:test';
 
 import {
   createAliyunRtcAudioSession,
+  handoffAliyunRtcSession,
   createAliyunRtcTranscriptAssembler,
   ensureAiAgentMessagingReady,
   extractQuestionFromAgentTranscript,
+  formatAliyunRtcStartError,
   findLatestInterviewQuestion,
   shouldPersistAliyunAgentTurn,
 } from './aliyunRtc.js';
+
+test('handoff waits for old session to stop and new role to be saved before starting', async () => {
+  const order = [];
+  await handoffAliyunRtcSession({
+    stop: async () => { order.push('stop'); return { status: 'stopped' }; },
+    prepare: async () => { order.push('save new role and question'); },
+    start: async () => { order.push('start fresh task'); },
+    isCancelled: () => false,
+  });
+  assert.deepEqual(order, ['stop', 'save new role and question', 'start fresh task']);
+});
+
+test('handoff never starts another model when stopping or saving the new role fails', async () => {
+  for (const status of ['stop_failed', 'stopping', 'stopped']) {
+    let started = false;
+    await assert.rejects(handoffAliyunRtcSession({
+      stop: async () => ({ status }),
+      prepare: async () => { throw new Error('save failed'); },
+      start: async () => { started = true; },
+      isCancelled: () => false,
+    }));
+    assert.equal(started, false);
+  }
+});
+
+test('leaving during role preparation cancels automatic reconnect', async () => {
+  let cancelled = false;
+  let started = false;
+  await handoffAliyunRtcSession({
+    stop: async () => ({ status: 'stopped' }),
+    prepare: async () => { cancelled = true; },
+    start: async () => { started = true; },
+    isCancelled: () => cancelled,
+  });
+  assert.equal(started, false);
+});
+
+test('startup errors explain how to recover without dumping provider responses', () => {
+  const message = formatAliyunRtcStartError(new Error('remote task missing: CLIENT_ERROR_TASK_NOT_FOUND Response: internal details'));
+  assert.match(message, /重新连接/);
+  assert.doesNotMatch(message, /Response|CLIENT_ERROR|internal/);
+  assert.match(formatAliyunRtcStartError(new Error('启动确认超时')), /超时/);
+  assert.equal(formatAliyunRtcStartError(new Error('请允许麦克风权限')), '请允许麦克风权限');
+  assert.match(formatAliyunRtcStartError(new Error('Network error, please check your network connectivity')), /网络或代理/);
+});
+
+function startupHarness(failures, { failAt = 'join', cleanupThrows = false } = {}) {
+  const calls = { created: 0, left: 0, closed: 0, published: 0 };
+  const sdk = {
+    checkSystemRequirements: () => true,
+    createClient() {
+      const index = calls.created++;
+      return {
+        on() {}, off() {},
+        async join() {
+          if (failAt === 'join' && failures[index]) throw failures[index];
+          return { remoteUsers: [] };
+        },
+        async publish() {
+          calls.published += 1;
+          if (failAt === 'publish' && failures[index]) throw failures[index];
+        },
+        async unpublish() {},
+        leave() {
+          calls.left += 1;
+          if (cleanupThrows) throw new Error('cleanup failed');
+        },
+      };
+    },
+    async createMicrophoneAudioTrack() { return { close() { calls.closed += 1; } }; },
+  };
+  return { sdk, calls, credentials: {} };
+}
+
+test('cleans failed join before retrying on a fresh client', async () => {
+  const network = Object.assign(new Error('Network error'), { code: 40001 });
+  const harness = startupHarness([network]);
+  const stages = [];
+  const session = await createAliyunRtcAudioSession({
+    ...harness,
+    onStartupStage: (stage) => {
+      stages.push(stage);
+      if (stage === 'join_retry') assert.equal(harness.calls.left, 1);
+    },
+  });
+  assert.equal(harness.calls.created, 2);
+  assert.equal(harness.calls.published, 1);
+  assert.ok(stages.includes('join_retry'));
+  await session.leave();
+  assert.equal(harness.calls.left, 2);
+  assert.equal(harness.calls.closed, 1);
+});
+
+test('network retry is bounded and cleanup errors do not replace the cause', async () => {
+  const network = Object.assign(new Error('Network error'), { code: 40001 });
+  const harness = startupHarness([network, network], { cleanupThrows: true });
+  await assert.rejects(createAliyunRtcAudioSession(harness), (error) => {
+    assert.equal(error.rtcStage, 'join');
+    assert.equal(error.code, 40001);
+    assert.equal(error.cause, network);
+    return true;
+  });
+  assert.equal(harness.calls.created, 2);
+  assert.equal(harness.calls.left, 2);
+});
+
+test('authentication failures and publish failures are not automatically retried', async () => {
+  for (const failAt of ['join', 'publish']) {
+    const failure = new Error(failAt === 'join' ? 'token is invalid' : 'Network error');
+    const harness = startupHarness([failure], { failAt });
+    await assert.rejects(createAliyunRtcAudioSession(harness), (error) => error.rtcStage === failAt);
+    assert.equal(harness.calls.created, 1);
+    assert.equal(harness.calls.left, 1);
+    assert.equal(harness.calls.closed, failAt === 'publish' ? 1 : 0);
+  }
+});
+
+test('cancelling during retry does not open another connection', async () => {
+  const harness = startupHarness([new Error('Network error')]);
+  let cancelled = false;
+  await assert.rejects(createAliyunRtcAudioSession({
+    ...harness,
+    isCancelled: () => cancelled,
+    onStartupStage: (stage) => { if (stage === 'join_retry') cancelled = true; },
+  }), /Network error/);
+  assert.equal(harness.calls.created, 1);
+  assert.equal(harness.calls.left, 1);
+});
 
 
 test('finds only the latest real interview question', () => {

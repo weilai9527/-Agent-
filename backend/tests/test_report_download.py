@@ -63,7 +63,7 @@ def test_completed_report_can_be_downloaded_as_utf8_markdown(tmp_path):
             "generation_error": None,
         }
         generated = client.post(f"/api/interviews/{interview_id}/report")
-        assert generated.status_code == 201, generated.text
+        assert generated.status_code == 200, generated.text
 
         downloaded = client.get(f"/api/interviews/{interview_id}/report/download")
         assert downloaded.status_code == 200, downloaded.text

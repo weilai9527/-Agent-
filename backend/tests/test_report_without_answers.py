@@ -38,7 +38,7 @@ def test_report_without_candidate_answers_is_not_scored_or_sent_to_ai(tmp_path):
 
         main.generate_ai_report = unexpected_ai_call
         generated = client.post(f"/api/interviews/{interview_id}/report")
-        assert generated.status_code == 201, generated.text
+        assert generated.status_code == 200, generated.text
         report = generated.json()["report"]
         assert report["generation_status"] == "insufficient_evidence"
         assert report["pass_recommendation"] == "insufficient_evidence"

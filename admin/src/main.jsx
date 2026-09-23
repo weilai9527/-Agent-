@@ -64,6 +64,7 @@ const emptyAdminData = {
     canViewAgents: false,
     canViewConnectionLogs: false,
     canManageStudents: false,
+    canImportStudentAccounts: false,
     canManageOrganization: false,
     canManageCampus: false,
     canManageSettings: false,
@@ -834,51 +835,33 @@ const connectionLevelLabels = {
   error: '错误',
 };
 
-function RegistrationsPage() {
-  const [registrations, setRegistrations] = useState([]);
-  const [loading, setLoading] = useState(true);
+function StudentAccountsImportPage({ candidates, canImport, onAccountsChanged }) {
+  const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [result, setResult] = useState(null);
   const [pageError, setPageError] = useState('');
   const [notice, setNotice] = useState('');
-  const [query, setQuery] = useState('');
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState(null);
-  const [deletingId, setDeletingId] = useState('');
-
-  const loadRegistrations = async () => {
-    setLoading(true);
-    setPageError('');
-    try {
-      const data = await adminRequest('/api/admin/student-registrations');
-      setRegistrations(data.registrations || []);
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadRegistrations();
-  }, []);
+  const accounts = candidates.filter((item) => item.studentNo && item.studentNo !== '-');
+  const pending = accounts.filter((item) => item.activationStatus === '准备改密').length;
 
   const handleImport = async (event) => {
-    const file = event.target.files && event.target.files[0];
+    const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
     setImporting(true);
     setPageError('');
     setNotice('');
-    setImportResult(null);
+    setResult(null);
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const data = await adminRequest('/api/admin/student-registrations/import', {
+      const data = await adminRequest('/api/admin/student-accounts/import', {
         method: 'POST',
         body: formData,
       });
-      setImportResult(data);
-      setNotice(`导入完成：新增 ${data.imported} 人，更新 ${data.updated} 人，跳过 ${data.skipped.length} 行`);
-      await loadRegistrations();
+      setResult(data.result);
+      setNotice('学生账号名单已导入。');
+      await onAccountsChanged();
     } catch (requestError) {
       setPageError(requestError.message);
     } finally {
@@ -886,124 +869,58 @@ function RegistrationsPage() {
     }
   };
 
-  const handleDelete = async (item) => {
-    if (!window.confirm(`确认删除 ${item.name}（${item.studentNo}）的注册信息？该学生将无法再登录候选人端。`)) return;
-    setDeletingId(item.id);
+  const handleExport = async () => {
+    setExporting(true);
     setPageError('');
-    setNotice('');
     try {
-      await adminRequest(`/api/admin/student-registrations/${item.id}`, { method: 'DELETE' });
-      setNotice(`已删除 ${item.name}（${item.studentNo}）的注册信息`);
-      setRegistrations((current) => current.filter((entry) => entry.id !== item.id));
+      await adminDownload('/api/admin/student-accounts/export', 'student-temporary-passwords.xlsx');
     } catch (requestError) {
       setPageError(requestError.message);
     } finally {
-      setDeletingId('');
+      setExporting(false);
     }
   };
-
-  const filtered = useMemo(() => {
-    const keyword = query.trim().toLowerCase();
-    if (!keyword) return registrations;
-    return registrations.filter((item) => [item.studentNo, item.name, item.importedBy]
-      .join(' ').toLowerCase().includes(keyword));
-  }, [registrations, query]);
-
-  const activatedCount = useMemo(() => registrations.filter((item) => item.activated).length, [registrations]);
 
   return (
     <div className="registrations-page">
       <section className="connection-log-summary">
-        <article><span>已导入学生</span><strong>{registrations.length}</strong></article>
-        <article><span>已激活账号</span><strong>{activatedCount}</strong></article>
-        <article><span>待激活</span><strong>{registrations.length - activatedCount}</strong></article>
+        <article><span>当前范围学生账号</span><strong>{accounts.length}</strong></article>
+        <article><span>待首次改密</span><strong>{pending}</strong></article>
+        <article><span>已完成首次改密</span><strong>{accounts.length - pending}</strong></article>
       </section>
-
       <SectionCard
-        title="学生注册"
+        title="学生账号"
         icon={<UserPlus size={18} />}
-        action={<span className="record-count">候选人端凭学号 + 姓名登录</span>}
+        action={<span className="record-count">学号 + 临时密码登录</span>}
       >
         <div className="connection-log-toolbar">
-          <label>
-            <Search size={15} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学号或姓名" />
-          </label>
-          <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
-            <Upload size={15} className={importing ? 'spin' : ''} />
-            {importing ? '正在导入…' : '导入文档（CSV / Excel）'}
-            <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleImport} disabled={importing} hidden />
-          </label>
-          <button className="secondary-button" type="button" onClick={loadRegistrations} disabled={loading}>
-            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
+          {canImport && (
+            <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
+              <Upload size={15} className={importing ? 'spin' : ''} />
+              {importing ? '正在导入…' : '导入学生名单（.xlsx）'}
+              <input type="file" accept=".xlsx" onChange={handleImport} disabled={importing} hidden />
+            </label>
+          )}
+          <button className="secondary-button" type="button" onClick={handleExport} disabled={exporting}>
+            <Download size={15} />{exporting ? '正在导出…' : '导出当前范围的临时密码'}
           </button>
         </div>
-
-        <p className="form-hint">文档需包含「学号」「姓名」两列（支持中文或 student_no / name 列名），候选人端凭学号与姓名登录。</p>
-
+        <p className="form-hint">
+          学校名单至少包含「学号」「姓名」两列。新账号及迁移的旧账号会生成独立临时密码，学生首次登录后必须改密。
+          导出表包含尚未改密学生的临时密码，请交由对应辅导员发放。
+        </p>
         {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
         {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
-
-        {importResult && importResult.skipped.length > 0 && (
-          <div className="page-message warning">
-            <AlertCircle size={18} />
-            <div>
-              <strong>以下 {importResult.skipped.length} 行被跳过：</strong>
-              <ul>
-                {importResult.skipped.map((item) => (
-                  <li key={item.row}>第 {item.row} 行 {item.name || item.studentNo || '（空行）'}：{item.reason}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
-
-        {!pageError && loading && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取注册信息</div>}
-        {!pageError && !loading && filtered.length === 0 && (
-          <div className="page-message">{query ? '没有匹配的注册信息。' : '尚未导入学生注册信息，请先导入文档。'}</div>
-        )}
-        {!pageError && !loading && filtered.length > 0 && (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>学号</th>
-                  <th>姓名</th>
-                  <th>状态</th>
-                  <th>导入人</th>
-                  <th>导入时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((item) => (
-                  <tr key={item.id}>
-                    <td>{item.studentNo}</td>
-                    <td>{item.name}</td>
-                    <td><span className={`status-badge ${item.activated ? 'green' : 'gray'}`}>{item.activated ? '已激活' : '待激活'}</span></td>
-                    <td>{item.importedBy || '-'}</td>
-                    <td>{item.createdAt ? item.createdAt.slice(0, 19).replace('T', ' ') : '-'}</td>
-                    <td>
-                      <button
-                        className="secondary-button danger"
-                        type="button"
-                        disabled={deletingId === item.id}
-                        onClick={() => handleDelete(item)}
-                      >
-                        删除
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {result && (
+          <div className="page-message">
+            新增 {result.created} 人，更新 {result.updated} 人，迁移旧账号 {result.migrated || 0} 人，跳过 {result.skipped} 行。
+            {(result.errors || []).length > 0 && <ul>{result.errors.map((item, index) => <li key={index}>{item}</li>)}</ul>}
           </div>
         )}
       </SectionCard>
     </div>
   );
 }
-
 function ConnectionLogsPage() {
   const [payload, setPayload] = useState({
     logs: [],
@@ -2785,8 +2702,7 @@ const pageDescriptions = {
   interviews: '查看学生模拟训练进度与 AI 陪练运行情况',
   reports: '抽检成长报告的准确性与建议质量',
   organization: '维护学院、专业、班级和学生组织归属',
-  organizationConfig: '组织结构一览，从用户注册导入表一键生成组织结构',
-  registrations: '学生注册：导入学生，候选人端凭学号与姓名登录',
+  organizationConfig: '维护学院、专业和班级结构',
   catalog: '维护目标岗位、专业方向与能力模型',
   agents: '查看 AI 陪练角色及使用情况',
   connectionLogs: '排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路',
@@ -2809,7 +2725,7 @@ const guideFlow = [
     steps: [
       { view: 'settings', text: '在「系统管理」中配置报告大模型 / 供应商，以及质检相关规则。' },
       { view: 'organization', text: '在「组织与学生」中维护学院、专业、班级等组织归属，保证学生归班准确。' },
-      { view: 'registrations', text: '在「学生」页点击「学生注册」导入学生，候选人端凭学号与姓名即可登录。' },
+      { view: 'organization', text: '在「学生」页导入学生账号名单，导出临时密码供学生首次登录并改密。' },
     ],
   },
   {
@@ -2972,7 +2888,7 @@ function OrganizationConfigPage({ onNavigate }) {
         ) : pageError ? (
           <div className="page-message error"><AlertCircle size={18} />{pageError}<button type="button" onClick={loadStructure}>重新加载</button></div>
         ) : colleges.length === 0 ? (
-          <div className="page-message">当前还没有组织结构，请先导入用户注册表一键生成。</div>
+          <div className="page-message">当前还没有组织结构，请在下方添加学院、专业和班级。</div>
         ) : (
           <div className="campus-tree">
             <button type="button" className="active">
@@ -3324,7 +3240,7 @@ function AdminApp({ admin, onSignedOut }) {
           </div>
           <div className="topbar-actions">
             {activeView === 'organization' && (
-              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生注册</button>
+              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生账号</button>
             )}
             {searchableViews.has(activeView) && (
               <label className="admin-search">
@@ -3359,13 +3275,17 @@ function AdminApp({ admin, onSignedOut }) {
       />
 
       {registrationsOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生注册" onClick={() => setRegistrationsOpen(false)}>
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生账号" onClick={() => setRegistrationsOpen(false)}>
           <div className="modal-card resg-modal" onClick={(event) => event.stopPropagation()}>
             <header>
-              <span><UserPlus size={18} />学生注册</span>
+              <span><UserPlus size={18} />学生账号</span>
               <button className="icon-button" type="button" title="关闭" onClick={() => setRegistrationsOpen(false)}><X size={17} /></button>
             </header>
-            <RegistrationsPage />
+            <StudentAccountsImportPage
+              candidates={adminData.candidates}
+              canImport={adminData.permissions?.canImportStudentAccounts}
+              onAccountsChanged={refreshSnapshot}
+            />
           </div>
         </div>
       )}

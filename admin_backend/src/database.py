@@ -8,6 +8,7 @@ import sqlite3
 import threading
 
 from . import env  # noqa: F401
+from backend.src import database as candidate_database  # noqa: F401
 
 
 ADMIN_BACKEND_DIR = Path(__file__).resolve().parents[1]

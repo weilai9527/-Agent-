@@ -15,7 +15,6 @@ import {
   Languages,
   FileText,
   GraduationCap,
-  Headphones,
   KeyRound,
   LockKeyhole,
   LogIn,
@@ -44,12 +43,25 @@ import {
 } from 'lucide-react';
 import {
   createAliyunRtcAudioSession,
+  handoffAliyunRtcSession,
   createAliyunRtcTranscriptAssembler,
   extractQuestionFromAgentTranscript,
+  formatAliyunRtcStartError,
   findLatestInterviewQuestion,
   shouldPersistAliyunAgentTurn,
 } from './aliyunRtc';
+import { V4Brand, V4Logo, V4PageHeading } from './V4Shell';
+import { uploadResume } from './resumeUpload';
+import {
+  abilitySampleStatus,
+  hasInterviewerEvaluation,
+  isAbilityReport,
+  reportEvidenceNote,
+  reportScore,
+} from './reportPresentation';
+import { mergeProfileIntoSetup } from './setupDefaults';
 import './styles.css';
+import './v4.css';
 
 const report = {
   candidate: '林致远',
@@ -989,8 +1001,8 @@ function reportToViewModel(reportData, user) {
       title: `${interviewer} · 问答复盘`,
       question,
       answer: item.answer_preview || item.content_preview,
-      review: item.score ? `本题得分 ${item.score}/100。建议结合报告中的能力维度和训练任务继续优化。` : '本题暂无单独评分。',
-      score: Number(item.score) || 0,
+      review: reportScore(item.score) !== null ? `本题得分 ${item.score}/100。建议结合报告中的能力维度和训练任务继续优化。` : '本题暂无单独评分。',
+      score: reportScore(item.score),
       strengths: item.strengths || '',
       issues: item.issues || '',
       suggestion: item.suggestions || '',
@@ -1020,19 +1032,20 @@ function reportToViewModel(reportData, user) {
     generationError: reportData?.generation_error || '',
     summary: hasEvidence ? (reportData?.summary || '暂无报告摘要。') : '本次面试未记录到候选人回答，缺少可用于评分和复盘的证据，因此不生成综合评分、能力指标或推进建议。',
     suggestions: hasEvidence ? suggestions : [],
-    radar: (hasEvidence ? Object.entries(abilityRadar) : []).map(([key, value]) => ({
+    radar: (hasEvidence ? Object.entries(abilityRadar) : []).filter(([, value]) => reportScore(value) !== null).map(([key, value]) => ({
       subject: dimensionLabels[key] || key,
-      value: Number(value) || 0,
+      value: reportScore(value),
     })),
     metrics: (hasEvidence ? Object.entries(abilityRadar) : []).map(([key, value]) => ({
       label: dimensionLabels[key] || key,
-      value: Number(value) || 0,
+      value: reportScore(value),
       note: `本场${dimensionLabels[key] || key}表现为 ${Number(value) || 0}/100，综合单题回答证据生成。`,
     })),
     interviewers: agentFeedback.map((item) => {
-      const hasScore = item.score !== null && item.score !== undefined && item.score !== '' && Number.isFinite(Number(item.score));
+      const hasScore = hasInterviewerEvaluation(item);
       return {
         name: item.agent_name,
+        evaluated: hasEvidence && hasScore,
         decision: hasEvidence && hasScore ? (item.score >= 80 ? '表现稳定' : item.score >= 70 ? '继续观察' : '需要加强') : '证据不足',
         color: hasEvidence && hasScore ? (item.score >= 80 ? 'green' : item.score >= 70 ? 'blue' : 'amber') : 'blue',
         text: hasEvidence ? item.comment : '未记录到候选人回答，无法形成可靠评价。',
@@ -1054,7 +1067,10 @@ async function apiRequest(path, options = {}) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.error || '请求失败，请稍后再试。');
+    const requestError = new Error(data.error || '请求失败，请稍后再试。');
+    requestError.status = response.status;
+    requestError.data = data;
+    throw requestError;
   }
 
   return data;
@@ -1269,12 +1285,12 @@ function ProgressMetric({ item }) {
     <div className="metric-row">
       <div className="metric-topline">
         <strong>{item.label}</strong>
-        <span>{item.value}/100</span>
+        <span>{item.value === null ? '未评估' : `${item.value}/100`}</span>
       </div>
-      <div className="progress-track" aria-label={`${item.label} ${item.value} 分`}>
+      {item.value !== null && <div className="progress-track" aria-label={`${item.label} ${item.value} 分`}>
         <div className="progress-fill" style={{ width: `${item.value}%` }} />
-      </div>
-      <p>{item.note}</p>
+      </div>}
+      {item.note && <p>{item.note}</p>}
     </div>
   );
 }
@@ -1334,7 +1350,7 @@ function CompetencyRadar({ data }) {
 }
 
 function TimelineItem({ item, index }) {
-  const [open, setOpen] = useState(index === 0);
+  const [open, setOpen] = useState(false);
   const Icon = item.type === 'hr' ? BriefcaseBusiness : item.type === 'business' ? MessageSquareText : Wrench;
 
   return (
@@ -1342,12 +1358,12 @@ function TimelineItem({ item, index }) {
       <div className="timeline-marker">
         <Icon size={15} />
       </div>
-      <button className="timeline-toggle" onClick={() => setOpen(!open)}>
+      <button type="button" className="timeline-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span>
-          <small>第 {index + 1} 轮</small>
-          <strong>{item.title}</strong>
+          <small>第 {index + 1} 题 · {item.title.replace(' · 问答复盘', '')}</small>
+          <strong className="report-question-preview">{item.question || '未记录对应问题'}</strong>
         </span>
-        <span className="timeline-score">{item.score ? `${item.score} 分` : '待评分'}</span>
+        <span className="timeline-score">{item.score !== null && item.score !== undefined ? `${item.score} 分` : '未评分'}</span>
         <ChevronDown className="chevron" size={18} />
       </button>
       {open && (
@@ -1499,16 +1515,25 @@ function LoginPage({ onAuthenticated }) {
   };
 
   return (
-    <main className="auth-shell">
+    <main className="auth-shell v4-auth-shell">
       <section className="auth-page">
+        <div className="auth-brand-panel">
+          <V4Brand />
+          <div className="v4-auth-orbit"><div className="v4-orbit v4-orbit-one" /><div className="v4-orbit v4-orbit-two" /><V4Logo /></div>
+          <div className="auth-copy">
+            <p className="eyebrow">THE NEXT CHAPTER STARTS HERE</p>
+            <h1>准备充分，<br />自信发生。</h1>
+            <p>你的专属 AI 面试空间</p>
+          </div>
+          <small className="v4-auth-credit">ASTRAINTERVIEW © 2026</small>
+        </div>
+
         <form className="auth-card" onSubmit={handleSubmit}>
+          <V4Brand />
           <div className="auth-card-head">
-            <div className="auth-icon">
-              <LogIn size={22} />
-            </div>
             <div>
-              <h2>登录个人面试空间</h2>
-              <p>输入学号与临时密码即可进入，首次登录需修改密码。</p>
+              <h2>欢迎回来</h2>
+              <p>为每一次机会，做好准备。</p>
             </div>
           </div>
 
@@ -1550,7 +1575,7 @@ function LoginPage({ onAuthenticated }) {
                 <input type="checkbox" defaultChecked />
                 保持登录状态
               </label>
-              <span>忘记密码请联系辅导员或系统管理员</span>
+            <span>忘记密码请联系辅导员或系统管理员</span>
             </div>
           )}
 
@@ -1613,11 +1638,21 @@ function InitialPasswordChangePage({ user, onChanged, onLogout }) {
   };
 
   return (
-    <main className="auth-shell">
+    <main className="auth-shell v4-auth-shell">
       <section className="auth-page">
+        <div className="auth-brand-panel">
+          <V4Brand />
+          <div className="v4-auth-orbit"><div className="v4-orbit v4-orbit-one" /><div className="v4-orbit v4-orbit-two" /><V4Logo /></div>
+          <div className="auth-copy">
+            <p className="eyebrow">FIRST LOGIN SECURITY</p>
+            <h1>从这里，<br />开始新的旅程。</h1>
+            <p>临时密码仅用于首次身份确认。完成改密后，管理员将无法再查看原临时密码。</p>
+          </div>
+          <small className="v4-auth-credit">ASTRAINTERVIEW © 2026</small>
+        </div>
         <form className="auth-card" onSubmit={handleSubmit}>
+          <V4Brand />
           <div className="auth-card-head">
-            <div className="auth-icon"><KeyRound size={22} /></div>
             <div><h2>首次登录修改密码</h2><p>学号：{user.studentNo} · {user.name}</p></div>
           </div>
           <div className="auth-form">
@@ -1631,37 +1666,6 @@ function InitialPasswordChangePage({ user, onChanged, onLogout }) {
         </form>
       </section>
     </main>
-  );
-}
-
-function ViewSwitch({ view, onChange }) {
-  return (
-    <div className="view-switch" aria-label="页面视图切换">
-      <button className={view === 'resume' ? 'active' : ''} onClick={() => onChange('resume')}>
-        <Upload size={15} />
-        简历分析
-      </button>
-      <button className={view === 'jobcompare' ? 'active' : ''} onClick={() => onChange('jobcompare')}>
-        <BriefcaseBusiness size={15} />
-        招聘对比
-      </button>
-      <button className={view === 'setup' ? 'active' : ''} onClick={() => onChange('setup')}>
-        <Layers3 size={15} />
-        面试配置
-      </button>
-      <button className={view === 'phone' ? 'active' : ''} onClick={() => onChange('phone')}>
-        <Phone size={15} />
-        电话面试
-      </button>
-      <button className={view === 'report' ? 'active' : ''} onClick={() => onChange('report')}>
-        <FileText size={15} />
-        复盘报告
-      </button>
-      <button className={view === 'stats' ? 'active' : ''} onClick={() => onChange('stats')}>
-        <TrendingUp size={15} />
-        能力画像
-      </button>
-    </div>
   );
 }
 
@@ -1772,16 +1776,17 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
   }
 
   return (
-    <form className="profile-page" onSubmit={handleSave}>
+    <form className="profile-page v4-profile-page" onSubmit={handleSave}>
+      <V4PageHeading eyebrow="YOUR PERSONAL ARCHIVE" title="个人资料" description="整理求职目标与项目经历，让每场面试更贴近你的方向。" />
       <section className="profile-hero">
         <div className="profile-identity">
           <div className="profile-avatar">
             {profile.avatar_url ? <img src={profile.avatar_url} alt="" /> : <UserRound size={34} />}
           </div>
           <div>
-            <p className="eyebrow">Personal Interview Profile</p>
-            <h1>个人面试训练档案</h1>
-            <span>你填写的信息会用于生成更贴近目标岗位的模拟面试官和复盘建议。</span>
+            <p className="eyebrow">PERSONAL INTERVIEW PROFILE</p>
+            <h2>{profile.nickname || user.name}</h2>
+            <span>你的信息会用于生成面试官策略与复盘建议。</span>
           </div>
         </div>
         <button className="primary-action" type="submit" disabled={saving}>
@@ -2652,7 +2657,7 @@ function ResumeDownloader({ text, name }) {
   return (
     <button className="primary-action" type="button" onClick={handleDownload} disabled={!ready || !text}>
       <Download size={16} />
-      {ready ? '下载简历' : '准备中...'}
+      {ready ? '下载文本' : '准备中...'}
     </button>
   );
 }
@@ -3011,12 +3016,10 @@ function JobMatchHistoryPage() {
 }
 
 function ResumeAnalysisPage() {
-  const [resumeText, setResumeText] = useState(
-    '负责过中后台性能优化、低代码表单搭建和组件库治理，希望重点练习项目深挖与架构表达。'
-  );
+  const [resumeText, setResumeText] = useState('');
   const [fileName, setFileName] = useState('');
   const [analysis, setAnalysis] = useState(() => buildResumeAnalysis(resumeText));
-  const [analyzed, setAnalyzed] = useState(true);
+  const [analyzed, setAnalyzed] = useState(false);
   const [profile, setProfile] = useState(null);
   const [structuredAnalysis, setStructuredAnalysis] = useState(null);
   const [analysisMeta, setAnalysisMeta] = useState(null);
@@ -3028,6 +3031,20 @@ function ResumeAnalysisPage() {
   const [collegeOptions, setCollegeOptions] = useState([]);
   const [studentInfo, setStudentInfo] = useState({ name: '', studentNo: '', college: '' });
   const [savingForm, setSavingForm] = useState(false);
+  const [editorMode, setEditorMode] = useState('document');
+  const [uploading, setUploading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [savingText, setSavingText] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const fileInput = useRef(null);
+  const busy = loading || uploading || analyzing || savingForm || savingText || confirming;
+  const hasResult = analyzed && !!structuredAnalysis;
+  const invalidateAnalysis = () => {
+    setAnalyzed(false);
+    setMessage('');
+    setError('');
+  };
+
 
   useEffect(() => {
     let mounted = true;
@@ -3046,13 +3063,12 @@ function ResumeAnalysisPage() {
           setAnalysis(buildResumeAnalysis(savedResume, currentProfile.resume_filename));
 
           let analysisData = await apiRequest('/api/profile/resume-analysis');
-          if (analysisData.stale) {
-            analysisData = await apiRequest('/api/profile/resume-analysis', { method: 'POST' });
-          }
+
           if (!mounted) return;
           const savedRecord = analysisData.resume_analysis;
           const savedAnalysis = savedRecord?.analysis;
-          if (savedAnalysis) {
+          if (savedAnalysis && !analysisData.stale) {
+            setAnalyzed(true);
             setAnalysisMeta(normalizeResumeAnalysisMeta(savedRecord));
             setStructuredAnalysis(savedAnalysis);
             setAnalysis(buildResumeAnalysisFromStructured(savedResume, currentProfile.resume_filename, savedAnalysis, currentProfile.target_role));
@@ -3061,9 +3077,9 @@ function ResumeAnalysisPage() {
       })
       .catch(() => {
         if (mounted) {
-          setMessage('当前先使用页面内文本进行分析，登录资料读取失败时不会影响本次预览。');
+          setError('简历资料读取失败，请刷新页面重试。');
         }
-      });
+      }).finally(() => { if (mounted) setLoading(false); });
 
     apiRequest('/api/resume-form/settings')
       .then((data) => {
@@ -3089,6 +3105,7 @@ function ResumeAnalysisPage() {
   }, []);
 
   const handleFormChange = (field, value) => {
+    invalidateAnalysis();
     setForm((current) => {
       if (field === 'college') {
         const next = { ...current, college: value, major: '' };
@@ -3120,11 +3137,56 @@ function ResumeAnalysisPage() {
       setStructuredAnalysis(null);
       setAnalysisMeta(null);
       setAnalyzed(false);
-      setMessage('简历已保存，点击“开始分析”可生成最新的岗位匹配与面试配置。');
+      setProfile((current) => ({ ...current, resume_text: nextText, resume_filename: '' }));
+      setMessage('填写内容已保存为当前简历，可以开始分析了。');
+      return nextText;
+    } catch (requestError) {
+      setError(requestError.message);
+      return null;
+    } finally {
+      setSavingForm(false);
+    }
+  };
+
+  const handleUpload = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || busy) return;
+    setError('');
+    setMessage('');
+    setUploading(true);
+    try {
+      const data = await uploadResume(apiUrl('/api/profile/resume-upload'), file);
+      setProfile({ ...defaultProfile, ...data.profile });
+      setResumeText(data.text);
+      setFileName(data.filename);
+      setEditorMode('document');
+      setStructuredAnalysis(null);
+      setAnalysisMeta(null);
+      setAnalyzed(false);
+      setMessage(data.truncated ? '已提取并保存前 12,000 字，请检查内容后开始分析。' : '简历已提取并保存，请检查内容后开始分析。');
     } catch (requestError) {
       setError(requestError.message);
     } finally {
-      setSavingForm(false);
+      setUploading(false);
+    }
+  };
+
+  const handleSaveText = async () => {
+    setSavingText(true);
+    setError('');
+    setMessage('');
+    try {
+      const data = await apiRequest('/api/profile', {
+        method: 'PUT',
+        body: JSON.stringify({ ...(profile || defaultProfile), resume_text: resumeText, resume_filename: fileName }),
+      });
+      setProfile({ ...defaultProfile, ...data.profile });
+      setMessage('简历内容已保存。');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSavingText(false);
     }
   };
 
@@ -3136,18 +3198,22 @@ function ResumeAnalysisPage() {
     setMessage('');
     setError('');
 
-    const nextAnalysis = buildResumeAnalysis(resumeText, fileName);
-    setAnalysis(nextAnalysis);
-    setAnalyzed(true);
-
     try {
+      const textToAnalyze = editorMode === 'form' ? await handleSaveForm() : resumeText;
+      if (!textToAnalyze?.trim()) {
+        if (textToAnalyze !== null) setError('请先上传或填写简历内容。');
+        return;
+      }
+      const nextFileName = editorMode === 'form' ? '' : fileName;
+      const nextAnalysis = buildResumeAnalysis(textToAnalyze, nextFileName);
       const currentProfile = profile || defaultProfile;
       const data = await apiRequest('/api/profile', {
         method: 'PUT',
         body: JSON.stringify({
           ...currentProfile,
-          resume_text: resumeText,
-          project_experience: currentProfile.project_experience || resumeText,
+          resume_text: textToAnalyze,
+          resume_filename: nextFileName,
+          project_experience: currentProfile.project_experience || textToAnalyze,
           target_role: currentProfile.target_role || '',
           preferred_interview_type: currentProfile.preferred_interview_type || nextAnalysis.recommendedSetup[0].value,
           preferred_difficulty: currentProfile.preferred_difficulty || nextAnalysis.recommendedSetup[1].value,
@@ -3164,7 +3230,8 @@ function ResumeAnalysisPage() {
       const nextStructuredAnalysis = analysisData.resume_analysis?.analysis;
       setAnalysisMeta(normalizeResumeAnalysisMeta(analysisData.resume_analysis));
       setStructuredAnalysis(nextStructuredAnalysis || null);
-      setAnalysis(buildResumeAnalysisFromStructured(resumeText, fileName, nextStructuredAnalysis, savedProfile.target_role));
+      setAnalysis(buildResumeAnalysisFromStructured(textToAnalyze, nextFileName, nextStructuredAnalysis, savedProfile.target_role));
+      setAnalyzed(true);
       setMessage('已生成多个就业方向及依据。系统不会自动替你定岗，请确认一个方向或输入自己的目标岗位。');
     } catch (requestError) {
       setError(requestError.message);
@@ -3180,6 +3247,7 @@ function ResumeAnalysisPage() {
       return;
     }
 
+    setConfirming(true);
     setMessage('');
     setError('');
     try {
@@ -3189,8 +3257,6 @@ function ResumeAnalysisPage() {
         body: JSON.stringify({
           ...currentProfile,
           target_role: nextRole,
-          resume_text: resumeText,
-          project_experience: currentProfile.project_experience || resumeText,
         }),
       });
       const savedProfile = { ...defaultProfile, ...(data.profile || {}) };
@@ -3200,38 +3266,49 @@ function ResumeAnalysisPage() {
       setMessage(`已确认“${nextRole}”为本阶段训练目标，面试配置会优先使用该方向。`);
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setConfirming(false);
     }
   };
 
   return (
-    <section className="resume-page">
-      <div className="resume-hero">
-        <div>
-          <h1>简历填写与分析</h1>
-        </div>
-      </div>
+    <section className="resume-page v4-resume-page resume-studio">
+      <V4PageHeading eyebrow="YOUR STORY, WELL PRESENTED" title="我的简历" description="整理经历，让每一份潜力被看见。" />
 
       {(message || error) && (
         <div className={`profile-message ${error ? 'error' : 'success'}`}>{error || message}</div>
       )}
 
-      {analysisMeta && (
-        <div className={`analysis-source-note ${analysisMeta.isLocal ? 'local' : 'ai'}`}>
-          <div>
-            <strong>{analysisMeta.isLocal ? '当前使用本地规则辅助分析' : `当前使用 ${analysisMeta.provider.toUpperCase()} AI 语义分析`}</strong>
-            <span>
-              {analysisMeta.isLocal
-                ? '分数表示简历证据命中程度，不等同于真实录用概率。'
-                : '结果由模型结合专业、技能、项目职责与成果进行结构化判断。'}
-            </span>
-          </div>
-          {analysisMeta.errorSummary && <small>{analysisMeta.errorSummary}，系统已自动降级。</small>}
+      <section className="resume-import" aria-label="上传简历">
+        <div className="resume-import-icon"><FileText size={30} strokeWidth={1.4} /></div>
+        <div className="resume-import-copy">
+          <span className="resume-kicker">从一份简历开始</span>
+          <h2>{uploading ? '正在提取简历内容…' : '上传简历，发现适合你的方向'}</h2>
+          <p>支持 PDF、DOCX、TXT、MD · 最大 10 MB · 上传后提取并保存文字</p>
+          <span className="resume-file-status"><CheckCircle2 size={14} />{loading ? '正在读取简历…' : fileName || (resumeText ? '已有简历内容，可继续编辑' : '也可以在下方粘贴内容或手动填写')}</span>
         </div>
-      )}
+        <button className="primary-action" type="button" onClick={() => fileInput.current?.click()} disabled={busy}><Upload size={16} />{resumeText ? '上传新简历' : '选择简历文件'}</button>
+        <input ref={fileInput} type="file" hidden accept=".pdf,.docx,.txt,.md" aria-label="选择简历文件" onChange={handleUpload} disabled={busy} />
+      </section>
 
       <section className="resume-grid">
-        <Card title="填写简历" icon={<FileText size={18} />}>
-          <div className="resume-form-panel">
+        <section className="resume-editor">
+          <div className="resume-editor-head">
+            <div className="resume-editor-tabs" aria-label="简历编辑方式">
+              <button type="button" aria-pressed={editorMode === 'document'} disabled={busy} onClick={() => setEditorMode('document')}>简历内容</button>
+              <button type="button" aria-pressed={editorMode === 'form'} disabled={busy} onClick={() => setEditorMode('form')}>手动填写</button>
+            </div>
+            <span>{hasResult ? '分析已完成' : '待分析'}</span>
+          </div>
+          {editorMode === 'document' ? (
+            <div className="resume-document">
+              <div className="resume-document-heading"><h2>{fileName || '我的简历内容'}</h2><span>{resumeText.length.toLocaleString()} / 12,000 字</span></div>
+              <p>检查提取的内容，也可以直接粘贴或补充你的经历。</p>
+              <textarea aria-label="简历内容" value={resumeText} maxLength={12000} disabled={busy} placeholder="在这里粘贴简历，描述你的教育背景、专业技能、项目经历和成果…" onChange={(event) => { setResumeText(event.target.value); invalidateAnalysis(); }} />
+            </div>
+          ) : (
+          <fieldset className="resume-form-panel" disabled={busy}>
+            <p className="resume-form-hint">没有现成简历？按模块填写，保存后将作为当前简历进行分析。</p>
             <div className="resume-form-basic">
               <label className="brief-field">
                 <span>姓名</span>
@@ -3291,64 +3368,45 @@ function ResumeAnalysisPage() {
               />
             </div>
 
+          </fieldset>
+          )}
+          <div className="resume-editor-footer">
             <div className="resume-form-actions">
-              <button className="primary-action" type="button" onClick={handleSaveForm} disabled={savingForm}>
-                <Save size={16} />
-                {savingForm ? '保存中...' : '保存简历'}
-              </button>
-              <ResumeDownloader text={resumeText} name={studentInfo.name || profile?.target_role || '简历'} />
-              <button className="primary-action" type="button" onClick={handleAnalyze} disabled={analyzing}>
-                <Sparkles size={16} />
-                {analyzing ? '分析中' : '开始分析'}
-              </button>
+              <button className="secondary-action" type="button" onClick={editorMode === 'form' ? handleSaveForm : handleSaveText} disabled={busy || (editorMode === 'document' && !resumeText.trim())}><Save size={15} />{savingForm || savingText ? '保存中…' : '保存简历'}</button>
+              <ResumeDownloader text={resumeText} name={studentInfo.name || '简历'} />
             </div>
+            <button className="primary-action" type="button" onClick={handleAnalyze} disabled={busy || (editorMode === 'document' && !resumeText.trim())}><Sparkles size={16} />{analyzing ? '正在分析…' : editorMode === 'form' ? '保存并分析' : '开始分析'}</button>
           </div>
-        </Card>
+        </section>
 
-        <Card title="岗位匹配结果" icon={<Target size={18} />}>
-          <div className="match-card">
-            <div className="match-score">
-              <span>{analysisMeta?.isLocal ? '规则证据分' : (analysis.scoreLabel || '匹配度')}</span>
-              <strong>{analysis.matchScore}</strong>
-              <small>/100</small>
-            </div>
-            <div className="match-copy">
-              <StatusTag tone="green">综合推荐第 1 方向</StatusTag>
-              {analysis.directions?.[0]?.catalogStatus === 'matched'
-                ? <StatusTag tone="blue">正式目录岗位 · {analysis.directions[0].catalogJobName}</StatusTag>
-                : <StatusTag tone="amber">目录外 AI 建议 · 已进入待审核池</StatusTag>}
-              <h2>{analysis.targetRole}</h2>
-              <div className="confirmed-role-note">
-                <span>学生已确认目标</span>
-                <strong>{profile?.target_role || '尚未确认'}</strong>
-              </div>
-              <p>{analysis.summary}</p>
-            </div>
-          </div>
-        </Card>
+        <aside className="resume-insight">
+          <span className="resume-kicker">CAREER INSIGHT / 岗位匹配</span>
+          {hasResult ? <>
+            <div className="resume-score-line"><strong>{analysis.matchScore}<small>/ 100</small></strong><span>{analysisMeta?.isLocal ? '规则证据分' : (analysis.scoreLabel || '方向匹配度')}</span></div>
+            <div className="resume-score-track"><span style={{ width: `${Math.min(100, Math.max(0, Number(analysis.matchScore) || 0))}%` }} /></div>
+            <span className="resume-insight-label">优先探索的方向</span>
+            <h2>{analysis.targetRole}</h2>
+            <p>{analysis.summary}</p>
+            <div className="resume-analysis-footnote">{analysisMeta?.isLocal ? '本地规则辅助分析 · 分数为证据匹配程度，并非录用概率。' : 'AI 根据简历中的技能、职责与成果生成，供你选择方向时参考。'}</div>
+          </> : <div className="resume-insight-empty"><Target size={36} strokeWidth={1.2} /><h2>{analyzing ? '正在发现你的优势' : '你的下一步，从这里出发'}</h2><p>{analyzing ? '正在结合你的经历分析岗位方向，请稍候。' : '完善简历后开始分析，查看匹配方向、推荐依据和需要补强的能力。'}</p></div>}
+          <div className="resume-current-target"><span>当前训练目标</span><strong>{profile?.target_role || '尚未选择'}</strong><small>可在下方确认推荐方向，或填写自己的目标。</small></div>
+        </aside>
       </section>
 
       <section className="direction-panel">
         <Card title="推荐就业方向" icon={<Target size={18} />}>
-          {analysis.directions?.length ? (
+          {hasResult && analysis.directions?.length ? (
             <div className="direction-grid">
               {analysis.directions.map((direction, index) => {
                 const confirmed = profile?.target_role === direction.name;
                 return (
                   <article className={`direction-card ${confirmed ? 'confirmed' : ''}`} key={direction.name}>
                     <div className="direction-card-head">
-                      <StatusTag tone={index === 0 ? 'green' : 'blue'}>推荐 {index + 1}</StatusTag>
+                      <span className="direction-rank">方向 0{index + 1}</span>
                       <strong>{direction.score} 分</strong>
                     </div>
                     <h3>{direction.name}</h3>
-                    <div className={`catalog-match-note ${direction.catalogStatus}`}>
-                      <strong>{direction.catalogStatus === 'matched' ? '正式目录岗位' : '目录外 AI 建议'}</strong>
-                      <span>
-                        {direction.catalogStatus === 'matched'
-                          ? `已关联 ${direction.catalogJobName} · ${direction.abilityMatrix.length} 项正式能力要求`
-                          : `${direction.nearestCatalogJobName ? `最接近：${direction.nearestCatalogJobName}；` : ''}已提交管理端待审核，当前分数来自 AI 语义分析`}
-                      </span>
-                    </div>
+                    <span className="resume-catalog-label">{direction.catalogStatus === 'matched' ? '岗位库已收录' : 'AI 拓展方向'}</span>
                     <div className="direction-evidence">
                       <span>推荐依据</span>
                       <p>{direction.reasons.join('；') || '结合简历中的技能、项目和学习经历综合推荐。'}</p>
@@ -3361,7 +3419,7 @@ function ResumeAnalysisPage() {
                       type="button"
                       className={confirmed ? 'secondary-action' : 'primary-action'}
                       onClick={() => handleConfirmDirection(direction.name)}
-                      disabled={confirmed}
+                      disabled={confirmed || busy}
                     >
                       {confirmed ? '已确认该方向' : '确认作为训练目标'}
                     </button>
@@ -3382,7 +3440,7 @@ function ResumeAnalysisPage() {
                 onChange={(event) => setCustomRole(event.target.value)}
                 placeholder="例如：网络安全工程师"
               />
-              <button type="button" className="secondary-action" onClick={() => handleConfirmDirection(customRole)}>
+              <button type="button" className="secondary-action" disabled={busy || !customRole.trim()} onClick={() => handleConfirmDirection(customRole)}>
                 确认自定义方向
               </button>
             </div>
@@ -3390,25 +3448,36 @@ function ResumeAnalysisPage() {
         </Card>
       </section>
 
-      {!analyzed && <div className="resume-draft-note">简历内容已更新，点击“开始分析”刷新分析结果。</div>}
+      {!analyzed && !!resumeText && <div className="resume-draft-note">简历内容已更新，点击“开始分析”刷新分析结果。</div>}
     </section>
   );
 }
 
-function SetupPage({ onStart }) {
+function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPreset.key }) {
+  const initialPreset = difficultyPresets.find((preset) => preset.key === presetKey) || defaultDifficultyPreset;
   const defaultBrief = '';
   const [form, setForm] = useState({
     role: '',
-    ...defaultDifficultyPreset.overrides,
+    ...initialPreset.overrides,
     brief: defaultBrief,
   });
-  const [difficulty, setDifficulty] = useState(defaultDifficultyPreset.key);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(mode === 'custom');
+  const [activeDimension, setActiveDimension] = useState(0);
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
   const [recommendedRoles, setRecommendedRoles] = useState([]);
   const briefTouchedRef = useRef(false);
+  const customDimensions = [
+    { label: '面试类型', key: 'interviewType', options: setupOptions.interviewTypes },
+    { label: '公司场景', key: 'companyScene', options: setupOptions.companyScenes },
+    { label: '练习重点', key: 'focusArea', options: setupOptions.focusAreas },
+    { label: '面试强度', key: 'intensity', options: setupOptions.intensity },
+    { label: '面试官风格', key: 'style', options: setupOptions.styles },
+  ];
+  const selectedLevelIndex = Math.max(0, setupOptions.levels.indexOf(form.level));
+  const activeOptions = customDimensions[activeDimension].options;
+  const selectedOptionIndex = Math.max(0, activeOptions.indexOf(form[customDimensions[activeDimension].key]));
 
   useEffect(() => {
     let mounted = true;
@@ -3420,15 +3489,12 @@ function SetupPage({ onStart }) {
         const profile = data.profile || {};
         const profileBrief = profile.project_experience || profile.resume_text || defaultBrief;
 
-        setForm((current) => ({
-          ...current,
-          role: profile.target_role || current.role,
-          level: profile.experience_level || current.level,
-          interviewType: profile.preferred_interview_type || current.interviewType,
-          intensity: profile.preferred_difficulty || current.intensity,
-          style: profile.preferred_interviewer_style || current.style,
-          brief: briefTouchedRef.current ? current.brief : profileBrief,
-        }));
+        setForm((current) => mergeProfileIntoSetup(
+          current,
+          { ...profile, project_experience: profileBrief },
+          mode,
+          { preserveBrief: briefTouchedRef.current },
+        ));
 
         if (hasResumeAnalysisSource(profile)) {
           const analysisData = await apiRequest('/api/profile/resume-analysis', { method: 'POST' });
@@ -3459,16 +3525,6 @@ function SetupPage({ onStart }) {
 
   const updateForm = (key, value) => {
     setForm((current) => ({ ...current, [key]: value }));
-    // 手动修改模板覆盖的字段后，不再对应任何难度模板
-    if (key in defaultDifficultyPreset.overrides) {
-      setDifficulty(null);
-    }
-    setError('');
-  };
-
-  const applyDifficulty = (preset) => {
-    setDifficulty(preset.key);
-    setForm((current) => ({ ...current, ...preset.overrides }));
     setError('');
   };
 
@@ -3504,43 +3560,22 @@ function SetupPage({ onStart }) {
   };
 
   return (
-    <section className="setup-page">
-      <div className="setup-hero">
-        <div>
-          <p className="eyebrow">Personalized Interview Coach</p>
-          <h1>生成本场专属 AI 面试官</h1>
-          <span>
-            先用少量关键信息确定训练目标，再生成面试官策略、追问方式和评分标准。
-          </span>
-        </div>
-        </div>
+    <section className="setup-page v4-setup-page">
+      <V4PageHeading
+        eyebrow={mode === 'custom' ? 'DESIGN YOUR CHALLENGE' : 'GUIDED SESSION'}
+        title={mode === 'custom' ? '构建你的专属面试。' : '确认本场面试。'}
+        description={mode === 'custom' ? '从经验层级出发，设置面试场景、练习重点与面试官风格。' : `已选择${initialPreset.label}难度，确认目标岗位后即可开始。`}
+      />
 
       {error && <div className="profile-message error">{error}</div>}
 
       <section className="setup-grid">
-        <Card title="面试前配置" icon={<Layers3 size={18} />}>
+        <Card title="本场面试配置" icon={<Layers3 size={18} />} className="v4-setup-card">
           <div className="setup-form">
-            <div className="difficulty-presets">
-              {difficultyPresets.map((preset) => {
-                const isActive = difficulty === preset.key;
-                return (
-                  <button
-                    key={preset.key}
-                    type="button"
-                    className={`difficulty-card${isActive ? ' active' : ''}`}
-                    aria-pressed={isActive}
-                    onClick={() => applyDifficulty(preset)}
-                  >
-                    <strong>{preset.label}</strong>
-                    <span>{preset.summary}</span>
-                    <small>{preset.description}</small>
-                  </button>
-                );
-              })}
-            </div>
-
+            {mode === 'guided' && <div className="v4-selected-preset"><span className="v4-eyebrow">01 / GUIDED SESSION</span><strong>{initialPreset.label}难度</strong><p>{initialPreset.summary}。{initialPreset.description}</p></div>}
+            {mode === 'custom' && <div className="v4-section-intro"><span className="v4-eyebrow">01 / EXPERIENCE & SCENARIO</span><h3>自主难度设置</h3><p>选择适合这次练习的各项参数，配置会用于真实面试。</p></div>}
             <div className="role-input-group">
-              <label htmlFor="setup-target-role">目标岗位</label>
+              <label htmlFor="setup-target-role">{mode === 'custom' ? '02' : '01'} / 目标岗位</label>
               <input
                 id="setup-target-role"
                 value={form.role}
@@ -3576,18 +3611,72 @@ function SetupPage({ onStart }) {
               <small>推荐方向仅供参考，学生可以按真实求职意愿修改。</small>
             </div>
 
-            <button
+            {mode === 'guided' && <button
               type="button"
               className="secondary-action advanced-toggle"
               onClick={() => setShowAdvanced((current) => !current)}
               aria-expanded={showAdvanced}
             >
               <Wrench size={15} />
-              {showAdvanced ? '收起高级配置' : '高级配置'}
+              {showAdvanced ? '收起更多设置' : '展开更多设置'}
               <ChevronDown size={14} className={showAdvanced ? 'advanced-toggle-icon open' : 'advanced-toggle-icon'} />
-            </button>
+            </button>}
 
-            {showAdvanced && (
+            {mode === 'custom' && (
+              <div className="v4-neural-board">
+                <div className="v4-neural-labels"><span>01 / 经验层级</span><span>02 / 配置维度</span><span>03 / 场景选项</span></div>
+                <div className="v4-neural-columns">
+                  <svg className="v4-neural-wires" viewBox="0 0 1000 355" preserveAspectRatio="none" aria-hidden="true">
+                    {customDimensions.map((dimension, index) => (
+                      <path
+                        key={`level-${dimension.key}`}
+                        className={activeDimension === index ? 'active' : ''}
+                        d={`M 230 ${28 + selectedLevelIndex * 97} C 305 ${28 + selectedLevelIndex * 97}, 315 ${28 + index * 66}, 390 ${28 + index * 66}`}
+                      />
+                    ))}
+                    {activeOptions.map((option, index) => (
+                      <path
+                        key={`option-${option}`}
+                        className={selectedOptionIndex === index ? 'active' : ''}
+                        d={`M 610 ${28 + activeDimension * 66} C 690 ${28 + activeDimension * 66}, 690 ${28 + index * 66}, 770 ${28 + index * 66}`}
+                      />
+                    ))}
+                  </svg>
+                  <div className="v4-neural-levels">
+                    {setupOptions.levels.map((level, index) => (
+                      <button key={level} type="button" className={`v4-network-node${form.level === level ? ' chosen' : ''}`} onClick={() => updateForm('level', level)} aria-pressed={form.level === level}>
+                        <small>0{index + 1}</small><b>{level}</b><span>→</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="v4-neural-dimensions">
+                    {customDimensions.map((dimension, index) => (
+                      <button key={dimension.key} type="button" className={`v4-network-node${activeDimension === index ? ' focused' : ''}`} onClick={() => setActiveDimension(index)} aria-pressed={activeDimension === index}>
+                        <b>{dimension.label}</b><span>✓</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="v4-neural-values">
+                    {activeOptions.map((option) => (
+                      <button key={option} type="button" className={`v4-network-node${form[customDimensions[activeDimension].key] === option ? ' chosen' : ''}`} onClick={() => updateForm(customDimensions[activeDimension].key, option)} aria-pressed={form[customDimensions[activeDimension].key] === option}>
+                        <b>{option}</b><span>{form[customDimensions[activeDimension].key] === option ? '✓' : '○'}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="v4-neural-summary">
+                  <span className="v4-eyebrow">YOUR CONFIGURATION / 5 OF 5</span>
+                  <div>{customDimensions.map((dimension, index) => <button key={dimension.key} type="button" onClick={() => setActiveDimension(index)}><small>{dimension.label}</small><b>{form[dimension.key]}</b></button>)}</div>
+                </div>
+                <label className="brief-field v4-neural-brief">
+                  <span>简历 / 项目简介（最多 12,000 字）</span>
+                  <textarea value={form.brief} maxLength={12000} placeholder="可填写你的简历摘要、核心项目、希望重点练习的方向" onChange={(event) => { briefTouchedRef.current = true; updateForm('brief', event.target.value); }} />
+                  <small>{form.brief.length.toLocaleString()} / 12,000</small>
+                </label>
+              </div>
+            )}
+
+            {mode === 'guided' && showAdvanced && (
               <div className="advanced-panel">
                 <OptionGroup
                   label="当前水平"
@@ -3649,6 +3738,13 @@ function SetupPage({ onStart }) {
         </button>
 
       </section>
+      <div className="v4-setup-launch">
+        <div><span className="v4-eyebrow">READY FOR YOUR SESSION</span><strong>{form.role.trim() || '请先确认目标岗位'}</strong><small>{form.interviewType} · {form.intensity} · {form.style}</small></div>
+        <button className="primary-action" onClick={handleStart} disabled={starting || loadingProfile}>
+          <Phone size={17} />
+          {starting ? '正在创建面试…' : '开始电话面试 ↗'}
+        </button>
+      </div>
     </section>
   );
 }
@@ -3715,7 +3811,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const [error, setError] = useState('');
   const [processingStage, setProcessingStage] = useState('');
   const [processingSeconds, setProcessingSeconds] = useState(0);
-  const [voiceProvider, setVoiceProvider] = useState('omni-webrtc');
+  const [interviewMode, setInterviewMode] = useState('text');
+  const [voiceProvider] = useState('aliyun-rtc');
   const [voiceStatus, setVoiceStatus] = useState('idle');
   const [voiceMessage, setVoiceMessage] = useState('点击麦克风开始真实语音通话');
   const [qwenStatus, setQwenStatus] = useState('idle');
@@ -3730,6 +3827,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const [aliyunAgentStatus, setAliyunAgentStatus] = useState('disabled');
   const [aliyunAgentTranscript, setAliyunAgentTranscript] = useState(null);
   const [aliyunSpokenQuestion, setAliyunSpokenQuestion] = useState('');
+  const [aliyunRtcSwitching, setAliyunRtcSwitching] = useState(false);
 
   useEffect(() => {
     if (!processingStage) {
@@ -3795,6 +3893,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const aliyunRtcAgentSubmissionQueueRef = useRef(Promise.resolve());
   const aliyunRtcSubmissionErrorRef = useRef(null);
   const aliyunRtcNextActionRef = useRef('ask_follow_up');
+  const pendingEvaluationRequestsRef = useRef(new Set());
   const activeAgentRef = useRef(null);
   const handleSubmitAnswerRef = useRef(null);
 
@@ -3829,17 +3928,22 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
   const enqueueAliyunRtcAgentTurn = (turn) => {
     if (!turn?.text || turn.speaker !== 'agent' || !turn.end) return;
+    if (aliyunRtcNextActionRef.current === 'opening') return;
     const processedKey = `agent:${turn.turnId}`;
     if (aliyunRtcProcessedTurnsRef.current.has(processedKey)) return;
     aliyunRtcProcessedTurnsRef.current.add(processedKey);
     const candidateSubmission = aliyunRtcSubmissionQueueRef.current;
     const agentId = activeAgentRef.current?.id || '';
+    const callAttempt = aliyunRtcAttemptRef.current;
     aliyunRtcAgentSubmissionQueueRef.current = aliyunRtcAgentSubmissionQueueRef.current
       .then(async () => {
-        // Cloud speech can finish before the candidate answer/evaluation has
-        // committed. Wait so the actual question keeps the right message order.
+        // Cloud speech can finish before the candidate answer has committed.
+        // Wait so the actual question keeps the right message order. Evaluation
+        // continues independently and must not delay the next spoken question.
         await candidateSubmission;
+        if (aliyunRtcAttemptRef.current !== callAttempt) return;
         const latestMessages = await reloadMessages();
+        if (aliyunRtcAttemptRef.current !== callAttempt || activeAgentRef.current?.id !== agentId) return;
         const latestQuestion = findLatestInterviewQuestion(latestMessages);
         if (!shouldPersistAliyunAgentTurn(
           turn,
@@ -3972,10 +4076,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
   };
 
-  const stopAliyunRtcCall = async (message = '阿里云 RTC 通话已断开') => {
+  const stopAliyunRtcCall = async (message = '阿里云 RTC 通话已断开', { flushCandidate = true } = {}) => {
     // Some provider sessions do not emit a final end=true caption. Preserve
     // any buffered candidate speech before pausing or leaving the channel.
-    enqueueAliyunRtcCandidateTurn(aliyunRtcTranscriptAssemblerRef.current.finalize('candidate'));
+    if (flushCandidate) {
+      enqueueAliyunRtcCandidateTurn(aliyunRtcTranscriptAssemblerRef.current.finalize('candidate'));
+    }
     aliyunRtcAttemptRef.current += 1;
     const agentTaskId = aliyunRtcAgentTaskRef.current;
     aliyunRtcAgentTaskRef.current = '';
@@ -3988,12 +4094,13 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setAliyunAgentTranscript(null);
     const leavePromise = session ? session.leave() : Promise.resolve();
     const stopPromise = stopAliyunRtcAgentTask(agentTaskId);
-    await Promise.allSettled([leavePromise, stopPromise]);
+    const [, stopped] = await Promise.allSettled([leavePromise, stopPromise]);
     if (session) {
       recordAliyunRtcDiagnostic('call_stopped', { message: '用户已退出阿里云 RTC 频道' });
     }
     aliyunRtcChannelRef.current = '';
     aliyunRtcTranscriptAssemblerRef.current.reset();
+    return stopped.status === 'fulfilled' ? stopped.value : null;
   };
 
   const waitForAliyunRtcAgentActive = async (initialSession, attempt) => {
@@ -4019,7 +4126,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     throw new Error('RTC AI 智能体启动确认超时，请断开后重试');
   };
 
-  const startAliyunRtcCall = async () => {
+  const startAliyunRtcCall = async ({ afterHandoff = false } = {}) => {
     if (!interviewId || interview?.status === 'completed') {
       setAliyunRtcStatus('idle');
       setAliyunRtcMessage('本场面试已结束，不能重新加入 RTC 频道');
@@ -4027,7 +4134,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       return;
     }
 
-    if (aliyunRtcStatus === 'connected' || aliyunRtcStatus === 'connecting') {
+    if (!afterHandoff && (aliyunRtcStatus === 'connected' || aliyunRtcStatus === 'connecting')) {
       await stopAliyunRtcCall();
       return;
     }
@@ -4050,13 +4157,16 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     aliyunRtcTranscriptAssemblerRef.current.reset();
     aliyunRtcProcessedTurnsRef.current.clear();
     aliyunRtcSubmissionErrorRef.current = null;
-    aliyunRtcNextActionRef.current = 'ask_follow_up';
+    aliyunRtcNextActionRef.current = 'opening';
 
+    let startupPhase = 'messages';
+    const startupStartedAt = Date.now();
     try {
       // A reconnect must use the database-backed question instead of the
       // messages captured by the render that created this callback.
       const latestMessages = await reloadMessages();
       const latestQuestion = findLatestInterviewQuestion(latestMessages);
+      startupPhase = 'token';
       const credentials = await apiRequest(`/api/interviews/${interviewId}/rtc/token`, {
         method: 'POST',
       });
@@ -4071,9 +4181,27 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         metadata: { expires_in: credentials.expires_in },
       });
 
-      setAliyunRtcMessage('正在请求麦克风权限并加入 RTC 频道');
+      startupPhase = 'sdk';
+      setAliyunRtcMessage('正在连接阿里云 RTC 频道');
       const session = await createAliyunRtcAudioSession({
         credentials,
+        isCancelled: () => aliyunRtcAttemptRef.current !== attempt,
+        onStartupStage: (phase) => {
+          if (aliyunRtcAttemptRef.current !== attempt) return;
+          startupPhase = phase;
+          const messages = {
+            join: '正在连接阿里云 RTC 频道',
+            join_retry: '语音网络连接失败，正在自动重试（1/1）',
+            messaging: '正在建立语音字幕通道',
+            microphone: '正在请求麦克风权限',
+            publish: '正在连接麦克风音频',
+          };
+          setAliyunRtcMessage(messages[phase] || '正在准备语音连接');
+          recordAliyunRtcDiagnostic('startup_stage_changed', {
+            message: messages[phase] || '正在准备语音连接',
+            metadata: { phase, elapsed_ms: Date.now() - startupStartedAt },
+          });
+        },
         onConnectionState: ({ state, message }) => {
           if (aliyunRtcAttemptRef.current !== attempt) return;
           if (state === 'connected') setAliyunRtcStatus('connected');
@@ -4166,11 +4294,23 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       aliyunRtcSessionRef.current = session;
       setAliyunRtcStatus('connected');
       if (credentials.ai_agent?.enabled) {
+        startupPhase = 'agent_start';
         setAliyunAgentStatus('starting');
         setAliyunRtcMessage('已加入 RTC，正在启动 AI 面试官');
-        let agentSession = await apiRequest(`/api/interviews/${interviewId}/rtc/agent/start`, {
-          method: 'POST',
-        });
+        let agentSession;
+        try {
+          agentSession = await apiRequest(`/api/interviews/${interviewId}/rtc/agent/start`, {
+            method: 'POST',
+          });
+        } catch (startError) {
+          const awaitingCloudConfirmation = startError.status === 502
+            && String(startError.message || '').includes('启动结果待确认');
+          if (!awaitingCloudConfirmation) throw startError;
+          setAliyunRtcMessage('AI 面试官启动响应较慢，正在自动核对云端状态');
+          setAliyunAgentStatus('starting');
+          const statusResult = await apiRequest(`/api/interviews/${interviewId}/rtc/session`);
+          agentSession = await waitForAliyunRtcAgentActive(statusResult, attempt);
+        }
         if (agentSession.status !== 'active') {
           setAliyunRtcMessage('智能体任务已提交，正在确认云端状态');
           agentSession = await waitForAliyunRtcAgentActive(agentSession, attempt);
@@ -4211,12 +4351,20 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       stopAliyunRtcAgentTask(agentTaskId);
       setAliyunRtcStatus('error');
       setAliyunAgentStatus('error');
-      setAliyunRtcMessage(requestError.message || '阿里云 RTC 连接失败');
-      setError(requestError.message || '阿里云 RTC 连接失败');
+      const startErrorMessage = formatAliyunRtcStartError(requestError);
+      setAliyunRtcMessage(startErrorMessage);
+      setError(startErrorMessage);
       recordAliyunRtcDiagnostic('call_start_failed', {
         level: 'error',
         message: '阿里云 RTC 启动失败',
-        metadata: { stage: aliyunRtcChannelRef.current ? 'join_or_publish' : 'token' },
+        metadata: {
+          phase: requestError.rtcStage || startupPhase,
+          elapsed_ms: Date.now() - startupStartedAt,
+          error_name: requestError.name || 'Error',
+          error_code: String(requestError.code || requestError.status || ''),
+          browser_online: navigator.onLine,
+          reason: startErrorMessage,
+        },
       });
     }
   };
@@ -4255,7 +4403,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const activeAgent = agents.find((agent) => agent.status === 'active') || agents.find((agent) => agent.status !== 'completed') || agents[0] || null;
   activeAgentRef.current = activeAgent;
   const currentAgentName = activeAgent?.agent_name || liveInterview.currentAgent;
-  const persistedQuestion = findLatestInterviewQuestion(messages)?.content || createInitialQuestion(interview, activeAgent);
+  const latestInterviewQuestion = findLatestInterviewQuestion(messages);
+  const persistedQuestion = latestInterviewQuestion?.content || createInitialQuestion(interview, activeAgent);
   const currentQuestion = voiceProvider === 'aliyun-rtc' && aliyunSpokenQuestion
     ? aliyunSpokenQuestion
     : persistedQuestion;
@@ -5380,10 +5529,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     });
 
     if (senderType === 'candidate') {
-      await apiRequest(`/api/interviews/${interviewId}/evaluations`, {
-        method: 'POST',
-        body: JSON.stringify({ message_id: messageData.message.id }),
-      }).catch(() => {});
+      evaluateAnswerInBackground(messageData.message.id);
     }
 
     await reloadMessages();
@@ -5773,6 +5919,30 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
   };
 
+  const evaluateAnswerInBackground = (messageId) => {
+    let trackedRequest;
+    trackedRequest = apiRequest(`/api/interviews/${interviewId}/evaluations`, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: messageId }),
+    })
+      .catch((evaluationError) => {
+        // A missing per-question evaluation should not hold the candidate on
+        // the current screen. The final report still waits for tracked work,
+        // and the backend supplies a local fallback for provider failures.
+        console.warn('Background answer evaluation failed:', evaluationError);
+        return null;
+      })
+      .finally(() => pendingEvaluationRequestsRef.current.delete(trackedRequest));
+    pendingEvaluationRequestsRef.current.add(trackedRequest);
+    return trackedRequest;
+  };
+
+  const waitForPendingEvaluations = async () => {
+    while (pendingEvaluationRequestsRef.current.size) {
+      await Promise.all([...pendingEvaluationRequestsRef.current]);
+    }
+  };
+
   const handleSubmitAnswer = async (submittedAnswer = null, options = {}) => {
     const content = typeof submittedAnswer === 'string' ? submittedAnswer.trim() : answer.trim();
     if (!content || !interviewId || (submitting && options.source !== 'aliyun_rtc')) return;
@@ -5794,11 +5964,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         }),
       });
       if (answerData.duplicate) setProcessingStage('本轮语音回答已保存，正在继续生成下一题');
-      setProcessingStage('正在生成本题评价');
-      await apiRequest(`/api/interviews/${interviewId}/evaluations`, {
-        method: 'POST',
-        body: JSON.stringify({ message_id: answerData.message.id }),
-      });
+      const evaluationRequest = evaluateAnswerInBackground(answerData.message.id);
       const nextAction = decideNextInterviewAction({
         interview,
         agents,
@@ -5849,37 +6015,60 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         }
       }
       if (nextAction.action === 'switch_agent' && activeAgent && nextAction.nextAgent) {
-        setProcessingStage(`正在切换到${nextAction.nextAgent.agent_name || '下一位面试官'}`);
-        await apiRequest(`/api/interviews/${interviewId}/messages`, {
-          method: 'POST',
-          body: JSON.stringify({
-            agent_id: activeAgent.id,
-            sender_type: 'agent',
-            message_type: 'system',
-            content: nextAction.closing,
-          }),
-        });
-        await updateAgentStatus(activeAgent, 'completed');
-        await updateAgentStatus(nextAction.nextAgent, 'active');
-        const openingData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
-          method: 'POST',
-          body: JSON.stringify({
-            agent_id: nextAction.nextAgent.id,
-            sender_type: 'agent',
-            message_type: 'question',
-            content: nextAction.opening,
-          }),
-        });
-        await reloadAgents();
-        if (voiceProvider === 'qwen') {
-          playQwenSpeechInBackground(openingData.message.content);
-        }
-        if (voiceProvider === 'aliyun-rtc') {
-          await speakAliyunRtcMessage(openingData.message);
+        const prepareNextAgent = async () => {
+          setProcessingStage(`正在切换到${nextAction.nextAgent.agent_name || '下一位面试官'}`);
+          await apiRequest(`/api/interviews/${interviewId}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+              agent_id: activeAgent.id,
+              sender_type: 'agent',
+              message_type: 'system',
+              content: nextAction.closing,
+            }),
+          });
+          await updateAgentStatus(activeAgent, 'completed');
+          await updateAgentStatus(nextAction.nextAgent, 'active');
+          const openingData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+              agent_id: nextAction.nextAgent.id,
+              sender_type: 'agent',
+              message_type: 'question',
+              content: nextAction.opening,
+            }),
+          });
+          await reloadAgents();
+          await reloadMessages();
+          if (voiceProvider === 'qwen') playQwenSpeechInBackground(openingData.message.content);
+        };
+        if (voiceProvider === 'aliyun-rtc' && aliyunRtcSessionRef.current) {
+          setAliyunRtcSwitching(true);
+          aliyunRtcNextActionRef.current = 'switch_agent';
+          // stop increments the generation once; further stop/navigation cancels
+          // reconnect. A fresh client also fences out the old Agent's captions.
+          const handoffAttempt = aliyunRtcAttemptRef.current + 1;
+          try {
+            setProcessingStage('正在结束上一位语音面试官的对话');
+            await handoffAliyunRtcSession({
+              // The answer triggering this handoff is already saved. Do not
+              // submit late partial captions as an answer to the new role.
+              stop: () => stopAliyunRtcCall('正在切换语音面试官', { flushCandidate: false }),
+              prepare: prepareNextAgent,
+              isCancelled: () => aliyunRtcAttemptRef.current !== handoffAttempt,
+              start: () => startAliyunRtcCall({ afterHandoff: true }),
+            });
+          } finally {
+            setAliyunRtcSwitching(false);
+          }
+        } else {
+          await prepareNextAgent();
         }
       }
       if (nextAction.action === 'finish_interview') {
-        setProcessingStage('三轮面试已完成，正在生成综合报告');
+        setProcessingStage('三轮面试已完成，正在收尾评价');
+        await evaluationRequest;
+        await waitForPendingEvaluations();
+        setProcessingStage('正在生成综合报告');
         await stopAliyunRtcCall('面试已完成');
         stopRealtimeCall();
         stopOmniRealtimeCall();
@@ -5899,7 +6088,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           await updateAgentStatus(activeAgent, 'completed');
         }
         await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
-        await apiRequest(`/api/interviews/${interviewId}/report`, { method: 'POST' });
         onReportReady(interviewId);
         return;
       }
@@ -5938,9 +6126,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       if (!finalMessages.some((item) => item.sender_type === 'candidate' && String(item.content || '').trim())) {
         throw new Error('未识别到候选人回答，本次面试尚未完成。请重新接通阿里云 RTC 并确认页面出现实时转写后再结束。');
       }
+      if (pendingEvaluationRequestsRef.current.size) {
+        setProcessingStage('正在完成最后的单题评价');
+        await waitForPendingEvaluations();
+      }
       setProcessingStage('正在结束面试并生成综合报告');
       await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
-      await apiRequest(`/api/interviews/${interviewId}/report`, { method: 'POST' });
       onReportReady(interviewId);
     } catch (requestError) {
       setError(requestError.message);
@@ -5949,6 +6140,66 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       setProcessingStage('');
     }
   };
+
+  const interviewQuestions = messages.filter((item) => (
+    item.sender_type === 'agent'
+    && item.message_type !== 'system'
+    && String(item.content || '').trim()
+  ));
+  const savedAnswerCount = messages.filter((item) => (
+    item.sender_type === 'candidate' && String(item.content || '').trim()
+  )).length;
+  const currentQuestionNumber = Math.max(1, interviewQuestions.length);
+  const providerStatus = voiceProvider === 'aliyun-rtc'
+    ? aliyunRtcStatus
+    : voiceProvider === 'openai'
+      ? voiceStatus
+      : voiceProvider === 'qwen'
+        ? qwenStatus
+        : omniStatus;
+  const voiceConnected = ['connected', 'listening', 'speaking'].includes(providerStatus);
+  const voiceAction = voiceProvider === 'aliyun-rtc'
+    ? startAliyunRtcCall
+    : voiceProvider === 'openai'
+      ? startRealtimeCall
+      : voiceProvider === 'qwen'
+        ? startQwenVoiceConversation
+        : voiceProvider === 'omni-webrtc'
+          ? startOmniWebrtcCall
+          : startOmniRealtimeCall;
+  const voiceActionDisabled = finishing
+    || aliyunRtcSwitching
+    || interview?.status === 'completed'
+    || (voiceProvider === 'openai' && voiceStatus === 'connecting')
+    || (voiceProvider === 'qwen' && (qwenStatus === 'connecting' || submitting))
+    || (!['aliyun-rtc', 'openai', 'qwen'].includes(voiceProvider) && omniStatus === 'connecting');
+  const voiceStatusLabel = voiceProvider === 'aliyun-rtc'
+    ? aliyunRtcStatus === 'connected' ? '阿里云 RTC 已接通' : aliyunRtcStatus === 'connecting' ? '正在连接阿里云 RTC' : aliyunRtcStatus === 'error' ? '阿里云 RTC 连接失败' : '语音通话待接入'
+    : voiceProvider === 'openai'
+      ? voiceStatus === 'connected' ? '实时语音已接通' : voiceStatus === 'connecting' ? '正在连接实时语音' : voiceStatus === 'error' ? '实时语音连接失败' : '语音通话待接入'
+      : voiceProvider === 'qwen'
+        ? qwenStatus === 'listening' ? '正在聆听回答' : qwenStatus === 'speaking' ? '面试官正在提问' : qwenStatus === 'connecting' ? '正在建立语音对话' : qwenStatus === 'error' ? '语音对话失败' : '语音通话待接入'
+        : omniStatus === 'listening' ? '正在聆听回答' : omniStatus === 'speaking' ? '面试官正在提问' : omniStatus === 'connecting' ? '正在连接语音通话' : omniStatus === 'error' ? '语音通话连接失败' : omniStatus === 'connected' ? '语音通话已接通' : '语音通话待接入';
+  const voiceStatusMessage = voiceProvider === 'aliyun-rtc'
+    ? aliyunRtcMessage
+    : voiceProvider === 'openai'
+      ? voiceMessage
+      : voiceProvider === 'qwen'
+        ? qwenMessage
+        : omniMessage;
+
+  const processingNotice = processingStage && (
+    <div className="interview-processing v4-interview-processing" role="status" aria-live="polite">
+      <Clock3 size={18} />
+      <div>
+        <strong>{processingStage}</strong>
+        <span>
+          已等待 {processingSeconds} 秒
+          {processingSeconds >= 12 ? '，AI 服务响应较慢，系统正在继续处理。' : '，请不要重复提交。'}
+        </span>
+      </div>
+    </div>
+  );
 
   if (!interviewId) {
     return (
@@ -5967,206 +6218,131 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   }
 
   return (
-    <section className="phone-page">
-      {error && <div className="profile-message error">{error}</div>}
-      <div className="phone-hero">
-        <div className="call-stage">
-          <div className="call-status">
-            <span className="live-dot" />
-            AI 电话面试进行中
-          </div>
-
-          <div className="caller-card">
-            <div className="caller-orbit">
-              <div className="voice-ring ring-one" />
-              <div className="voice-ring ring-two" />
-              <div className="caller-avatar">
-                <Headphones size={42} />
-              </div>
-            </div>
-          <div className="caller-copy">
-            <p className="eyebrow">当前接入</p>
-              <h1>{currentAgentName}</h1>
-              <span>正在围绕项目复杂度进行追问</span>
-            </div>
-          </div>
-
-          <div className="call-question">
-            <div>
-              <Sparkles size={16} />
-              <strong>当前问题</strong>
-            </div>
-            <p>{currentQuestion}</p>
-          </div>
-
-          <div className="voice-mode-dropdown">
-            <select
-              className="dropdown-trigger"
-              aria-label="语音模式"
-              value={voiceProvider}
-              onChange={(event) => setVoiceProvider(event.target.value)}
-            >
-              <option value="aliyun-rtc">阿里云 RTC AI</option>
-              <option value="omni-webrtc">千问官方 WebRTC</option>
-              <option value="openai">OpenAI 实时语音</option>
-              <option value="qwen">千问 CosyVoice 对话</option>
-              <option value="omni">Qwen-Omni API 录音</option>
-            </select>
-          </div>
-
-          <div className="call-controls" aria-label="电话面试控制">
-            <button
-              className={`control-button ${
-                voiceProvider === 'aliyun-rtc'
-                  ? aliyunRtcStatus === 'connected' ? 'primary' : ''
-                  : voiceProvider === 'openai'
-                  ? voiceStatus === 'connected' ? 'primary' : ''
-                  : voiceProvider === 'qwen'
-                    ? qwenStatus === 'listening' ? 'primary' : ''
-                    : omniStatus === 'listening' || omniStatus === 'connected' || omniStatus === 'speaking' ? 'primary' : ''
-              }`}
-              onClick={voiceProvider === 'aliyun-rtc' ? startAliyunRtcCall : voiceProvider === 'openai' ? startRealtimeCall : voiceProvider === 'qwen' ? startQwenVoiceConversation : voiceProvider === 'omni-webrtc' ? startOmniWebrtcCall : startOmniRealtimeCall}
-              disabled={finishing || interview?.status === 'completed' || (voiceProvider === 'aliyun-rtc' ? false : voiceProvider === 'openai' ? voiceStatus === 'connecting' : voiceProvider === 'qwen' ? qwenStatus === 'connecting' || submitting : omniStatus === 'connecting')}
-              title={voiceProvider === 'aliyun-rtc' ? aliyunRtcStatus === 'connected' || aliyunRtcStatus === 'connecting' ? '断开阿里云 RTC 通话' : '加入阿里云 RTC 通话' : voiceProvider === 'openai' ? voiceStatus === 'connected' ? '断开实时语音' : '开始实时语音' : voiceProvider === 'qwen' ? qwenStatus === 'listening' ? '停止聆听' : '开始聆听候选人回答' : voiceProvider === 'omni-webrtc' ? omniStatus === 'connected' || omniStatus === 'listening' || omniStatus === 'speaking' ? '断开 Qwen 官方 WebRTC 通话' : '开始 Qwen 官方 WebRTC 通话' : omniStatus === 'listening' ? '停止录音并提交 Qwen-Omni' : '开始 Qwen-Omni 录音'}
-            >
-              <Mic size={20} />
-            </button>
-            <button className="control-button danger" onClick={handleFinish} disabled={finishing || submitting}>
-              <PhoneOff size={20} />
-            </button>
-          </div>
-          {voiceProvider === 'aliyun-rtc' ? (
-            <div className={`voice-status ${aliyunRtcStatus}`}>
-              <span>{aliyunRtcStatus === 'connected' ? '阿里云 RTC 已接通' : aliyunRtcStatus === 'connecting' ? '正在连接阿里云 RTC' : aliyunRtcStatus === 'error' ? '阿里云 RTC 连接失败' : '阿里云 RTC 待接入'}</span>
-              <small>{aliyunRtcMessage}</small>
-              {aliyunRtcStatus === 'connected' && <small>频道内远端成员：{aliyunRtcRemoteUsers}</small>}
-              {aliyunRtcStatus === 'connected' && (
-                <small>
-                  AI 面试官：{{
-                    disabled: '待配置',
-                    starting: '启动中',
-                    active: '已连接',
-                    listening: '聆听中',
-                    thinking: '思考中',
-                    processing: '思考中',
-                    responding: '回答中',
-                    error: '异常',
-                  }[aliyunAgentStatus] || aliyunAgentStatus}
-                </small>
-              )}
-              {aliyunAgentTranscript?.text && (
-                <small>
-                  {aliyunAgentTranscript.speaker}：{aliyunAgentTranscript.text}
-                  {!aliyunAgentTranscript.end ? '…' : ''}
-                </small>
-              )}
-            </div>
-          ) : voiceProvider === 'openai' ? (
-            <div className={`voice-status ${voiceStatus}`}>
-              <span>{voiceStatus === 'connected' ? '实时语音已接通' : voiceStatus === 'connecting' ? '正在连接实时语音' : voiceStatus === 'error' ? '实时语音连接失败' : '实时语音待接入'}</span>
-              <small>{voiceMessage}</small>
-            </div>
-          ) : voiceProvider === 'qwen' ? (
-            <div className={`voice-status ${qwenStatus}`}>
-              <span>{qwenStatus === 'listening' ? '正在聆听回答' : qwenStatus === 'speaking' ? '千问实时播报中' : qwenStatus === 'connecting' ? '正在处理千问对话' : qwenStatus === 'error' ? '千问对话失败' : '千问实时对话待接入'}</span>
-              <small>{qwenMessage}</small>
-            </div>
-          ) : (
-            <div className={`voice-status ${omniStatus}`}>
-              <span>{voiceProvider === 'omni-webrtc' ? omniStatus === 'listening' ? 'Qwen WebRTC 正在聆听' : omniStatus === 'speaking' ? 'Qwen WebRTC 正在回复' : omniStatus === 'connecting' ? 'Qwen WebRTC 正在连接' : omniStatus === 'error' ? 'Qwen WebRTC 连接失败' : omniStatus === 'connected' ? 'Qwen WebRTC 已接通' : 'Qwen WebRTC 待接入' : omniStatus === 'listening' ? 'Omni 正在接收麦克风' : omniStatus === 'speaking' ? 'Omni 正在回复' : omniStatus === 'connecting' ? 'Omni 正在处理' : omniStatus === 'error' ? 'Omni 连接失败' : omniStatus === 'connected' ? 'Omni 本轮完成' : 'Omni API 待接入'}</span>
-              <small>{omniMessage}</small>
-              <div className="omni-signal-row" aria-label={voiceProvider === 'omni-webrtc' ? 'Qwen WebRTC 信号' : 'Omni 实验探针'}>
-                <span className={omniSignals.text ? 'ok' : ''}>{voiceProvider === 'omni-webrtc' ? '字幕事件' : '文本'}</span>
-                <span className={omniSignals.audioField ? 'ok' : ''}>{voiceProvider === 'omni-webrtc' ? '音频轨道' : '音频字段'}</span>
-                <span className={omniSignals.playableAudio ? 'ok' : ''}>{voiceProvider === 'omni-webrtc' ? '远端播放' : '可播放音频'}</span>
-              </div>
-              {omniAudioUrl && (
-                <audio
-                  ref={omniAudioElementRef}
-                  className="omni-audio-player"
-                  src={omniAudioUrl}
-                  controls
-                  onPlay={() => setOmniMessage('正在回放 Qwen-Omni 音频')}
-                  onEnded={() => setOmniMessage('Omni 音频回放完成，可继续说话')}
-                />
-              )}
-            </div>
-          )}
-        </div>
-
-        <aside className="call-sidebar">
-          <div className="session-card">
-            <span>面试状态</span>
-            <strong>{interview?.status === 'completed' ? '已结束' : '进行中'}</strong>
-            <p>{interview?.target_role} · {interview?.interview_type || '综合模拟'}</p>
-          </div>
-          <div className="signal-grid">
-            <div className="signal-card">
-              <span>真实消息</span>
-              <strong>{messages.length}</strong>
-              <small>已写入后端</small>
-            </div>
-            <div className="signal-card">
-              <span>候选回答</span>
-              <strong>{messages.filter((item) => item.sender_type === 'candidate').length}</strong>
-              <small>已触发单轮评价</small>
-            </div>
-          </div>
-        </aside>
+    <section className={`phone-page v4-phone-page v4-interview-page ${interviewMode}-mode`}>
+      <div className="v4-interview-modebar">
+        <span>{interviewMode === 'text' ? '01 / 文字面试' : '02 / VOICE INTERVIEW'}</span>
+        <span>{interviewMode === 'text' ? '对话与回答实时保存' : '语音与文字共享本场面试进度'}</span>
       </div>
+      <V4PageHeading
+        eyebrow={interviewMode === 'text' ? 'A CONVERSATION FOR GROWTH' : ''}
+        title={interviewMode === 'text' ? '专注此刻，自信表达。' : '听见问题，从容作答。'}
+        description={interviewMode === 'text' ? `${interview?.target_role || '面试练习'} · ${interview?.interview_type || '综合模拟'} · 本场内容实时保存` : undefined}
+        action={interviewMode === 'text' ? <button className="v4-outline-action" type="button" onClick={handleFinish} disabled={finishing || submitting}>{finishing ? '正在结束…' : '结束面试 ↗'}</button> : <button className="v4-outline-action" type="button" onClick={() => setInterviewMode('text')}>转聊天框 ▤</button>}
+      />
+      {error && <div className="profile-message error">{error}</div>}
 
-      <section className="phone-grid">
-        <Card title="实时语音转写" icon={<MessageSquareText size={18} />}>
-          <div className="transcript-list">
-            {messages.map((item) => (
-              <TranscriptMessage item={item} key={item.id} />
-            ))}
+      {interviewMode === 'text' ? (
+        <section className="v4-text-interview" aria-label="文字面试">
+          <header className="v4-text-interview-head">
+            <div>
+              <span className="v4-interview-live-dot" />
+              <strong>{currentAgentName}</strong>
+              <small>/ {interview?.experience_level || '标准'} · {interview?.interview_type || '综合模拟'}</small>
+            </div>
+            <button className="v4-outline-action" type="button" onClick={() => setInterviewMode('voice')}>转语音 ♪</button>
+          </header>
+          <div className="v4-chat-messages">
+            {messages.map((item) => {
+              const isCandidate = item.sender_type === 'candidate' || item.type === 'candidate';
+              const text = item.content || item.text;
+              if (!String(text || '').trim()) return null;
+              return (
+                <article className={`v4-chat-message ${isCandidate ? 'candidate' : 'agent'}`} key={item.id || `${item.created_at}-${text}`}>
+                  <div className="v4-chat-avatar">{isCandidate ? '我' : <V4Logo />}</div>
+                  <div>
+                    <span>{isCandidate ? '我的回答' : item.agent_name || item.speaker || 'Astra 面试官'}</span>
+                    <p>{text}</p>
+                  </div>
+                </article>
+              );
+            })}
+            {!messages.length && <div className="v4-chat-empty">面试官正在准备第一个问题…</div>}
           </div>
-          <div className="reply-box">
+          <div className="v4-chat-compose">
             <textarea
+              aria-label="输入面试回答"
               value={answer}
               onChange={(event) => setAnswer(event.target.value)}
-              placeholder="输入候选人回答，提交后会保存消息、生成单轮评价和下一条智能追问。"
+              placeholder="输入你的回答，让面试官了解你的思考…"
             />
-            <button aria-label="提交回答" onClick={handleSubmitAnswer} disabled={submitting || finishing || !answer.trim()}>
-              <Send size={15} />
+            <button type="button" onClick={handleSubmitAnswer} disabled={submitting || finishing || !answer.trim()}>
+              <span>发送</span><Send size={16} />
             </button>
           </div>
-          {processingStage && (
-            <div className="interview-processing" role="status" aria-live="polite">
-              <Clock3 size={18} />
-              <div>
-                <strong>{processingStage}</strong>
-                <span>
-                  已等待 {processingSeconds} 秒
-                  {processingSeconds >= 12 ? '，AI 服务响应较慢，系统会自动尝试备用模型或使用本地兜底。' : '，请不要重复提交。'}
-                </span>
-              </div>
+          {processingNotice}
+        </section>
+      ) : (
+        <div className="v4-voice-interview-layout">
+          <section className="v4-voice-stage" aria-label="语音面试">
+            <div className="v4-voice-stage-top">
+              <span><i />独立语音面试</span>
+              <span>第 {currentQuestionNumber} 题 · 已保存 {savedAnswerCount} 个回答</span>
             </div>
-          )}
-        </Card>
+            <div className={`v4-voice-avatar ${voiceConnected ? 'active' : ''}`}><V4Logo /></div>
+            <h2>{currentAgentName}</h2>
+            <p className="v4-voice-subtitle">{voiceStatusLabel}</p>
+            <div className={`v4-sound-wave ${voiceConnected ? 'active' : ''}`} aria-hidden="true">
+              {Array.from({ length: 23 }, (_, index) => <i key={index} style={{ '--wave-index': index }} />)}
+            </div>
+            <div className="v4-voice-question">
+              <span>本轮问题</span>
+              <p>{currentQuestion}</p>
+            </div>
+            <div className="v4-voice-controls" aria-label="语音面试控制">
+              <button
+                className={voiceConnected ? 'danger' : 'primary'}
+                type="button"
+                onClick={voiceConnected ? handleFinish : voiceAction}
+                disabled={voiceConnected ? finishing || submitting : voiceActionDisabled}
+              >
+                <span>{voiceConnected || providerStatus === 'connecting' ? <PhoneOff size={21} /> : <Mic size={21} />}</span>
+                {voiceConnected ? finishing ? '正在结束' : '结束面试' : providerStatus === 'connecting' ? '取消接入' : '开始回答'}
+              </button>
+            </div>
+            <p className="v4-voice-status-copy">{voiceStatusMessage}</p>
+            {processingNotice}
 
-        <Card title="面试官接入队列" icon={<Radio size={18} />}>
-          <AgentRoster agents={agents} currentAgent={currentAgentName} />
-        </Card>
-
-        <Card title="追问路线" icon={<CircleDot size={18} />} className="question-route-panel">
-          <div className="question-route">
-            {['项目背景', '方案取舍', '结果指标', '复盘改进'].map((item, index) => (
-              <div className={index === 1 ? 'current' : ''} key={item}>
-                <span>{String(index + 1).padStart(2, '0')}</span>
-                <strong>{item}</strong>
+            <details className="v4-live-caption">
+              <summary>实时字幕 <span>{messages.length ? `最近 ${Math.min(messages.length, 6)} 条` : '等待语音内容'}</span></summary>
+              <div>
+                {messages.slice(-6).map((item) => <TranscriptMessage item={item} key={item.id} />)}
+                {!messages.length && <p>接通语音后，识别到的问答会显示在这里。</p>}
               </div>
-            ))}
-          </div>
-        </Card>
-      </section>
-      <div className="finish-bar">
-        <button className="primary-action" onClick={handleFinish} disabled={finishing || submitting}>
-          <FileText size={17} />
-          {finishing ? `生成报告中（${processingSeconds} 秒）` : '结束面试并生成报告'}
-        </button>
-      </div>
+            </details>
+
+            <details className="v4-voice-settings">
+              <summary>连接详情 <ChevronDown size={16} /></summary>
+              <div className="v4-voice-settings-body">
+                <strong>阿里云 RTC 实时语音</strong>
+                <small>{voiceStatusLabel}</small>
+                {aliyunRtcStatus === 'connected' && <small>远端成员 {aliyunRtcRemoteUsers} · AI 面试官 {aliyunAgentStatus}</small>}
+                {aliyunAgentTranscript?.text && <small>{aliyunAgentTranscript.speaker}：{aliyunAgentTranscript.text}{!aliyunAgentTranscript.end ? '…' : ''}</small>}
+              </div>
+            </details>
+          </section>
+
+          <aside className="v4-voice-progress">
+            <p className="eyebrow">SESSION NOTES</p>
+            <h2>你的语音进度</h2>
+            <p>文字与语音共享本场面试，切换模式会保留已保存的回答。</p>
+            <div className="v4-agent-progress">
+              {agents.map((agent, index) => {
+                const name = agent.agent_name || agent.name;
+                const active = name === currentAgentName;
+                const completed = agent.status === 'completed';
+                return (
+                  <div className={`v4-agent-progress-item ${active ? 'current' : ''} ${completed ? 'completed' : ''}`} key={agent.id || name}>
+                    <span>{completed ? '✓' : String(index + 1).padStart(2, '0')}</span>
+                    <div><strong>{name}</strong><small>{active ? '当前面试官' : completed ? '已完成' : '待接入'}</small></div>
+                  </div>
+                );
+              })}
+            </div>
+            {!agents.length && <div className="v4-voice-tip">面试官队列加载完成后会显示在这里。</div>}
+            <div className="v4-voice-tip">点击“开始回答”接入实时语音，说完后系统会保存回答并继续追问。</div>
+          </aside>
+        </div>
+      )}
     </section>
   );
 }
@@ -6180,6 +6356,7 @@ function ReportPage({ interviewId, user, onBackToList }) {
 
   useEffect(() => {
     let mounted = true;
+    let refreshTimer;
 
     if (!interviewId) {
       setLoading(false);
@@ -6190,19 +6367,28 @@ function ReportPage({ interviewId, user, onBackToList }) {
 
     setLoading(true);
     setError('');
-    apiRequest(`/api/interviews/${interviewId}/report`)
-      .then((data) => {
-        if (mounted) setReportData(data.report);
-      })
-      .catch((requestError) => {
-        if (mounted) setError(requestError.message);
-      })
-      .finally(() => {
-        if (mounted) setLoading(false);
-      });
+    const loadReport = () => {
+      apiRequest(`/api/interviews/${interviewId}/report`)
+        .then((data) => {
+          if (!mounted) return;
+          setReportData(data.report);
+          setLoading(false);
+          if (data.report?.generation_status === 'queued') {
+            refreshTimer = window.setTimeout(loadReport, 2000);
+          }
+        })
+        .catch((requestError) => {
+          if (mounted) {
+            setError(requestError.message);
+            setLoading(false);
+          }
+        });
+    };
+    loadReport();
 
     return () => {
       mounted = false;
+      window.clearTimeout(refreshTimer);
     };
   }, [interviewId]);
 
@@ -6225,7 +6411,7 @@ function ReportPage({ interviewId, user, onBackToList }) {
       <section className="report-page">
         <div className="empty-state">
           <strong>还没有可查看的真实报告</strong>
-          <span>完成一场面试后，报告页会读取 `GET /api/interviews/:id/report`。</span>
+          <span>完成一场面试后，可在历史记录中查看复盘。</span>
         </div>
       </section>
     );
@@ -6239,6 +6425,14 @@ function ReportPage({ interviewId, user, onBackToList }) {
     return <div className="profile-message error">{error}</div>;
   }
 
+  if (reportData?.generation_status === 'queued') {
+    return <div className="v4-report-wait" role="status"><Clock3 size={24} /><strong>面试已结束，正在生成复盘报告</strong><span>报告完成后会自动显示。你可以返回历史记录，稍后再查看。</span>{onBackToList && <button type="button" className="secondary-action" onClick={onBackToList}>返回历史记录</button>}</div>;
+  }
+
+  if (reportData?.generation_status === 'failed') {
+    return <div className="v4-report-wait" role="alert"><AlertTriangle size={24} /><strong>报告生成失败</strong><span>面试记录已经保存，可以重试生成报告。</span><button type="button" className="primary-action" onClick={regenerateReport} disabled={regenerating}>{regenerating ? '重试中…' : '重新生成报告'}</button>{retryError && <span>{retryError}</span>}</div>;
+  }
+
   const currentReport = reportToViewModel(reportData, user);
   const radarData = currentReport.radar;
   const metrics = currentReport.metrics;
@@ -6250,161 +6444,83 @@ function ReportPage({ interviewId, user, onBackToList }) {
       ? (currentReport.fallback ? '已生成（兜底）' : 'AI 已生成')
       : currentReport.generationStatus;
 
+  const evaluatedInterviewers = currentReport.interviewers.filter((item) => item.evaluated);
+  const unevaluatedInterviewers = currentReport.interviewers.filter((item) => !item.evaluated);
+  const evidenceNote = reportEvidenceNote(currentReport.timeline);
+
   return (
-    <section className="report-page">
-      {onBackToList && (
-        <button type="button" className="secondary-action report-back-action" onClick={onBackToList}>
-          ← 返回历史记录
-        </button>
-      )}
-      <header className="summary-panel">
-        <div className="candidate-block">
-          <div className="avatar">
-            <UserRound size={34} />
-          </div>
-          <div>
-            <div className="eyebrow">综合复盘报告</div>
-            <h1>AI 智能面试综合复盘报告</h1>
-            <dl className="candidate-meta">
-              <div>
-                <dt>候选人</dt>
-                <dd>{currentReport.candidate}</dd>
-              </div>
-              <div>
-                <dt>应聘岗位</dt>
-                <dd>{currentReport.role}</dd>
-              </div>
-              <div>
-                <dt>报告来源</dt>
-                <dd>{!currentReport.hasEvidence ? `证据校验 · ${currentReport.model}` : currentReport.fallback ? `本地规则兜底 · ${currentReport.model}` : `${currentReport.provider} · ${currentReport.model}`}</dd>
-              </div>
-              <div>
-                <dt>报告编号</dt>
-                <dd>{currentReport.interviewId}</dd>
-              </div>
-            </dl>
-          </div>
+    <section className="report-page v4-report-page report-studio">
+      <V4PageHeading
+        eyebrow="REFLECT. REFINE. REPEAT."
+        title="本场面试复盘"
+        description="看见这一次的表现，找到下一次的练习方向。"
+        action={onBackToList && <button type="button" className="secondary-action" onClick={onBackToList}>← 返回历史记录</button>}
+      />
+
+      <header className="report-overview">
+        <div className="report-overview-copy">
+          <span className="report-kicker">YOUR INTERVIEW REVIEW</span>
+          <h2>{currentReport.role}</h2>
+          <div className="report-session-meta"><span>{currentReport.candidate}</span><span>{currentReport.generatedAt}</span><span>{reportStatusLabel}</span></div>
+          <p className="report-lead">{currentReport.summary}</p>
+          <div className="report-evidence-note"><CircleDot size={15} /><span>{evidenceNote}</span></div>
         </div>
-        <div className="decision-badge">
-          <span>{currentReport.result}</span>
-          <strong>{currentReport.grade}</strong>
-          <small>{currentReport.hasEvidence ? `综合评分 ${currentReport.score}/100` : '综合评分 未生成'}</small>
+        <div className="report-score-card">
+          <span>本次作答评分</span>
+          <div><strong>{currentReport.hasEvidence ? currentReport.score : '—'}</strong>{currentReport.hasEvidence && <small>/ 100</small>}</div>
+          <span className="report-grade">{currentReport.hasEvidence ? `等级 ${currentReport.grade} · ${currentReport.result}` : '证据不足 · 未评分'}</span>
+          <p>{currentReport.timeline.length} 条已保存回答 · {evaluatedInterviewers.length} 位面试官有评价</p>
         </div>
       </header>
 
-      {currentReport.fallback && (
-        <div className="report-fallback-notice">
-          <div>
-            <strong>当前报告由本地评分规则生成</strong>
-            <span>模型服务暂时不可用，报告仍可用于复盘；网络恢复后可以重新尝试 AI 生成。</span>
-          </div>
-          <button type="button" onClick={regenerateReport} disabled={regenerating}>
-            {regenerating ? 'AI 重新生成中...' : '重新尝试 AI 生成'}
-          </button>
-        </div>
-      )}
-      {retryError && <p className="profile-message error report-retry-error">{retryError}</p>}
+      {currentReport.fallback && <div className="report-fallback-notice"><div><strong>当前为本地规则评分</strong><span>AI 服务暂时不可用，可保留本次复盘或重新生成。</span></div><button type="button" onClick={regenerateReport} disabled={regenerating}>{regenerating ? '正在重新生成…' : '重新尝试 AI 生成'}</button></div>}
+      {retryError && <p className="profile-message error">{retryError}</p>}
 
-      <section className="kpi-grid">
-        <div className="kpi-item">
-          <CircleDot size={16} />
-          <span>报告状态</span>
-          <strong>{reportStatusLabel}</strong>
+      <section className="report-next-steps" aria-label="下一步练习建议">
+        <div className="report-section-heading"><div><span className="report-kicker">01 / NEXT STEPS</span><h2>下一次，重点练什么</h2></div><span>从一个具体改进开始</span></div>
+        <div className="report-task-grid">
+          {currentReport.suggestions.length ? currentReport.suggestions.slice(0, 3).map((item, index) => <article className="report-task" key={index}><span className="report-task-number">0{index + 1}</span><div><h3>{['优先练习', '继续补强', '进一步提升'][index]}</h3><p>{item}</p></div></article>) : <div className="report-no-tasks"><Sparkles size={20} /><p>完成一次包含具体经历、行动和结果的回答，再查看针对性的训练建议。</p></div>}
         </div>
-        <div className="kpi-item">
-          <CheckCircle2 size={16} />
-          <span>面试官</span>
-          <strong>{currentReport.interviewers.length}</strong>
-        </div>
-        <div className="kpi-item">
-          <Clock3 size={16} />
-          <span>生成时间</span>
-          <strong>{currentReport.generatedAt}</strong>
-        </div>
-        <div className="kpi-item">
-          <Award size={16} />
-          <span>复核状态</span>
-          <strong>{!currentReport.hasEvidence ? '不适用' : currentReport.reviewStatus === 'approved' ? '已通过复核' : currentReport.reviewStatus === 'rejected' ? '复核未通过' : '待人工复核'}</strong>
+        {currentReport.suggestions.length > 3 && <details className="report-more"><summary>查看其余 {currentReport.suggestions.length - 3} 条建议</summary><ul>{currentReport.suggestions.slice(3).map((item, index) => <li key={index}>{item}</li>)}</ul></details>}
+      </section>
+
+      <section className="report-abilities">
+        <div className="report-section-heading"><div><span className="report-kicker">02 / ABILITY PROFILE</span><h2>本次能力表现</h2></div><span>结合具体回答阅读评分</span></div>
+        <div className="report-ability-grid">
+          <div className="report-radar">
+            {radarData.length >= 3 ? <CompetencyRadar data={radarData} /> : <div className="report-no-tasks"><BarChart3 size={28} /><p>已评分维度不足，暂不展示能力雷达。</p></div>}
+            <p>雷达图仅展示本场报告给出的评分维度。</p>
+          </div>
+          <div className="report-dimensions">
+            <h3>能力维度评分</h3>
+            {metrics.length ? <>
+              {metrics.slice(0, 4).map((item) => <ProgressMetric key={item.label} item={{ ...item, note: null }} />)}
+              {metrics.length > 4 && <details className="report-more"><summary>展开全部 {metrics.length} 个维度</summary><div>{metrics.slice(4).map((item) => <ProgressMetric key={item.label} item={{ ...item, note: null }} />)}</div></details>}
+            </> : <p className="report-muted">暂无能力评分，补充作答后再进行评估。</p>}
+          </div>
         </div>
       </section>
 
-      <section className="dashboard-grid">
-        <Card title="核心能力模型" icon={<BarChart3 size={18} />}>
-          <div className="radar-wrap">
-            {radarData.length > 0 ? (
-              <CompetencyRadar data={radarData} />
-            ) : (
-              <div className="empty-state">
-                <strong>暂无能力评分</strong>
-                <span>未记录候选人回答，无法生成能力雷达。</span>
-              </div>
-            )}
-          </div>
-        </Card>
-
-        <Card title="逐项得分指标" icon={<FileText size={18} />}>
-          <div className="metrics-list">
-            {metrics.length > 0 ? (
-              metrics.map((item) => (
-                <ProgressMetric key={item.label} item={item} />
-              ))
-            ) : (
-              <div className="empty-state">
-                <strong>暂无逐项得分</strong>
-                <span>需要至少一条候选人回答才能生成评分指标。</span>
-              </div>
-            )}
-          </div>
-        </Card>
+      <section className="report-feedback-section">
+        <div className="report-section-heading"><div><span className="report-kicker">03 / INTERVIEWER NOTES</span><h2>面试官反馈</h2></div><span>{evaluatedInterviewers.length} 位已形成评价</span></div>
+        <div className="report-feedback-grid">
+          {evaluatedInterviewers.map((item, index) => <article className="report-feedback" key={item.name}><div className="report-feedback-head"><span className="report-agent-icon"><UserRound size={19} /></span><h3>{item.name}</h3><span className="report-feedback-decision">{item.decision}</span></div><p>{item.text}</p></article>)}
+          {!evaluatedInterviewers.length && <p className="report-muted">暂无基于单题回答形成的面试官评价。</p>}
+        </div>
+        {!!unevaluatedInterviewers.length && <div className="report-unassessed"><span>暂无评价</span>{unevaluatedInterviewers.map((item) => <span key={item.name}>{item.name}</span>)}<small>未关联单题评价，不作表现判断。</small></div>}
       </section>
 
-      <section className="dashboard-grid secondary">
-        <Card title="面试官综合评价" icon={<MessageSquareText size={18} />}>
-          <div className="review-list">
-            {currentReport.interviewers.map((item) => (
-              <div className="review-card" key={item.name}>
-                <div>
-                  <strong>{item.name}</strong>
-                  <StatusTag tone={item.color}>{item.decision}</StatusTag>
-                </div>
-                <p>{item.text}</p>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <Card title="报告结论与训练建议" icon={<AlertTriangle size={18} />}>
-          <div className="risk-table">
-            <div>
-              <span>报告摘要</span>
-              <StatusTag tone="blue">{currentReport.hasEvidence ? '真实生成' : '系统说明'}</StatusTag>
-              <p>{currentReport.summary}</p>
-            </div>
-            {currentReport.suggestions.map((item) => (
-              <div key={item}>
-                <span>训练建议</span>
-                <StatusTag tone="amber">下一步</StatusTag>
-                <p>{item}</p>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </section>
-
-      <Card title="逐题问答复盘" icon={<Clock3 size={18} />} className="timeline-panel">
+      <section className="report-rounds">
+        <div className="report-section-heading"><div><span className="report-kicker">04 / CONVERSATION REVIEW</span><h2>逐题复盘</h2></div><span>共 {currentReport.timeline.length} 题 · 点击展开</span></div>
         <div className="timeline">
-          {currentReport.timeline.length > 0 ? (
-            currentReport.timeline.map((item, index) => (
-              <TimelineItem key={item.id || `${item.title}-${index}`} item={item} index={index} />
-            ))
-          ) : (
-            <div className="empty-state">
-              <strong>暂无逐题问答记录</strong>
-              <span>本次面试没有记录到候选人回答，因此不会展示演示答案。</span>
-            </div>
-          )}
+          {currentReport.timeline.length ? currentReport.timeline.map((item, index) => <TimelineItem key={item.id || index} item={item} index={index} />) : <p className="report-muted">本场没有已保存的问答记录。</p>}
         </div>
-      </Card>
+      </section>
+
+      <details className="report-details">
+        <summary>报告详情 <span>来源与编号</span><ChevronDown size={15} /></summary>
+        <dl><div><dt>报告编号</dt><dd>{currentReport.interviewId}</dd></div><div><dt>生成来源</dt><dd>{currentReport.provider} · {currentReport.model}</dd></div><div><dt>生成状态</dt><dd>{reportStatusLabel}</dd></div>{['approved', 'rejected'].includes(currentReport.reviewStatus) && <div><dt>人工复核</dt><dd>{currentReport.reviewStatus === 'approved' ? '已通过复核' : '复核未通过'}</dd></div>}</dl>
+      </details>
     </section>
   );
 }
@@ -6437,14 +6553,8 @@ function HistoryPage({ onOpenReport }) {
   if (error) return <div className="profile-message error">{error}</div>;
 
   return (
-    <section className="history-page">
-      <div className="resume-hero">
-        <div>
-          <p className="eyebrow">Interview History</p>
-          <h1>真实面试历史记录</h1>
-          <span>这里读取 `GET /api/reports`，只展示当前登录用户已经生成报告的面试。</span>
-        </div>
-      </div>
+    <section className="history-page v4-history-page">
+      <V4PageHeading eyebrow="EVERY PRACTICE COUNTS" title="我的历史" description="回顾已经完成的面试，查看每一次真实复盘。" />
 
       {reports.length === 0 ? (
         <div className="empty-state">
@@ -6452,7 +6562,7 @@ function HistoryPage({ onOpenReport }) {
           <span>完成一次面试并生成报告后，历史记录会出现在这里。</span>
         </div>
       ) : (
-        <div className="history-list">
+        <div className="history-list" aria-label="历史面试报告">
           {reports.map((item) => (
             <article className="history-item" key={item.id}>
               <div>
@@ -6464,8 +6574,8 @@ function HistoryPage({ onOpenReport }) {
                 <p>{item.summary}</p>
               </div>
               <div className="history-score">
-                <strong>{item.has_candidate_answer ? item.total_score : '—'}</strong>
-                <span>{item.has_candidate_answer ? item.grade : '未评分'}</span>
+                <strong>{item.generation_status === 'queued' ? '…' : item.has_candidate_answer ? item.total_score : '—'}</strong>
+                <span>{item.generation_status === 'queued' ? '生成中' : item.generation_status === 'failed' ? '生成失败' : item.has_candidate_answer ? item.grade : '未评分'}</span>
                 <button className="secondary-action" onClick={() => onOpenReport(item.interview_id)}>
                   查看报告
                 </button>
@@ -6555,7 +6665,10 @@ function ScoreTrendChart({ reports }) {
   );
 }
 
-function DimensionChange({ value = 0 }) {
+function DimensionChange({ value = 0, emptyLabel = '基线' }) {
+  if (value === null || value === undefined || value === '') {
+    return <span className="dimension-change stable">{emptyLabel}</span>;
+  }
   const change = Number(value) || 0;
   const tone = change > 0 ? 'up' : change < 0 ? 'down' : 'stable';
   return (
@@ -6584,9 +6697,7 @@ function StatsPage({ onStartTraining, onOpenReport }) {
           apiRequest('/api/reports'),
         ]);
         if (!mounted) return;
-        const reportItems = (reportsData.reports || []).filter(
-          (item) => item.has_candidate_answer && item.generation_status !== 'insufficient_evidence',
-        );
+        const reportItems = (reportsData.reports || []).filter(isAbilityReport);
         setStats(statsData.stats);
         setDimensions(dimensionData.dimensions || []);
         setReports(reportItems);
@@ -6620,12 +6731,13 @@ function StatsPage({ onStartTraining, onOpenReport }) {
     .slice(0, 3);
   const overallScore = Number(stats?.average_total_score) || 0;
   const completedCount = Number(stats?.completed_interviews) || 0;
-  const latestScore = Number(reports[0]?.total_score) || 0;
-  const previousScore = Number(reports[1]?.total_score) || latestScore;
-  const scoreDelta = latestScore - previousScore;
+  const validReportCount = reports.length;
+  const latestScore = reports[0] ? reportScore(reports[0].total_score) : null;
+  const previousScore = reports[1] ? reportScore(reports[1].total_score) : null;
+  const scoreDelta = latestScore !== null && previousScore !== null ? latestScore - previousScore : null;
   const targetGap = Math.max(0, 75 - overallScore);
-  const confidence = completedCount >= 5 ? '高' : completedCount >= 2 ? '中等' : '待积累';
-  const confidenceTone = completedCount >= 5 ? 'green' : completedCount >= 2 ? 'blue' : 'amber';
+  const sampleStatus = abilitySampleStatus(validReportCount);
+  const interviewTypeCount = new Set(reports.map((item) => item.interview_type).filter(Boolean)).size;
   const coverage = Math.min(100, Math.round((validDimensions.length / Object.keys(dimensionLabels).length) * 100));
   const latestEvidence = parseJsonValue(latestReport?.timeline_review, [])
     .filter((item) => item.sender_type === 'candidate' && (item.issues || item.suggestions))
@@ -6641,14 +6753,17 @@ function StatsPage({ onStartTraining, onOpenReport }) {
     score: Number(item.average_score) || 0,
     text: reportSuggestions[index] || dimensionTrainingCopy[item.key] || '围绕近期面试反馈完成一次结构化回答训练。',
   }));
-  const heroTitle = overallScore === 0
-    ? '完成首次面试，建立你的能力基线'
+  const heroTitle = validReportCount === 0
+    ? '完成首次有效作答，建立你的能力基线'
+    : overallScore === 0
+      ? '能力基线已建立，继续积累回答证据'
     : targetGap > 0
       ? `距离建议目标还有 ${targetGap} 分`
       : '当前综合表现已达到建议目标';
 
   return (
-    <section className="stats-page">
+    <section className="stats-page v4-stats-page">
+      <V4PageHeading eyebrow="A CLEARER PICTURE OF YOU" title="让成长，有迹可循。" description="从已经完成的面试中，查看能力变化与训练方向。" />
       <section className="stats-overview">
         <div className="stats-score-ring" style={{ '--score': overallScore }} aria-label={`综合能力 ${overallScore} 分`}>
           <div>
@@ -6660,11 +6775,11 @@ function StatsPage({ onStartTraining, onOpenReport }) {
           <p className="eyebrow">LONG-TERM SKILL PROFILE</p>
           <h1>{heroTitle}</h1>
           <p>
-            基于 {completedCount} 场已完成面试持续更新，结合目标岗位对比能力变化，并把每个结论追溯到真实报告证据。
+            已完成 {completedCount} 场面试，其中 {validReportCount} 份报告包含可评分回答。画像只使用生成成功或本地降级完成的有效报告。
           </p>
           <div className="stats-overview-meta">
             <span><Target size={14} />目标岗位：{stats?.recent_training_focus || '待设置'}</span>
-            <span><ShieldCheck size={14} />画像可信度：{confidence}</span>
+            <span><ShieldCheck size={14} />样本积累：{sampleStatus.label}</span>
             <span><Clock3 size={14} />更新于：{formatChartDate(stats?.updated_at)}</span>
           </div>
         </div>
@@ -6677,12 +6792,12 @@ function StatsPage({ onStartTraining, onOpenReport }) {
       <section className="stats-kpi-grid">
         <article>
           <div className="stats-kpi-icon"><CheckCircle2 size={17} /></div>
-          <div><span>有效样本</span><strong>{completedCount} 场</strong></div>
-          <small>{reports.length} 份能力报告</small>
+          <div><span>已完成面试</span><strong>{completedCount} 场</strong></div>
+          <small>{validReportCount} 份有效能力报告</small>
         </article>
         <article>
           <div className="stats-kpi-icon"><TrendingUp size={17} /></div>
-          <div><span>最近一场</span><strong>{latestScore || '—'}{latestScore ? ' 分' : ''}</strong></div>
+          <div><span>最近一份有效报告</span><strong>{latestScore === null ? '—' : `${latestScore} 分`}</strong></div>
           <DimensionChange value={scoreDelta} />
         </article>
         <article>
@@ -6738,19 +6853,19 @@ function StatsPage({ onStartTraining, onOpenReport }) {
           <Card title="成长趋势" icon={<TrendingUp size={18} />} action={<span className="panel-caption">最近 8 场</span>}>
             <ScoreTrendChart reports={reports} />
           </Card>
-          <Card title="画像可信度" icon={<ShieldCheck size={18} />}>
+          <Card title="样本积累情况" icon={<ShieldCheck size={18} />}>
             <div className="data-quality-card">
               <div>
-                <span>当前判断</span>
-                <StatusTag tone={confidenceTone}>{confidence}</StatusTag>
+                <span>当前阶段</span>
+                <StatusTag tone={sampleStatus.tone}>{sampleStatus.label}</StatusTag>
               </div>
-              <div className="data-quality-bar"><i style={{ width: `${Math.min(100, completedCount * 20)}%` }} /></div>
+              <div className="data-quality-bar"><i style={{ width: `${sampleStatus.progress}%` }} /></div>
               <dl>
                 <div><dt>能力覆盖</dt><dd>{validDimensions.length}/{Object.keys(dimensionLabels).length} 维 · {coverage}%</dd></div>
-                <div><dt>报告样本</dt><dd>{reports.length} 份</dd></div>
-                <div><dt>提升建议</dt><dd>{trainingTasks.length} 项</dd></div>
+                <div><dt>有效报告</dt><dd>{validReportCount} 份</dd></div>
+                <div><dt>面试类型</dt><dd>{interviewTypeCount} 类</dd></div>
               </dl>
-              <p>完成 5 场以上不同类型的面试后，长期趋势判断会更稳定。</p>
+              <p>这里展示样本积累进度，不代表统计置信度。增加有效回答、能力维度和面试类型后，再结合趋势判断。</p>
             </div>
           </Card>
         </div>
@@ -6774,7 +6889,7 @@ function StatsPage({ onStartTraining, onOpenReport }) {
                     <article key={item.message_id || index}>
                       <span>证据 {index + 1}</span>
                       <p>{item.issues || item.suggestions}</p>
-                      <small>{item.agent_name || 'AI 面试官'} · 本题 {Number(item.score) || '—'} 分</small>
+                      <small>{item.agent_name || 'AI 面试官'} · 本题 {reportScore(item.score) === null ? '未评分' : `${reportScore(item.score)} 分`}</small>
                     </article>
                   )) : (
                     <article>
@@ -6801,10 +6916,105 @@ function StatsPage({ onStartTraining, onOpenReport }) {
   );
 }
 
+function V4HomePage({ user, onNavigate, onOpenReport }) {
+  const [recent, setRecent] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+    apiRequest('/api/reports')
+      .then((data) => { if (mounted) setRecent((data.reports || []).slice(0, 3)); })
+      .catch((error) => { if (mounted) setLoadError(error.message); })
+      .finally(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, []);
+
+  return (
+    <section className="v4-home">
+      <div className="v4-home-heading">
+        <div><span className="v4-eyebrow">ASTRAINTERVIEW / PERSONAL STUDIO</span><h1>准备，从这里开始。</h1><p>{user.name}，把每一次对话，变成下一次的底气。</p></div>
+        <span className="v4-edition">04 <small>FOURTH EDITION</small></span>
+      </div>
+      <div className="v4-home-grid">
+        <section className="v4-stage">
+          <div className="v4-stage-top"><span>◉ TELEPHONE INTERVIEW</span><span>01 — PRACTICE</span></div>
+          <div className="v4-stage-art"><div className="v4-orbit v4-orbit-one" /><div className="v4-orbit v4-orbit-two" /><V4Logo /></div>
+          <div className="v4-stage-copy"><span className="v4-eyebrow">你的下一场，值得认真准备</span><h2>进入状态。<br />让实力被听见。</h2><p>从第一句自我介绍，到最后一次深度追问。<br />在真实场景中练习属于你的表达。</p><button className="v4-primary" type="button" onClick={() => onNavigate('phone-choice')}>开始电话面试 <span>↗</span></button></div>
+          <div className="v4-stage-bottom"><span>场景定制 / 多维复盘 / 持续进阶</span><span>AI INTERVIEW STUDIO</span></div>
+        </section>
+        <div className="v4-home-side">
+          <button className="v4-feature" type="button" onClick={() => onNavigate('stats')}><span className="v4-eyebrow">02 / INSIGHTS</span><BarChart3 size={36} /><h2>看见你的能力轮廓</h2><p>优势与短板，都有迹可循。</p><strong>探索能力画像 ↗</strong></button>
+          <button className="v4-feature" type="button" onClick={() => onNavigate('me')}><span className="v4-eyebrow">03 / ARCHIVE</span><UserRound size={36} /><h2>积累，属于你的答案</h2><p>一份简历，每一场练习。</p><strong>进入我的空间 ↗</strong></button>
+        </div>
+      </div>
+      <div className="v4-recent-heading"><h2>最近练习</h2><button type="button" onClick={() => onNavigate('report')}>全部记录 ↗</button></div>
+      <div className="v4-recent">
+        {loading ? <p>正在读取练习记录…</p> : loadError ? <p role="alert">练习记录暂时无法读取：{loadError}</p> : recent.length ? recent.map((item) => (
+          <button type="button" className="v4-recent-row" key={item.id} onClick={() => onOpenReport(item.interview_id)}>
+            <Phone size={18} /><span><strong>{item.target_role || '面试练习'}</strong><small>{formatDateTime(item.updated_at || item.created_at)}</small></span><em>{item.interview_type || '综合模拟'}</em><b>{item.generation_status === 'queued' ? '…' : item.has_candidate_answer ? item.total_score : '—'}</b><span aria-hidden="true">↗</span>
+          </button>
+        )) : <p>还没有面试报告。完成第一场面试后，记录会显示在这里。</p>}
+      </div>
+    </section>
+  );
+}
+
+function V4PhoneChoicePage({ onSelect }) {
+  return (
+    <section className="v4-phone-choice">
+      <V4PageHeading
+        eyebrow="CHOOSE YOUR PACE"
+        title="选择一种方式，进入面试。"
+        description="一次充分的准备，从适合你的难度开始。"
+      />
+      <div className="v4-choice-grid">
+        <section className="v4-choice-card v4-choice-guided">
+          <span className="v4-eyebrow">01 / GUIDED SESSION</span>
+          <Phone size={43} strokeWidth={1.25} />
+          <h2>默认难度设置</h2>
+          <p>让面试官带你进入状态。<br />从基础热身，到更有深度的对话。</p>
+          <span className="v4-choice-label">选择难度 ↓</span>
+          <div className="v4-choice-levels">
+            {difficultyPresets.map((preset, index) => (
+              <button key={preset.key} type="button" onClick={() => onSelect(preset.key, 'guided')}>
+                <small>0{index + 1}</small> {preset.key === 'normal' ? '中等' : preset.label} ↗
+              </button>
+            ))}
+          </div>
+        </section>
+        <button className="v4-choice-card v4-choice-custom" type="button" onClick={() => onSelect(defaultDifficultyPreset.key, 'custom')}>
+          <span className="v4-eyebrow">02 / PRESSURE CHAMBER</span>
+          <span className="v4-choice-badge">挑战模式</span>
+          <h2>自主难度设置</h2>
+          <p>设定场景，直面追问。<br />把舒适区的边界，再推远一点。</p>
+          <strong>构建专属挑战 <span>↗</span></strong>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function V4MePage({ onNavigate }) {
+  return (
+    <section className="v4-me">
+      <div className="v4-home-heading"><div><span className="v4-eyebrow">YOUR PERSONAL ARCHIVE</span><h1>我的，每一步积累。</h1><p>简历是起点，练习是过程，成长是你的答案。</p></div></div>
+      <div className="v4-me-grid">
+        <button type="button" className="v4-feature" onClick={() => onNavigate('resume')}><span className="v4-eyebrow">01 / RESUME</span><FileText size={36} /><h2>我的简历</h2><p>管理简历，查看真实分析结果与就业方向。</p><strong>进入查看 ↗</strong></button>
+        <button type="button" className="v4-feature" onClick={() => onNavigate('report')}><span className="v4-eyebrow">02 / HISTORY</span><Phone size={36} /><h2>我的历史</h2><p>回顾面试记录与真实复盘报告。</p><strong>进入查看 ↗</strong></button>
+        <button type="button" className="v4-feature" onClick={() => onNavigate('jobcompare')}><span className="v4-eyebrow">03 / CAREER</span><BriefcaseBusiness size={36} /><h2>招聘对比</h2><p>将简历与招聘岗位对比，查看匹配情况和改进建议。</p><strong>开始对比 ↗</strong></button>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [user, setUser] = useState(undefined);
-  const [view, setView] = useState('resume');
+  const [view, setView] = useState('home');
+  const [setupMode, setSetupMode] = useState('guided');
+  const [setupPresetKey, setSetupPresetKey] = useState(defaultDifficultyPreset.key);
   const [activeInterviewId, setActiveInterviewId] = useState('');
+  const [runningInterviewId, setRunningInterviewId] = useState('');
   const [reportMode, setReportMode] = useState('list');
   const [reportTab, setReportTab] = useState('interview');
 
@@ -6823,6 +7033,7 @@ function App() {
             const runningInterview = interviewData.interviews?.[0];
             if (runningInterview?.id) {
               setActiveInterviewId(runningInterview.id);
+              setRunningInterviewId(runningInterview.id);
               setView('phone');
             }
           })
@@ -6842,16 +7053,19 @@ function App() {
   const handleLogout = async () => {
     await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
     setUser(null);
-    setView('resume');
+    setView('home');
     setActiveInterviewId('');
+    setRunningInterviewId('');
   };
 
   const handleStartInterview = (interviewId) => {
     setActiveInterviewId(interviewId);
+    setRunningInterviewId(interviewId);
     setView('phone');
   };
 
   const handleOpenReport = (interviewId) => {
+    if (interviewId === runningInterviewId) setRunningInterviewId('');
     setActiveInterviewId(interviewId);
     setReportMode('detail');
     setReportTab('interview');
@@ -6859,11 +7073,22 @@ function App() {
   };
 
   const handleViewChange = (nextView) => {
+    if (nextView === 'phone') {
+      if (!runningInterviewId) nextView = 'phone-choice';
+      else setActiveInterviewId(runningInterviewId);
+    }
+    if (nextView === 'setup') nextView = 'phone-choice';
     if (nextView === 'report') {
       setReportMode('list');
       setReportTab('interview');
     }
     setView(nextView);
+  };
+
+  const handleSelectSetup = (presetKey, mode) => {
+    setSetupPresetKey(presetKey);
+    setSetupMode(mode);
+    setView('setup');
   };
 
   if (user === undefined) {
@@ -6889,31 +7114,25 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <div className="workspace-page">
+    <main className="app-shell v4-app-shell">
+      <div className="workspace-page v4-workspace">
         <div className="topbar">
-          <div className="brand-mark">
-            <ShieldCheck size={20} />
-          </div>
-          <div>
-            <strong>AI Interview Intelligence</strong>
-          </div>
-          <ViewSwitch view={view} onChange={handleViewChange} />
-          <button
-            className={`topbar-account ${view === 'profile' ? 'active' : ''}`}
-            type="button"
-            onClick={() => setView('profile')}
-            aria-label="打开个人中心"
-          >
-            <UserRound size={16} />
+          <button type="button" className="v4-brand-button" onClick={() => handleViewChange('home')} aria-label="返回面试空间"><V4Brand /></button>
+          <span className="v4-breadcrumb">Astrainterview <span>/</span> <b>{({ home: '面试空间', me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', phone: '正在面试', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告', stats: '能力画像' })[view]}</b></span>
+          <span className="v4-header-note"><i />专注于你的下一次成长</span>
+          {runningInterviewId && view !== 'phone' && <button className="v4-continue-link" type="button" onClick={() => handleViewChange('phone')}>继续面试 ↗</button>}
+          <button className="topbar-account" type="button" onClick={() => handleViewChange('me')} aria-label="打开我的空间">
             <span>{user.name}</span>
           </button>
-          <button className="icon-button" aria-label="退出登录" onClick={handleLogout}>
-            <LogOut size={18} />
-          </button>
+          <button className="v4-logout" aria-label="退出登录" onClick={handleLogout}>退出登录 ↗</button>
         </div>
 
-        {view === 'setup' && <SetupPage onStart={handleStartInterview} />}
+        {view !== 'home' && view !== 'phone' && <div className="v4-page-toolbar"><button type="button" onClick={() => handleViewChange(({ me: 'home', 'phone-choice': 'home', setup: 'phone-choice', stats: 'home', resume: 'me', jobcompare: 'me', profile: 'me', report: 'me' })[view] || 'home')}>← 返回{({ me: '面试空间', 'phone-choice': '面试空间', setup: '难度选择', stats: '面试空间', resume: '我的', jobcompare: '我的', profile: '我的', report: '我的' })[view]}</button><span>面试空间 / {({ me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', stats: '能力画像', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告' })[view]}</span></div>}
+
+        {view === 'home' && <V4HomePage user={user} onNavigate={handleViewChange} onOpenReport={handleOpenReport} />}
+        {view === 'phone-choice' && <V4PhoneChoicePage onSelect={handleSelectSetup} />}
+        {view === 'me' && <V4MePage onNavigate={handleViewChange} />}
+        {view === 'setup' && <SetupPage key={`${setupMode}-${setupPresetKey}`} mode={setupMode} presetKey={setupPresetKey} onStart={handleStartInterview} />}
         {view === 'resume' && <ResumeAnalysisPage />}
         {view === 'jobcompare' && <JobComparePage />}
         {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
@@ -6957,7 +7176,8 @@ function App() {
             )}
           </section>
         )}
-        {view === 'stats' && <StatsPage onStartTraining={() => setView('setup')} onOpenReport={handleOpenReport} />}
+        {view === 'stats' && <StatsPage onStartTraining={() => setView('phone-choice')} onOpenReport={handleOpenReport} />}
+        <footer className="v4-footer"><span>© 2026 ASTRAINTERVIEW · 为每一次机会，做好准备</span><span>面试记录与报告来自你的真实账号</span></footer>
       </div>
     </main>
   );

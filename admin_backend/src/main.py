@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 import re
 import time
@@ -65,6 +66,7 @@ from shared.recruitment import (
 
 
 app = FastAPI(title="Multi Agent Interview Admin API")
+logger = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 USER_BACKEND_ENV_PATH = PROJECT_DIR / "backend" / ".env"
 ADMIN_SESSION_COOKIE = "admin_session"
@@ -684,6 +686,7 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
 
     created = 0
     updated = 0
+    migrated = 0
     skipped = 0
     errors: list[str] = []
     seen_student_numbers: set[str] = set()
@@ -720,6 +723,10 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
             student_status = values.get("student_status", "")[:80]
             login_status = student_login_status(account_status, student_status)
             existing = one("SELECT id FROM users WHERE student_no = ?", (student_no,))
+            legacy_registration = one(
+                "SELECT id, user_id FROM student_registrations WHERE student_no = ?",
+                (student_no,),
+            )
             common_values = (
                 name,
                 values.get("college", "")[:160] or None,
@@ -759,6 +766,61 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
                 updated += 1
                 continue
 
+            legacy_user = None
+            if legacy_registration and legacy_registration.get("user_id"):
+                legacy_user = one(
+                    "SELECT id, student_no FROM users WHERE id = ?",
+                    (legacy_registration["user_id"],),
+                )
+            if not legacy_user:
+                legacy_user = one(
+                    "SELECT id, student_no FROM users WHERE email = ?",
+                    (student_account_email(student_no),),
+                )
+            if legacy_user:
+                if legacy_user.get("student_no") not in (None, "", student_no):
+                    skipped += 1
+                    errors.append(f"第 {row_number} 行学号 {student_no} 对应的历史账号已绑定其他学号，需人工核对。")
+                    continue
+                if legacy_user.get("student_no") in (None, "", student_no):
+                    temporary_password = generate_temporary_password()
+                    cursor = db.execute(
+                        """
+                        UPDATE users
+                        SET student_no = ?, password_hash = ?, must_change_password = 1,
+                            temp_password_encrypted = ?, temp_password_created_at = CURRENT_TIMESTAMP,
+                            name = ?, college = ?, gender = ?, class_name = ?, counselor = ?,
+                            student_status = ?, source_account_status = ?, source_registered_at = ?,
+                            source_updated_at = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (student_no, hash_password(temporary_password),
+                         encrypt_temporary_password(temporary_password))
+                        + common_values + (legacy_user["id"],),
+                    )
+                    cursor.close()
+                    cursor = db.execute("DELETE FROM sessions WHERE user_id = ?", (legacy_user["id"],))
+                    cursor.close()
+                    if legacy_registration and legacy_registration.get("user_id") != legacy_user["id"]:
+                        cursor = db.execute(
+                            "UPDATE student_registrations SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (legacy_user["id"], legacy_registration["id"]),
+                        )
+                        cursor.close()
+                    if one("SELECT user_id FROM profiles WHERE user_id = ?", (legacy_user["id"],)):
+                        cursor = db.execute(
+                            "UPDATE profiles SET nickname = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                            (name, legacy_user["id"]),
+                        )
+                    else:
+                        cursor = db.execute(
+                            "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
+                            (str(uuid4()), legacy_user["id"], name),
+                        )
+                    cursor.close()
+                    migrated += 1
+                    continue
+
             temporary_password = generate_temporary_password()
             user_id = str(uuid4())
             cursor = db.execute(
@@ -778,6 +840,12 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
                 ) + common_values[:7] + (encrypt_temporary_password(temporary_password),) + common_values[7:9] + (login_status,),
             )
             cursor.close()
+            if legacy_registration:
+                cursor = db.execute(
+                    "UPDATE student_registrations SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (user_id, legacy_registration["id"]),
+                )
+                cursor.close()
             cursor = db.execute(
                 "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
                 (str(uuid4()), user_id, name),
@@ -794,8 +862,9 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
     return {
         "created": created,
         "updated": updated,
+        "migrated": migrated,
         "skipped": skipped,
-        "processed": created + updated,
+        "processed": created + updated + migrated,
         "errors": errors[:30],
     }
 
@@ -1767,6 +1836,7 @@ async def import_campus_students(
         if not user:
             unmatched.append({"row": str(index), "email": email, "reason": "学生尚未注册"})
             continue
+        _ensure_student_in_scope(admin, user["id"])
         existing = one("SELECT * FROM student_enrollments WHERE user_id = ?", (user["id"],)) or {}
         upsert_student_enrollment(
             user["id"],
@@ -1783,394 +1853,24 @@ async def import_campus_students(
 
 # ---------- 用户注册（学生登录白名单） ----------
 
-def _read_registration_rows(filename: str, content: bytes) -> list[dict[str, str]]:
-    """解析上传的 CSV / Excel 文件，返回统一的 dict 行列表。"""
-    lower = (filename or "").lower()
-    if lower.endswith((".xlsx", ".xlsm")):
-        try:
-            from openpyxl import load_workbook
-
-            sheet = load_workbook(io.BytesIO(content), read_only=True, data_only=True).active
-            rows = [["" if cell is None else str(cell).strip() for cell in row] for row in sheet.iter_rows(values_only=True)]
-        except Exception as exc:
-            raise error(400, "Excel 文件解析失败，请上传有效的 .xlsx 文件。") from exc
-        if not rows:
-            return []
-        headers = rows[0]
-        return [dict(zip(headers, row)) for row in rows[1:] if any(row)]
-    try:
-        decoded = content.decode("utf-8-sig")
-        return list(csv.DictReader(io.StringIO(decoded)))
-    except Exception as exc:
-        raise error(400, "请上传 UTF-8 编码的 CSV 文件或 .xlsx 文件。") from exc
-
-
-def assign_registration_to_class(user_id: str, student_no: str, college: str | None, class_name: str | None) -> None:
-    """根据学院 + 班级名为学生建立班级归属，复用「编号+专业+班」的解析规则。
-
-    仅在学生尚未归班时执行；学院或班级缺失、或无法从班级名提取专业时跳过，
-    交由组织配置的「一键生成组织结构」人工处理，避免建立错误的专业/班级。
-    """
-    if not college or not class_name:
-        return
-    if one("SELECT id FROM student_enrollments WHERE user_id = ?", (user_id,)):
-        return
-    program, _ = split_registration_class_name(class_name)
-    if not program:
-        return
-
-    college_row = one("SELECT id FROM campus_colleges WHERE name = ?", (college,))
-    if college_row:
-        college_id = college_row["id"]
-    else:
-        college_id = str(uuid4())
-        db.execute(
-            "INSERT INTO campus_colleges (id, code, name, status) VALUES (?, ?, ?, 'active')",
-            (college_id, f"ORG-{uuid4().hex[:10]}", college),
-        )
-
-    program_row = one("SELECT id FROM campus_programs WHERE college_id = ? AND name = ?", (college_id, program))
-    if program_row:
-        program_id = program_row["id"]
-    else:
-        program_id = str(uuid4())
-        db.execute(
-            "INSERT INTO campus_programs (id, college_id, name, status) VALUES (?, ?, ?, 'active')",
-            (program_id, college_id, program),
-        )
-
-    class_row = one("SELECT id FROM campus_classes WHERE program_id = ? AND name = ?", (program_id, class_name))
-    if class_row:
-        class_id = class_row["id"]
-    else:
-        class_id = str(uuid4())
-        db.execute(
-            "INSERT INTO campus_classes (id, program_id, name, invite_code, status) VALUES (?, ?, ?, ?, 'active')",
-            (class_id, program_id, class_name, f"CAMPUS-{uuid4().hex[:10]}"),
-        )
-
-    upsert_student_enrollment(
-        user_id,
-        class_id=class_id,
-        student_no=student_no,
-        status="active",
-        focus_flag=False,
-        note="",
-    )
-
-
-def provision_registration_account(reg: dict[str, Any]) -> str:
-    """为一条学生注册信息开通候选人端账号，返回 created / existing / skipped。
-
-    - 学号或姓名缺失：返回 skipped。
-    - 已存在同号账号：只同步名单信息，不重置密码与改密标记，返回 existing。
-    - 新账号：使用随机临时密码并置为待改密状态，首次登录强制修改密码，返回 created。
-    """
-    student_no = str(reg.get("student_no") or "").strip()
-    name = str(reg.get("name") or "").strip()
-    if not student_no or not name:
-        return "skipped"
-
-    college = str(reg.get("college") or "").strip() or None
-    gender = str(reg.get("gender") or "").strip() or None
-    class_name = str(reg.get("class_name") or "").strip() or None
-    counselor = str(reg.get("counselor") or "").strip() or None
-
-    existing = one("SELECT id FROM users WHERE student_no = ?", (student_no,))
-    if existing:
-        user_id = existing["id"]
-        db.execute(
-            """
-            UPDATE users
-            SET name = ?, college = COALESCE(?, college), gender = COALESCE(?, gender),
-                class_name = COALESCE(?, class_name), counselor = COALESCE(?, counselor),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (name, college, gender, class_name, counselor, user_id),
-        ).close()
-        outcome = "existing"
-    else:
-        temporary_password = generate_temporary_password()
-        user_id = str(uuid4())
-        db.execute(
-            """
-            INSERT INTO users (
-              id, email, student_no, password_hash, name, college, gender, class_name,
-              counselor, must_change_password, temp_password_encrypted,
-              temp_password_created_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, 'normal')
-            """,
-            (
-                user_id,
-                student_account_email(student_no),
-                student_no,
-                hash_password(temporary_password),
-                name,
-                college,
-                gender,
-                class_name,
-                counselor,
-                encrypt_temporary_password(temporary_password),
-            ),
-        ).close()
-        db.execute(
-            "INSERT INTO profiles (id, user_id, nickname) VALUES (?, ?, ?)",
-            (str(uuid4()), user_id, name),
-        ).close()
-        outcome = "created"
-
-    if reg.get("id"):
-        db.execute(
-            "UPDATE student_registrations SET user_id = ? WHERE id = ?",
-            (user_id, reg["id"]),
-        ).close()
-    assign_registration_to_class(user_id, student_no, college, class_name)
-    return outcome
-
-
-ACCOUNT_SCOPED_TABLES = ("sessions", "password_reset_tokens", "profiles", "student_enrollments")
-
-
-def revoke_registration_account(user_id: str) -> bool:
-    """删除学生账号及其账号级数据（登录会话、临时密码、档案、归班记录）。
-
-    注册名单保留并解绑，学生回到「待激活」状态可再次开通；训练数据
-    （面试会话 / 报告等）按要求保留，不在本操作范围内。
-    """
-    normalized = str(user_id or "").strip()
-    if not normalized:
-        return False
-    # 账号已不存在时只解绑名单，保证列表状态一致。
-    if not one("SELECT id FROM users WHERE id = ?", (normalized,)):
-        db.execute("UPDATE student_registrations SET user_id = NULL WHERE user_id = ?", (normalized,)).close()
-        return False
-    for table in ACCOUNT_SCOPED_TABLES:
-        db.execute(f"DELETE FROM {table} WHERE user_id = ?", (normalized,)).close()
-    db.execute("UPDATE student_registrations SET user_id = NULL WHERE user_id = ?", (normalized,)).close()
-    db.execute("DELETE FROM users WHERE id = ?", (normalized,)).close()
-    return True
-
-
 @app.post("/api/admin/student-registrations/import")
 async def import_student_registrations(
-    request: Request,
-    file: UploadFile = File(...),
-    admin: dict = Depends(require_permission("manageStudents")),
+    _admin: dict = Depends(require_permission("manageStudents")),
 ):
-    """导入学生注册信息（学号 / 姓名），并自动开通候选人端账号。"""
-    validate_admin_origin(request)
-    content = await file.read()
-    if len(content) > 5 * 1024 * 1024:
-        raise error(400, "导入文件不能超过 5MB。")
-    rows = _read_registration_rows(file.filename or "", content)
-    if not rows:
-        raise error(400, "文件中没有可导入的数据行。")
-    if len(rows) > 5000:
-        raise error(400, "单次最多导入 5000 名学生。")
-
-    imported = 0
-    updated = 0
-    activated = 0
-    skipped: list[dict[str, str]] = []
-    try:
-        db.begin()
-        for index, row in enumerate(rows, start=2):
-            student_no = str(row.get("学号") or row.get("student_no") or "").strip()
-            name = str(row.get("姓名") or row.get("name") or "").strip()
-            if not student_no or not name:
-                skipped.append({"row": str(index), "studentNo": student_no, "name": name, "reason": "缺少学号或姓名"})
-                continue
-            college = str(row.get("学院") or row.get("college") or "").strip()
-            gender = str(row.get("性别") or row.get("gender") or "").strip()
-            class_name = str(row.get("班级") or row.get("class_name") or "").strip()
-            counselor = str(row.get("辅导员") or row.get("counselor") or "").strip()
-            existing = one("SELECT id, user_id FROM student_registrations WHERE student_no = ?", (student_no,))
-            if existing:
-                registration_id = existing["id"]
-                db.execute(
-                    "UPDATE student_registrations SET name = ?, college = ?, gender = ?, class_name = ?, counselor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (name, college, gender, class_name, counselor, registration_id),
-                )
-                updated += 1
-            else:
-                registration_id = str(uuid4())
-                db.execute(
-                    "INSERT INTO student_registrations (id, student_no, name, college, gender, class_name, counselor, imported_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (registration_id, student_no, name, college, gender, class_name, counselor, str(admin.get("email") or "")),
-                )
-                imported += 1
-
-            outcome = provision_registration_account({
-                "id": registration_id,
-                "student_no": student_no,
-                "name": name,
-                "college": college,
-                "gender": gender,
-                "class_name": class_name,
-                "counselor": counselor,
-            })
-            if outcome == "created":
-                activated += 1
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    record_audit(request, admin, "student_registrations.import", summary=f"导入学生注册信息：新增 {imported} 人，更新 {updated} 人，开通账号 {activated} 个，跳过 {len(skipped)} 行")
-    return {"imported": imported, "updated": updated, "activated": activated, "skipped": skipped[:100], "total": len(rows)}
+    raise error(410, "旧学生注册入口已停用，请使用学生账号名单导入。")
 
 
 @app.get("/api/admin/student-registrations")
-def list_student_registrations(admin: dict = Depends(require_permission("manageStudents"))):
-    rows = all_rows(
-        """
-        SELECT id, student_no, name, college, gender, class_name, counselor, user_id, imported_by, created_at, updated_at
-        FROM student_registrations
-        ORDER BY created_at DESC, student_no
-        """
-    )
-    return {
-        "registrations": [
-            {
-                "id": row["id"],
-                "studentNo": row["student_no"],
-                "name": row["name"],
-                "college": row["college"] or "",
-                "gender": row["gender"] or "",
-                "className": row["class_name"] or "",
-                "counselor": row["counselor"] or "",
-                "missing": [field for field, value in (
-                    ("学院", row["college"]),
-                    ("学号", row["student_no"]),
-                    ("姓名", row["name"]),
-                    ("性别", row["gender"]),
-                    ("班级", row["class_name"]),
-                    ("辅导员", row["counselor"]),
-                ) if not (value or "").strip()],
-                "activated": bool(row["user_id"]),
-                "importedBy": row["imported_by"],
-                "createdAt": str(row["created_at"]),
-            }
-            for row in rows
-        ]
-    }
-
-
-@app.delete("/api/admin/student-registrations/accounts")
-def revoke_all_registration_accounts(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
-    """批量删除全部已开通的学生账号，注册名单保留并回到「待激活」。"""
-    validate_admin_origin(request)
-    rows = all_rows(
-        "SELECT id, user_id FROM student_registrations WHERE user_id IS NOT NULL AND user_id != '' ORDER BY student_no"
-    )
-    revoked = 0
-    try:
-        db.begin()
-        for row in rows:
-            if revoke_registration_account(row["user_id"]):
-                revoked += 1
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    record_audit(
-        request,
-        admin,
-        "student_registrations.accounts_revoke",
-        summary=f"批量删除学生账号：实际删除 {revoked} 个，名单保留 {len(rows)} 条",
-    )
-    return {"revoked": revoked, "total": len(rows)}
-
-
-@app.delete("/api/admin/student-registrations/{registration_id}/account")
-def revoke_student_registration_account(
-    request: Request,
-    registration_id: str,
-    admin: dict = Depends(require_permission("manageStudents")),
-):
-    """删除单个已激活学生的账号，注册名单保留并回到「待激活」。"""
-    validate_admin_origin(request)
-    existing = one("SELECT id, student_no, name, user_id FROM student_registrations WHERE id = ?", (registration_id,))
-    if not existing:
-        raise error(404, "该注册信息不存在。")
-    if not existing.get("user_id"):
-        raise error(409, "该学生尚未开通账号，无需删除。")
-    try:
-        db.begin()
-        revoke_registration_account(existing["user_id"])
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    record_audit(
-        request,
-        admin,
-        "student_registrations.account_revoke",
-        target_type="student_registration",
-        target_id=registration_id,
-        summary=f"删除学生账号：{existing['name']}（{existing['student_no']}），注册名单保留",
-    )
-    return {"ok": True}
+def list_student_registrations(_admin: dict = Depends(require_permission("manageStudents"))):
+    raise error(410, "旧学生注册入口已停用，请使用学生账号名单导入。")
 
 
 @app.delete("/api/admin/student-registrations/{registration_id}")
-def delete_student_registration(request: Request, registration_id: str, admin: dict = Depends(require_permission("manageStudents"))):
-    validate_admin_origin(request)
-    existing = one("SELECT id, student_no, name, user_id FROM student_registrations WHERE id = ?", (registration_id,))
-    if not existing:
-        raise error(404, "该注册信息不存在。")
-    db.execute("DELETE FROM student_registrations WHERE id = ?", (registration_id,))
-    db.commit()
-    record_audit(request, admin, "student_registrations.delete", target_type="student_registration", target_id=registration_id, summary=f"删除学生注册信息：{existing['name']}（{existing['student_no']}）")
-    return {"ok": True}
-
-
-@app.delete("/api/admin/student-registrations")
-def clear_student_registrations(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
-    validate_admin_origin(request)
-    db.execute("DELETE FROM student_registrations")
-    db.commit()
-    record_audit(request, admin, "student_registrations.clear", summary="清空全部学生注册信息")
-    return {"ok": True}
-
-
-@app.post("/api/admin/student-registrations/activate")
-def activate_student_registrations(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
-    """为尚未开通账号的注册学生批量开通候选人端账号（随机临时密码 + 首次登录强制改密）。"""
-    validate_admin_origin(request)
-    rows = all_rows(
-        """
-        SELECT id, student_no, name, college, gender, class_name, counselor, user_id
-        FROM student_registrations
-        ORDER BY student_no
-        """
-    )
-    created = 0
-    existing = 0
-    skipped = 0
-    try:
-        db.begin()
-        for reg in rows:
-            outcome = provision_registration_account(reg)
-            if outcome == "created":
-                created += 1
-            elif outcome == "existing":
-                existing += 1
-            else:
-                skipped += 1
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    record_audit(
-        request,
-        admin,
-        "student_registrations.activate",
-        summary=f"批量开通学生账号：新建 {created} 个，已存在 {existing} 个，跳过 {skipped} 条",
-    )
-    return {"created": created, "existing": existing, "skipped": skipped, "total": len(rows)}
-
-
+def delete_student_registration(
+    registration_id: str,
+    _admin: dict = Depends(require_permission("manageStudents")),
+):
+    raise error(410, "旧学生注册入口已停用，历史数据不会删除。")
 # ---------- 组织（组织结构一览 + 一键生成） ----------
 
 @app.get("/api/admin/organization/structure")
@@ -2186,414 +1886,11 @@ def organization_structure(_admin: dict = Depends(require_admin)):
     }
 
 
-def _organization_diff(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """比对导入行中的 学院 / 专业 / 班级 与现有结构，返回新增部分。"""
-    existing_colleges = {row["name"] for row in all_rows("SELECT name FROM campus_colleges")}
-    existing_programs = {
-        (row["college_name"], row["name"])
-        for row in all_rows(
-            """
-            SELECT colleges.name AS college_name, programs.name
-            FROM campus_programs AS programs
-            JOIN campus_colleges AS colleges ON colleges.id = programs.college_id
-            """
-        )
-    }
-    existing_classes = {
-        (row["program_name"], row["name"])
-        for row in all_rows(
-            """
-            SELECT programs.name AS program_name, classes.name
-            FROM campus_classes AS classes
-            JOIN campus_programs AS programs ON programs.id = classes.program_id
-            """
-        )
-    }
-    new_colleges: set[str] = set()
-    new_programs: set[tuple[str, str]] = set()
-    new_classes: set[tuple[str, str]] = set()
-    for item in rows:
-        college = item["college"]
-        program = item["program"]
-        class_name = item["class_name"]
-        if not college:
-            continue
-        if college not in existing_colleges:
-            new_colleges.add(college)
-        if program and (college, program) not in existing_programs:
-            new_programs.add((college, program))
-        if program and class_name and (program, class_name) not in existing_classes:
-            new_classes.add((program, class_name))
-    return {
-        "newColleges": sorted(new_colleges),
-        "newPrograms": sorted(f"{college} / {program}" for college, program in new_programs),
-        "newClasses": sorted(f"{program} / {class_name}" for program, class_name in new_classes),
-    }
-
-
 @app.post("/api/admin/organization/import")
 async def import_organization_structure(
-    request: Request,
-    file: UploadFile = File(...),
-    apply: bool = Query(False, description="是否直接应用结构变更（默认仅预览）"),
-    admin: dict = Depends(require_permission("manageOrganization")),
+    _admin: dict = Depends(require_permission("manageOrganization")),
 ):
-    """从用户注册导入表一键生成组织结构。
-
-    表格需包含「姓名」「学号」「学院」「专业」「班级」列。导入时：
-    1) 注册/更新学生（候选人端凭学号 + 姓名登录）；
-    2) 依据 学院 / 专业 / 班级 自动创建不存在的组织结构并归班；
-    3) 检测到新的组织结构时，先返回预览（requiresConfirmation），
-       由前端弹窗确认后再以 apply=1 实际写入。
-    """
-    validate_admin_origin(request)
-    content = await file.read()
-    if len(content) > 5 * 1024 * 1024:
-        raise error(400, "导入文件不能超过 5MB。")
-    rows = _read_registration_rows(file.filename or "", content)
-    if not rows:
-        raise error(400, "文件中没有可导入的数据行。")
-    if len(rows) > 5000:
-        raise error(400, "单次最多导入 5000 名学生。")
-
-    parsed: list[dict[str, Any]] = []
-    skipped: list[dict[str, str]] = []
-    for index, row in enumerate(rows, start=2):
-        student_no = str(row.get("学号") or row.get("student_no") or "").strip()
-        name = str(row.get("姓名") or row.get("name") or "").strip()
-        if not student_no or not name:
-            skipped.append({"row": str(index), "studentNo": student_no, "name": name, "reason": "缺少学号或姓名"})
-            continue
-        parsed.append(
-            {
-                "row": str(index),
-                "student_no": student_no,
-                "name": name,
-                "college": str(row.get("学院") or row.get("college") or "").strip(),
-                "program": str(row.get("专业") or row.get("major") or "").strip(),
-                "class_name": str(row.get("班级") or row.get("class") or "").strip(),
-            }
-        )
-
-    diff = _organization_diff(parsed)
-    has_new = bool(diff["newColleges"] or diff["newPrograms"] or diff["newClasses"])
-    if not apply and has_new:
-        return {
-            "applied": False,
-            "requiresConfirmation": True,
-            **diff,
-            "total": len(rows),
-            "valid": len(parsed),
-            "skipped": skipped[:100],
-        }
-
-    try:
-        db.begin()
-        college_ids: dict[str, str] = {row["name"]: row["id"] for row in all_rows("SELECT id, name FROM campus_colleges")}
-        program_ids: dict[tuple[str, str], str] = {
-            (row["college_id"], row["name"]): row["id"] for row in all_rows("SELECT id, college_id, name FROM campus_programs")
-        }
-        class_ids: dict[tuple[str, str], str] = {
-            (row["program_id"], row["name"]): row["id"] for row in all_rows("SELECT id, program_id, name FROM campus_classes")
-        }
-        registered = 0
-        updated_reg = 0
-        new_colleges_created = 0
-        new_programs_created = 0
-        new_classes_created = 0
-        assigned = 0
-        for item in parsed:
-            student_no = item["student_no"]
-            existing_reg = one("SELECT id FROM student_registrations WHERE student_no = ?", (student_no,))
-            if existing_reg:
-                db.execute(
-                    "UPDATE student_registrations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (item["name"], existing_reg["id"]),
-                )
-                updated_reg += 1
-            else:
-                db.execute(
-                    "INSERT INTO student_registrations (id, student_no, name, imported_by) VALUES (?, ?, ?, ?)",
-                    (str(uuid4()), student_no, item["name"], str(admin.get("email") or "")),
-                )
-                registered += 1
-
-            college = item["college"]
-            if not college:
-                continue
-            college_id = college_ids.get(college)
-            if not college_id:
-                college_id = str(uuid4())
-                db.execute(
-                    "INSERT INTO campus_colleges (id, code, name, status) VALUES (?, ?, ?, 'active')",
-                    (college_id, f"ORG-{uuid4().hex[:10]}", college),
-                )
-                college_ids[college] = college_id
-                new_colleges_created += 1
-            program = item["program"]
-            if not program:
-                continue
-            program_id = program_ids.get((college_id, program))
-            if not program_id:
-                program_id = str(uuid4())
-                db.execute(
-                    "INSERT INTO campus_programs (id, college_id, name, status) VALUES (?, ?, ?, 'active')",
-                    (program_id, college_id, program),
-                )
-                program_ids[(college_id, program)] = program_id
-                new_programs_created += 1
-            class_name = item["class_name"]
-            if not class_name:
-                continue
-            class_id = class_ids.get((program_id, class_name))
-            if not class_id:
-                class_id = str(uuid4())
-                db.execute(
-                    "INSERT INTO campus_classes (id, program_id, name, invite_code, status) VALUES (?, ?, ?, ?, 'active')",
-                    (class_id, program_id, class_name, f"CAMPUS-{uuid4().hex[:10]}"),
-                )
-                class_ids[(program_id, class_name)] = class_id
-                new_classes_created += 1
-
-            reg = one("SELECT user_id FROM student_registrations WHERE student_no = ?", (student_no,))
-            if reg and reg["user_id"] and one("SELECT id FROM users WHERE id = ?", (reg["user_id"],)):
-                upsert_student_enrollment(
-                    reg["user_id"],
-                    class_id=class_id,
-                    student_no=student_no,
-                    status="active",
-                    focus_flag=False,
-                    note="",
-                )
-                assigned += 1
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    record_audit(
-        request,
-        admin,
-        "organization.import",
-        summary=(
-            f"一键生成组织结构：新增学院 {new_colleges_created} 个、专业 {new_programs_created} 个、班级 {new_classes_created} 个，"
-            f"注册学生 {registered} 人、更新 {updated_reg} 人、归班 {assigned} 人"
-        ),
-    )
-    return {
-        "applied": True,
-        "registered": registered,
-        "updated": updated_reg,
-        "newCollegesCreated": new_colleges_created,
-        "newProgramsCreated": new_programs_created,
-        "newClassesCreated": new_classes_created,
-        "assigned": assigned,
-        "total": len(rows),
-        "valid": len(parsed),
-        "skipped": skipped[:100],
-    }
-
-
-def split_registration_class_name(class_name: str) -> tuple[str | None, str]:
-    """按固定格式「编号+专业+班」解析班级名，返回 (专业名, 编号) 或 (None, 原样)。
-
-    例：2301软件工程班 -> ("软件工程", "2301")；1计算机1班 -> ("计算机", "1")。
-    当班级名不以「班」结尾、编号缺失，或中间段不含可识别专业名时返回 (None, 原样)。
-    """
-    raw = (class_name or "").strip()
-    if not raw.endswith("班"):
-        return None, raw
-    body = raw[:-1]
-    match = re.match(r"^[0-9A-Za-z_-]+", body)
-    if not match:
-        return None, raw
-    program = body[match.end():].strip("-_ ")
-    if not program or re.search(r"[0-9]", program) or re.fullmatch(r"[0-9A-Za-z_-]+", program):
-        return None, raw
-    return program, match.group(0)
-
-
-@app.post("/api/admin/organization/generate")
-async def generate_organization_structure(request: Request, admin: dict = Depends(require_permission("manageOrganization"))):
-    """根据「学生注册」已导入的数据一键生成组织结构（学院 / 专业 / 班级）并归班。
-
-    班级名按「编号+专业+班」固定格式解析出专业；解析失败的班级进入 unassigned 列表，
-    前端弹窗可为其指定专业名或忽略。apply=true 时执行写入。
-    """
-    payload = await request.json()
-    apply = bool(payload.get("apply"))
-    resolved_programs: dict[str, str] = {str(k).strip(): str(v).strip() for k, v in (payload.get("resolvedPrograms") or {}).items()}
-    ignored: set[str] = {str(v).strip() for v in (payload.get("ignored") or [])}
-
-    registrations = all_rows(
-        """
-        SELECT student_no, name, college, class_name, user_id
-        FROM student_registrations
-        WHERE student_no IS NOT NULL AND student_no != '' AND name IS NOT NULL AND name != ''
-        ORDER BY student_no
-        """
-    )
-
-    parsed: list[dict[str, Any]] = []
-    unassigned: list[dict[str, Any]] = []
-    for reg in registrations:
-        student_no = str(reg["student_no"] or "").strip()
-        college = str(reg["college"] or "").strip()
-        class_name = str(reg["class_name"] or "").strip()
-        program, _ = split_registration_class_name(class_name)
-        required = college and class_name
-        if not required:
-            unassigned.append({
-                "studentNo": student_no,
-                "name": str(reg["name"] or "").strip(),
-                "college": college,
-                "className": class_name,
-                "reason": "缺少学院或班级",
-                "suggestedProgram": "",
-            })
-            continue
-        if not program:
-            unassigned.append({
-                "studentNo": student_no,
-                "name": str(reg["name"] or "").strip(),
-                "college": college,
-                "className": class_name,
-                "reason": "班级名不满足「编号+专业+班」格式，无法提取专业",
-                "suggestedProgram": "",
-            })
-            continue
-        parsed.append({
-            "student_no": student_no,
-            "name": str(reg["name"] or "").strip(),
-            "college": college,
-            "program": program,
-            "class_name": class_name,
-            "user_id": reg["user_id"],
-        })
-
-    # 预览：返回待新增结构与未解析名单
-    if not apply:
-        pending_colleges = {row["college"] for row in parsed}
-        pending_programs = {(row["college"], row["program"]) for row in parsed}
-        pending_classes = {(row["college"], row["program"], row["class_name"]) for row in parsed}
-        return {
-            "apply": False,
-            "total": len(registrations),
-            "assignable": len(parsed),
-            "newColleges": sorted(pending_colleges),
-            "newPrograms": sorted(f"{c} / {p}" for c, p in pending_programs),
-            "newClasses": sorted(f"{c} / {p} / {cl}" for c, p, cl in pending_classes),
-            "unassigned": unassigned[:500],
-            "unassignedCount": len(unassigned),
-        }
-
-    # 把前端为未解析班级指定的专业名，并入对应学生的专业
-    program_override = {str(row["className"] or "").strip(): resolved for row in unassigned for resolved in [resolved_programs.get(str(row["className"] or "").strip(), "")] if resolved}
-    applied_rows: list[dict[str, Any]] = list(parsed)
-    for reg in registrations:
-        class_name = str(reg["class_name"] or "").strip()
-        student_no = str(reg["student_no"] or "").strip()
-        if student_no in ignored:
-            continue
-        program, _ = split_registration_class_name(class_name)
-        override = program_override.get(class_name)
-        if override:
-            program = override
-        college = str(reg["college"] or "").strip()
-        if not college or not class_name or not program:
-            continue
-        applied_rows.append({
-            "student_no": student_no,
-            "name": str(reg["name"] or "").strip(),
-            "college": college,
-            "program": program,
-            "class_name": class_name,
-            "user_id": reg["user_id"],
-        })
-    # 去重（忽略后可能重复追加）
-    seen: set[tuple[str, str, str, str]] = set()
-    unique_rows: list[dict[str, Any]] = []
-    for row in applied_rows:
-        key = (row["student_no"], row["college"], row["program"], row["class_name"])
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_rows.append(row)
-
-    try:
-        db.begin()
-        college_ids: dict[str, str] = {row["name"]: row["id"] for row in all_rows("SELECT id, name FROM campus_colleges")}
-        program_ids: dict[tuple[str, str], str] = {
-            (row["college_id"], row["name"]): row["id"] for row in all_rows("SELECT id, college_id, name FROM campus_programs")
-        }
-        class_ids: dict[tuple[str, str], str] = {
-            (row["program_id"], row["name"]): row["id"] for row in all_rows("SELECT id, program_id, name FROM campus_classes")
-        }
-        new_colleges = 0
-        new_programs = 0
-        new_classes = 0
-        assigned = 0
-        for item in unique_rows:
-            college = item["college"]
-            college_id = college_ids.get(college)
-            if not college_id:
-                college_id = str(uuid4())
-                db.execute(
-                    "INSERT INTO campus_colleges (id, code, name, status) VALUES (?, ?, ?, 'active')",
-                    (college_id, f"ORG-{uuid4().hex[:10]}", college),
-                )
-                college_ids[college] = college_id
-                new_colleges += 1
-            program = item["program"]
-            program_id = program_ids.get((college_id, program))
-            if not program_id:
-                program_id = str(uuid4())
-                db.execute(
-                    "INSERT INTO campus_programs (id, college_id, name, status) VALUES (?, ?, ?, 'active')",
-                    (program_id, college_id, program),
-                )
-                program_ids[(college_id, program)] = program_id
-                new_programs += 1
-            class_name = item["class_name"]
-            class_id = class_ids.get((program_id, class_name))
-            if not class_id:
-                class_id = str(uuid4())
-                db.execute(
-                    "INSERT INTO campus_classes (id, program_id, name, invite_code, status) VALUES (?, ?, ?, ?, 'active')",
-                    (class_id, program_id, class_name, f"CAMPUS-{uuid4().hex[:10]}"),
-                )
-                class_ids[(program_id, class_name)] = class_id
-                new_classes += 1
-            if item["user_id"] and one("SELECT id FROM users WHERE id = ?", (item["user_id"],)):
-                upsert_student_enrollment(
-                    item["user_id"],
-                    class_id=class_id,
-                    student_no=item["student_no"],
-                    status="active",
-                    focus_flag=False,
-                    note="",
-                )
-                assigned += 1
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    record_audit(
-        request,
-        admin,
-        "organization.generate",
-        summary=f"一键生成组织结构：新增学院 {new_colleges} 个、专业 {new_programs} 个、班级 {new_classes} 个，归班 {assigned} 人",
-    )
-    return {
-        "apply": True,
-        "newCollegesCount": new_colleges,
-        "newProgramsCount": new_programs,
-        "newClassesCount": new_classes,
-        "assigned": assigned,
-        "total": len(registrations),
-        "ignored": len(ignored),
-    }
-
-
+    raise error(410, "旧组织导入会创建不可登录的注册记录，已停用。请先导入学生账号，再维护组织归属。")
 @app.get("/api/admin/resume-form-settings")
 def get_resume_form_settings(admin: dict = Depends(require_admin)):
     """读取候选人“填写简历”的学院/专业下拉配置。"""
@@ -3542,7 +2839,7 @@ def admin_connection_logs(
     event_type: str = "",
     query: str = "",
     limit: int = 300,
-    _admin: dict = Depends(require_admin),
+    _admin: dict = Depends(require_permission("viewConnectionLogs")),
 ):
     normalized_level = level.strip().lower()
     if normalized_level and normalized_level not in {"info", "warning", "error"}:
@@ -3587,8 +2884,9 @@ def snapshot(admin: dict = Depends(require_admin)):
                 "canViewInterviews": can_interviews,
                 "canViewReports": can_reports,
                 "canViewAgents": can_model,
-                "canViewConnectionLogs": True,
+                "canViewConnectionLogs": "viewConnectionLogs" in perms,
                 "canManageStudents": can_students,
+                "canImportStudentAccounts": is_super,
                 "canManageOrganization": "manageOrganization" in perms,
                 "canManageCampus": can_students or "manageOrganization" in perms,
                 "canManageSettings": is_super,
@@ -3602,14 +2900,15 @@ def snapshot(admin: dict = Depends(require_admin)):
             "admin": sanitize_admin(admin),
         }
     except Exception as exc:
-        raise error(500, f"管理端数据读取失败：{exc}") from exc
+        logger.exception("Management snapshot failed")
+        raise error(500, "管理端数据读取失败，请稍后重试。") from exc
 
 
 @app.post("/api/admin/student-accounts/import")
 async def import_student_accounts(
     request: Request,
     file: UploadFile = File(...),
-    admin: dict = Depends(require_permission("manageStudents")),
+    admin: dict = Depends(require_super_admin),
 ):
     validate_admin_origin(request)
     filename = str(file.filename or "").lower()
@@ -3627,7 +2926,7 @@ async def import_student_accounts(
         admin,
         "student_accounts.import",
         target_type="student_account",
-        summary=f"导入学生名单：新增 {result['created']}，更新 {result['updated']}，跳过 {result['skipped']}",
+        summary=f"导入学生名单：新增 {result['created']}，更新 {result['updated']}，迁移旧账号 {result['migrated']}，跳过 {result['skipped']}",
     )
     return {"ok": True, "result": result}
 
@@ -3645,26 +2944,42 @@ def export_student_accounts(
     normalized_admission_year = admission_year.strip()
     if normalized_admission_year and not re.match(r"^20\d{2}$", normalized_admission_year):
         raise error(400, "学年筛选格式不正确。")
-    clauses = ["must_change_password = 1", "temp_password_encrypted IS NOT NULL"]
+    clauses = ["users.must_change_password = 1", "users.temp_password_encrypted IS NOT NULL"]
     params: list[Any] = []
     if normalized_counselor:
-        clauses.append("counselor = ?")
+        clauses.append("users.counselor = ?")
         params.append(normalized_counselor)
     if normalized_class_name:
-        clauses.append("class_name = ?")
+        clauses.append("users.class_name = ?")
         params.append(normalized_class_name)
     if normalized_admission_year:
-        clauses.append("student_no LIKE ?")
+        clauses.append("users.student_no LIKE ?")
         params.append(f"{normalized_admission_year}%")
+    scope = admin_student_scope(admin)
+    if scope is not None:
+        clauses.append("classes.id IS NOT NULL")
+        allowed_scopes = []
+        for entry in scope:
+            fields = []
+            for column, key in (("programs.college_id", "college"), ("programs.id", "program"), ("classes.id", "class")):
+                if entry.get(key):
+                    fields.append(f"{column} = ?")
+                    params.append(entry[key])
+            allowed_scopes.append("(" + " AND ".join(fields or ["1=1"]) + ")")
+        clauses.append("(" + " OR ".join(allowed_scopes or ["1=0"]) + ")")
     where = "WHERE " + " AND ".join(clauses)
     rows = all_rows(
         f"""
-        SELECT student_no, name, college, gender, class_name, counselor,
-               source_account_status, student_status, status,
-               temp_password_encrypted, temp_password_created_at
+        SELECT users.student_no, users.name, users.college, users.gender,
+               users.class_name, users.counselor, users.source_account_status,
+               users.student_status, users.status, users.temp_password_encrypted,
+               users.temp_password_created_at
         FROM users
+        LEFT JOIN student_enrollments AS enrollments ON enrollments.user_id = users.id
+        LEFT JOIN campus_classes AS classes ON classes.id = enrollments.class_id
+        LEFT JOIN campus_programs AS programs ON programs.id = classes.program_id
         {where}
-        ORDER BY counselor, college, class_name, student_no
+        ORDER BY users.counselor, users.college, users.class_name, users.student_no
         """,
         tuple(params),
     )
@@ -3705,6 +3020,7 @@ def reveal_student_temporary_password(
     )
     if not user:
         raise error(404, "学生账号不存在。")
+    _ensure_student_in_scope(admin, user_id)
     if not user.get("must_change_password") or not user.get("temp_password_encrypted"):
         raise error(409, "该学生已完成改密，临时密码不可查看。")
     try:
@@ -3732,6 +3048,7 @@ def reset_student_password(
     user = one("SELECT id, student_no FROM users WHERE id = ?", (user_id,))
     if not user or not user.get("student_no"):
         raise error(404, "学生账号不存在或尚未绑定学号。")
+    _ensure_student_in_scope(admin, user_id)
     temporary_password = generate_temporary_password()
     db.begin()
     try:
@@ -3763,7 +3080,8 @@ def reset_student_password(
 
 
 @app.get("/api/admin/candidates/{candidate_id}")
-def candidate_detail(request: Request, candidate_id: str, admin: dict = Depends(require_permission("viewInterviews", "manageStudents"))):
+def candidate_detail(request: Request, candidate_id: str, admin: dict = Depends(require_permission("manageStudents"))):
+    _ensure_student_in_scope(admin, candidate_id)
     result = {"candidate": get_candidate_detail(candidate_id)}
     record_audit(request, admin, "candidate.view", target_type="candidate", target_id=candidate_id, summary="查看候选人详情")
     return result

@@ -65,6 +65,7 @@ const emptyAdminData = {
     canViewAgents: false,
     canViewConnectionLogs: false,
     canManageStudents: false,
+    canImportStudentAccounts: false,
     canManageOrganization: false,
     canManageCampus: false,
     canManageSettings: false,
@@ -841,53 +842,33 @@ const connectionLevelLabels = {
   error: '错误',
 };
 
-function RegistrationsPage() {
-  const [registrations, setRegistrations] = useState([]);
-  const [loading, setLoading] = useState(true);
+function StudentAccountsImportPage({ candidates, canImport, onAccountsChanged }) {
+  const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [result, setResult] = useState(null);
   const [pageError, setPageError] = useState('');
   const [notice, setNotice] = useState('');
-  const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [importing, setImporting] = useState(false);
-  const [activating, setActivating] = useState(false);
-  const [importResult, setImportResult] = useState(null);
-  const [deletingId, setDeletingId] = useState('');
-
-  const loadRegistrations = async () => {
-    setLoading(true);
-    setPageError('');
-    try {
-      const data = await adminRequest('/api/admin/student-registrations');
-      setRegistrations(data.registrations || []);
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadRegistrations();
-  }, []);
+  const accounts = candidates.filter((item) => item.studentNo && item.studentNo !== '-');
+  const pending = accounts.filter((item) => item.activationStatus === '准备改密').length;
 
   const handleImport = async (event) => {
-    const file = event.target.files && event.target.files[0];
+    const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
     setImporting(true);
     setPageError('');
     setNotice('');
-    setImportResult(null);
+    setResult(null);
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const data = await adminRequest('/api/admin/student-registrations/import', {
+      const data = await adminRequest('/api/admin/student-accounts/import', {
         method: 'POST',
         body: formData,
       });
-      setImportResult(data);
-      setNotice(`导入完成：新增 ${data.imported} 人，更新 ${data.updated} 人，开通账号 ${data.activated} 个，跳过 ${data.skipped.length} 行`);
-      await loadRegistrations();
+      setResult(data.result);
+      setNotice('学生账号名单已导入。');
+      await onAccountsChanged();
     } catch (requestError) {
       setPageError(requestError.message);
     } finally {
@@ -895,267 +876,58 @@ function RegistrationsPage() {
     }
   };
 
-  const handleActivate = async () => {
-    const pending = registrations.length - activatedCount;
-    if (!window.confirm(`将为尚未开通账号的 ${pending} 名注册学生批量开通候选人端账号。账号使用随机临时密码，首次登录需修改密码。确定继续吗？`)) return;
-    setActivating(true);
+  const handleExport = async () => {
+    setExporting(true);
     setPageError('');
-    setNotice('');
     try {
-      const data = await adminRequest('/api/admin/student-registrations/activate', { method: 'POST' });
-      setNotice(`账号开通完成：新建 ${data.created} 个，已存在 ${data.existing} 个，跳过 ${data.skipped} 条`);
-      await loadRegistrations();
+      await adminDownload('/api/admin/student-accounts/export', 'student-temporary-passwords.xlsx');
     } catch (requestError) {
       setPageError(requestError.message);
     } finally {
-      setActivating(false);
-    }
-  };
-
-  const handleRevokeAccount = async (item) => {
-    if (!window.confirm(`确认删除 ${item.name}（${item.studentNo}）的登录账号？注册名单会保留，该学生将回到「待激活」，可再次开通账号。`)) return;
-    setDeletingId(item.id);
-    setPageError('');
-    setNotice('');
-    try {
-      await adminRequest(`/api/admin/student-registrations/${item.id}/account`, { method: 'DELETE' });
-      setNotice(`已删除 ${item.name}（${item.studentNo}）的账号，注册名单已保留`);
-      await loadRegistrations();
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setDeletingId('');
-    }
-  };
-
-  const handleRevokeAllAccounts = async () => {
-    if (!window.confirm(`确认删除全部 ${activatedCount} 个已开通的学生账号？注册名单会保留，学生将回到「待激活」，可再次开通账号。该操作不可撤销。`)) return;
-    setDeletingId('revoke-all');
-    setPageError('');
-    setNotice('');
-    try {
-      const data = await adminRequest('/api/admin/student-registrations/accounts', { method: 'DELETE' });
-      setNotice(`已删除 ${data.revoked} 个学生账号，注册名单保留 ${data.total} 条`);
-      await loadRegistrations();
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setDeletingId('');
-    }
-  };
-
-  const handleDelete = async (item) => {
-    if (!window.confirm(`确认删除 ${item.name}（${item.studentNo}）的注册信息？该学生将无法再登录候选人端。`)) return;
-    setDeletingId(item.id);
-    setPageError('');
-    setNotice('');
-    try {
-      await adminRequest(`/api/admin/student-registrations/${item.id}`, { method: 'DELETE' });
-      setNotice(`已删除 ${item.name}（${item.studentNo}）的注册信息`);
-      setRegistrations((current) => current.filter((entry) => entry.id !== item.id));
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setDeletingId('');
-    }
-  };
-
-  const filtered = useMemo(() => {
-    const keyword = query.trim().toLowerCase();
-    return registrations.filter((item) => {
-      if (statusFilter === 'activated' && !item.activated) return false;
-      if (statusFilter === 'pending' && item.activated) return false;
-      if (!keyword) return true;
-      return [item.studentNo, item.name, item.college, item.gender, item.className, item.counselor, item.importedBy]
-        .join(' ').toLowerCase().includes(keyword);
-    });
-  }, [registrations, query, statusFilter]);
-
-  const activatedCount = useMemo(() => registrations.filter((item) => item.activated).length, [registrations]);
-  const missingCount = useMemo(() => registrations.filter((item) => (item.missing || []).length > 0).length, [registrations]);
-
-  const handleClearFilter = () => {
-    setQuery('');
-    setStatusFilter('all');
-  };
-
-  const handleClearAll = async () => {
-    if (!window.confirm('确认清空全部学生注册信息？该操作不可撤销，所有学生将无法再登录候选人端。')) return;
-    setDeletingId('clear-all');
-    setPageError('');
-    setNotice('');
-    try {
-      await adminRequest('/api/admin/student-registrations', { method: 'DELETE' });
-      setNotice('已清空全部学生注册信息');
-      setRegistrations([]);
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setDeletingId('');
+      setExporting(false);
     }
   };
 
   return (
     <div className="registrations-page">
       <section className="connection-log-summary">
-        <article><span>已导入学生</span><strong>{registrations.length}</strong></article>
-        <article><span>已激活账号</span><strong>{activatedCount}</strong></article>
-        <article><span>待激活</span><strong>{registrations.length - activatedCount}</strong></article>
-        <article><span>信息缺失</span><strong className={missingCount > 0 ? 'count-alert' : ''}>{missingCount}</strong></article>
+        <article><span>当前范围学生账号</span><strong>{accounts.length}</strong></article>
+        <article><span>待首次改密</span><strong>{pending}</strong></article>
+        <article><span>已完成首次改密</span><strong>{accounts.length - pending}</strong></article>
       </section>
-
       <SectionCard
-        title="学生注册"
+        title="学生账号"
         icon={<UserPlus size={18} />}
-        action={<span className="record-count">候选人端凭学号 + 临时密码登录</span>}
+        action={<span className="record-count">学号 + 临时密码登录</span>}
       >
-        <div className="connection-log-toolbar registration-toolbar">
-          <label>
-            <Search size={15} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学院、学号、姓名、性别、班级、辅导员" />
-          </label>
-          <select
-            className="registration-status-filter"
-            value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
-            aria-label="按激活状态筛选"
-          >
-            <option value="all">全部状态</option>
-            <option value="activated">已激活</option>
-            <option value="pending">待激活</option>
-          </select>
-          <button className="secondary-button" type="button" onClick={handleClearFilter} disabled={!query && statusFilter === 'all'} title="清空筛选条件">
-            <X size={15} />清空筛选
-          </button>
-          <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
-            <Upload size={15} className={importing ? 'spin' : ''} />
-            {importing ? '正在导入…' : '导入文档（CSV / Excel）'}
-            <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleImport} disabled={importing} hidden />
-          </label>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={activating || registrations.length === 0}
-            onClick={handleActivate}
-            title="为尚未开通账号的注册学生批量开通候选人端账号"
-          >
-            <UserPlus size={15} className={activating ? 'spin' : ''} />一键激活账号
-          </button>
-          <button
-            className="secondary-button danger"
-            type="button"
-            disabled={deletingId === 'revoke-all' || activatedCount === 0}
-            onClick={handleRevokeAllAccounts}
-            title="删除全部已开通的学生账号，注册名单保留"
-          >
-            <Trash2 size={15} />删除全部账号
-          </button>
-          <button className="secondary-button" type="button" onClick={loadRegistrations} disabled={loading}>
-            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
-          </button>
-          <button
-            className="secondary-button danger"
-            type="button"
-            disabled={deletingId === 'clear-all' || registrations.length === 0}
-            onClick={handleClearAll}
-          >
-            <Trash2 size={15} />清空数据
+        <div className="connection-log-toolbar">
+          {canImport && (
+            <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
+              <Upload size={15} className={importing ? 'spin' : ''} />
+              {importing ? '正在导入…' : '导入学生名单（.xlsx）'}
+              <input type="file" accept=".xlsx" onChange={handleImport} disabled={importing} hidden />
+            </label>
+          )}
+          <button className="secondary-button" type="button" onClick={handleExport} disabled={exporting}>
+            <Download size={15} />{exporting ? '正在导出…' : '导出当前范围的临时密码'}
           </button>
         </div>
-
-        <p className="form-hint">文档需包含「学院」「学号」「姓名」「性别」「班级」「辅导员」六列（支持中文或 college / student_no / name / gender / class_name / counselor 列名）；导入后会自动为学号与姓名齐全的学生开通候选人端账号，账号使用随机临时密码，学生凭「学号 + 临时密码」首次登录后必须修改密码。缺任一字段的学生会被标记为「信息缺失」。</p>
-
+        <p className="form-hint">
+          学校名单至少包含「学号」「姓名」两列。新账号及迁移的旧账号会生成独立临时密码，学生首次登录后必须改密。
+          导出表包含尚未改密学生的临时密码，请交由对应辅导员发放。
+        </p>
         {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
         {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
-
-        {importResult && importResult.skipped.length > 0 && (
-          <div className="page-message warning">
-            <AlertCircle size={18} />
-            <div>
-              <strong>以下 {importResult.skipped.length} 行被跳过：</strong>
-              <ul>
-                {importResult.skipped.map((item) => (
-                  <li key={item.row}>第 {item.row} 行 {item.name || item.studentNo || '（空行）'}：{item.reason}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
-
-        {!pageError && loading && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取注册信息</div>}
-        {!pageError && !loading && filtered.length === 0 && (
-          <div className="page-message">{(query || statusFilter !== 'all') ? '没有匹配的注册信息。' : '尚未导入学生注册信息，请先导入文档。'}</div>
-        )}
-        {!pageError && !loading && filtered.length > 0 && (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>学院</th>
-                  <th>学号</th>
-                  <th>姓名</th>
-                  <th>性别</th>
-                  <th>班级</th>
-                  <th>辅导员</th>
-                  <th>状态</th>
-                  <th>导入人</th>
-                  <th>导入时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((item) => {
-                  const missing = item.missing || [];
-                  const mark = (field, value) => (missing.includes(field)
-                    ? <td className="cell-missing"><span className="missing-mark">缺失</span></td>
-                    : <td>{value || '-'}</td>);
-                  return (
-                    <tr key={item.id} className={missing.length > 0 ? 'row-missing' : ''}>
-                      {mark('学院', item.college)}
-                      {mark('学号', item.studentNo)}
-                      {mark('姓名', item.name)}
-                      {mark('性别', item.gender)}
-                      {mark('班级', item.className)}
-                      {mark('辅导员', item.counselor)}
-                      <td><span className={`status-badge ${item.activated ? 'green' : 'gray'}`}>{item.activated ? '已激活' : '待激活'}</span></td>
-                      <td>{item.importedBy || '-'}</td>
-                      <td>{item.createdAt ? item.createdAt.slice(0, 19).replace('T', ' ') : '-'}</td>
-                      <td>
-                        <div className="registration-row-actions">
-                          {item.activated && (
-                            <button
-                              className="secondary-button"
-                              type="button"
-                              disabled={deletingId === item.id}
-                              onClick={() => handleRevokeAccount(item)}
-                              title="删除该学生的登录账号，注册名单保留"
-                            >
-                              删除账号
-                            </button>
-                          )}
-                          <button
-                            className="secondary-button danger"
-                            type="button"
-                            disabled={deletingId === item.id}
-                            onClick={() => handleDelete(item)}
-                            title="删除该学生的注册名单记录"
-                          >
-                            删除名单
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        {result && (
+          <div className="page-message">
+            新增 {result.created} 人，更新 {result.updated} 人，迁移旧账号 {result.migrated || 0} 人，跳过 {result.skipped} 行。
+            {(result.errors || []).length > 0 && <ul>{result.errors.map((item, index) => <li key={index}>{item}</li>)}</ul>}
           </div>
         )}
       </SectionCard>
     </div>
   );
 }
-
 function ConnectionLogsPage() {
   const [payload, setPayload] = useState({
     logs: [],
@@ -3538,8 +3310,7 @@ const pageDescriptions = {
   interviews: '查看学生模拟训练进度与 AI 陪练运行情况',
   reports: '抽检成长报告的准确性与建议质量',
   organization: '维护学院、专业、班级和学生组织归属',
-  organizationConfig: '组织结构一览，从用户注册导入表一键生成组织结构',
-  registrations: '学生注册：导入学生，候选人端凭学号与姓名登录',
+  organizationConfig: '维护学院、专业和班级结构',
   catalog: '维护目标岗位、专业方向与能力模型',
   jobPostings: '维护招聘岗位信息，查看对比记录，并审核学生粘贴的岗位描述',
   agents: '查看 AI 陪练角色及使用情况',
@@ -3563,7 +3334,7 @@ const guideFlow = [
     steps: [
       { view: 'settings', text: '在「系统管理」中配置报告大模型 / 供应商，以及质检相关规则。' },
       { view: 'organization', text: '在「组织与学生」中维护学院、专业、班级等组织归属，保证学生归班准确。' },
-      { view: 'registrations', text: '在「学生」页点击「学生注册」导入学生，候选人端凭学号与姓名即可登录。' },
+      { view: 'organization', text: '在「学生」页导入学生账号名单，导出临时密码供学生首次登录并改密。' },
     ],
   },
   {
@@ -3712,66 +3483,6 @@ function OrganizationConfigPage({ onNavigate }) {
     }
   };
 
-  // 一键生成组织结构（弹窗预览 -> 解析失败回退 -> 应用）
-  const [genOpen, setGenOpen] = useState(false);
-  const [genBusy, setGenBusy] = useState(false);
-  const [genError, setGenError] = useState('');
-  const [genPreview, setGenPreview] = useState(null);
-  const [genResolved, setGenResolved] = useState({});
-  const [genIgnored, setGenIgnored] = useState({});
-
-  const unassignedGroups = useMemo(() => {
-    const groups = [];
-    const map = {};
-    (genPreview?.unassigned || []).forEach((item) => {
-      const key = `${item.college || '-'}::${item.className || '-'}`;
-      if (!map[key]) {
-        map[key] = { college: item.college, className: item.className, reason: item.reason, students: [] };
-        groups.push(map[key]);
-      }
-      map[key].students.push(item);
-    });
-    return groups;
-  }, [genPreview]);
-
-  const openGenerate = async () => {
-    setGenOpen(true);
-    setGenBusy(true);
-    setGenError('');
-    setGenPreview(null);
-    setGenResolved({});
-    setGenIgnored({});
-    try {
-      const data = await adminRequest('/api/admin/organization/generate', { method: 'POST', body: JSON.stringify({ apply: false }) });
-      setGenPreview(data);
-    } catch (requestError) {
-      setGenError(requestError.message);
-    } finally {
-      setGenBusy(false);
-    }
-  };
-
-  const applyGenerate = async () => {
-    setGenBusy(true);
-    setGenError('');
-    const resolvedPrograms = {};
-    Object.entries(genResolved).forEach(([key, value]) => { if (value && value.trim()) resolvedPrograms[key] = value.trim(); });
-    const ignored = Object.entries(genIgnored).filter(([, value]) => value).map(([key]) => key);
-    try {
-      const data = await adminRequest('/api/admin/organization/generate', {
-        method: 'POST',
-        body: JSON.stringify({ apply: true, resolvedPrograms, ignored }),
-      });
-      setGenOpen(false);
-      setNotice(`已生成组织结构：新增学院 ${data.newCollegesCount}、专业 ${data.newProgramsCount}、班级 ${data.newClassesCount}，归班 ${data.assigned} 人`);
-      await loadStructure();
-    } catch (requestError) {
-      setGenError(requestError.message);
-    } finally {
-      setGenBusy(false);
-    }
-  };
-
   // 编辑 / 删除组织结构节点
   const [editState, setEditState] = useState(null); // { type, item }
   const [editing, setEditing] = useState(false);
@@ -3846,7 +3557,7 @@ function OrganizationConfigPage({ onNavigate }) {
         ) : pageError ? (
           <div className="page-message error"><AlertCircle size={18} />{pageError}<button type="button" onClick={loadStructure}>重新加载</button></div>
         ) : colleges.length === 0 ? (
-          <div className="page-message">当前还没有组织结构，请先导入用户注册表一键生成。</div>
+          <div className="page-message">当前还没有组织结构，请在下方添加学院、专业和班级。</div>
         ) : (
           <div className="campus-tree">
             <button type="button" className="active">
@@ -3886,11 +3597,6 @@ function OrganizationConfigPage({ onNavigate }) {
         <SectionCard
           title="组织配置"
           icon={<Plus size={18} />}
-          action={(
-            <button className="primary-button" type="button" onClick={openGenerate} disabled={genBusy}>
-              <Rocket size={15} className={genBusy ? 'spin' : ''} />一键生成组织结构
-            </button>
-          )}
         >
           <div className="campus-config-tabs">
             {[['college', '学院'], ['program', '专业'], ['class', '班级']].map(([key, label]) => <button type="button" key={key} className={creator === key ? 'active' : ''} onClick={() => setCreator(key)}>{creator === key ? `添加${label}` : label}</button>)}
@@ -3956,64 +3662,6 @@ function OrganizationConfigPage({ onNavigate }) {
           </div>
         </SectionCard>
       </section>
-
-      {genOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="一键生成组织结构">
-          <div className="modal-card org-generate-modal">
-            <header>
-              <div><Rocket size={18} /><h2>一键生成组织结构</h2></div>
-              <button type="button" className="modal-close" onClick={() => setGenOpen(false)} disabled={genBusy}><X size={18} /></button>
-            </header>
-
-            {!genPreview && !genError && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取学生注册数据…</div>}
-            {genError && <div className="page-message error"><AlertCircle size={18} />{genError}</div>}
-
-            {genPreview && (
-              <>
-                <div className="org-generate-summary">
-                  <div><span>可归班学生</span><strong>{genPreview.assignable}</strong></div>
-                  <div><span>待生成学院</span><strong>{genPreview.newColleges.length}</strong></div>
-                  <div><span>待生成专业</span><strong>{genPreview.newPrograms.length}</strong></div>
-                  <div><span>待生成班级</span><strong>{genPreview.newClasses.length}</strong></div>
-                  <div><span>需人工处理</span><strong className={genPreview.unassignedCount > 0 ? 'count-alert' : ''}>{genPreview.unassignedCount}</strong></div>
-                </div>
-
-                {unassignedGroups.length > 0 && (
-                  <div className="org-generate-unassigned">
-                    <strong>以下班级无法自动提取专业，请填写专业名或忽略：</strong>
-                    {unassignedGroups.map((group) => {
-                      const groupIgnored = group.students.every((student) => genIgnored[student.studentNo]);
-                      return (
-                        <div className={`org-unassigned-group${groupIgnored ? ' ignored' : ''}`} key={`${group.college}::${group.className}`}>
-                          <div className="org-unassigned-head">
-                            <span>{group.college || '（缺学院）'} / {group.className || '（缺班级）'} <em>{group.students.length} 人</em></span>
-                            <button type="button" className="secondary-button" onClick={() => setGenIgnored((prev) => {
-                              const next = { ...prev };
-                              if (groupIgnored) group.students.forEach((student) => { delete next[student.studentNo]; });
-                              else group.students.forEach((student) => { next[student.studentNo] = true; });
-                              return next;
-                            })}>{groupIgnored ? '取消忽略' : '忽略'}</button>
-                          </div>
-                          {!groupIgnored && (
-                            <label className="field-block"><span>输入专业名</span><input value={genResolved[group.className] || ''} onChange={(event) => setGenResolved((prev) => ({ ...prev, [group.className]: event.target.value }))} placeholder="例如 软件工程" /></label>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {unassignedGroups.length === 0 && <p className="page-message success"><CheckCircle2 size={16} />全部学生均已成功解析，可直接生成。</p>}
-
-                <footer>
-                  <button type="button" className="secondary-button" onClick={() => setGenOpen(false)} disabled={genBusy}>取消</button>
-                  <button type="button" className="primary-button" onClick={applyGenerate} disabled={genBusy}>{genBusy ? '生成中…' : '应用并生成'}</button>
-                </footer>
-              </>
-            )}
-          </div>
-        </div>
-      )}
 
       {editState && (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="编辑组织结构" onClick={() => setEditState(null)}>
@@ -4337,7 +3985,7 @@ function AdminApp({ admin, onSignedOut }) {
           </div>
           <div className="topbar-actions">
             {activeView === 'organization' && (
-              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生注册</button>
+              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生账号</button>
             )}
             {searchableViews.has(activeView) && (
               <label className="admin-search">
@@ -4372,13 +4020,17 @@ function AdminApp({ admin, onSignedOut }) {
       />
 
       {registrationsOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生注册" onClick={() => setRegistrationsOpen(false)}>
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生账号" onClick={() => setRegistrationsOpen(false)}>
           <div className="modal-card resg-modal" onClick={(event) => event.stopPropagation()}>
             <header>
-              <span><UserPlus size={18} />学生注册</span>
+              <span><UserPlus size={18} />学生账号</span>
               <button className="icon-button" type="button" title="关闭" onClick={() => setRegistrationsOpen(false)}><X size={17} /></button>
             </header>
-            <RegistrationsPage />
+            <StudentAccountsImportPage
+              candidates={adminData.candidates}
+              canImport={adminData.permissions?.canImportStudentAccounts}
+              onAccountsChanged={refreshSnapshot}
+            />
           </div>
         </div>
       )}

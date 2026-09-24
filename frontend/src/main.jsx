@@ -8,7 +8,6 @@ import {
   BriefcaseBusiness,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
   CircleDot,
   Clock3,
   Download,
@@ -28,6 +27,7 @@ import {
   Radio,
   Plus,
   Save,
+  Search,
   Send,
   ShieldCheck,
   Sparkles,
@@ -621,21 +621,6 @@ function hasResumeAnalysisSource(profile) {
     'project_experience',
   ].some((field) => String(profile[field] || '').trim());
 }
-
-const authHighlights = [
-  {
-    title: '个人空间',
-    text: '登录后只展示当前用户的简历、模拟面试记录和复盘报告。',
-  },
-  {
-    title: '安全登录',
-    text: '正式接入后密码只保存哈希，登录态使用 HttpOnly Cookie。',
-  },
-  {
-    title: '访问隔离',
-    text: '每次读取报告、简历和消息都要同时校验 interview_id 与 user_id。',
-  },
-];
 
 const defaultProfile = {
   nickname: '',
@@ -1552,12 +1537,6 @@ function LoginPage({ onAuthenticated }) {
             </div>
           </div>
 
-          <div className="auth-tabs" aria-label="账号登录方式">
-            <button type="button" className="active">
-              学号登录
-            </button>
-          </div>
-
           <div className="auth-form">
             {!isResetConfirm && (
               <AuthInput
@@ -1626,10 +1605,6 @@ function LoginPage({ onAuthenticated }) {
                     ? '创建账号并进入'
                     : '使用学号登录'}
           </button>
-
-          <p className="auth-notice">
-            学生账号由学校统一创建，不开放自主注册。首次登录后必须修改临时密码。
-          </p>
         </form>
       </section>
     </main>
@@ -1698,7 +1673,7 @@ function OptionGroup({ label, options, value, onChange }) {
   return (
     <label className="option-group">
       <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
+      <select value={value || ''} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option} value={option}>
             {option}
@@ -2001,8 +1976,30 @@ function ProfessionalSkillsPicker({ value, onChange, role }) {
 
   const toggleSkill = (label) => toggleTag(skillTags, setSkillTags, label);
   const toggleAdvantage = (label) => toggleTag(advantageTags, setAdvantageTags, label);
-  const addSkill = () => { if (customSkill.trim()) { setSkillTags((tags) => [...tags.filter((t) => t !== '暂无'), customSkill.trim()]); setCustomSkill(''); } };
-  const addAdvantage = () => { if (customAdvantage.trim()) { setAdvantageTags((tags) => [...tags.filter((t) => t !== '暂无'), customAdvantage.trim()]); setCustomAdvantage(''); } };
+  const addSkill = () => {
+    const next = customSkill.trim();
+    if (!next) return;
+    setSkillTags((tags) => {
+      const withoutNone = tags.filter((t) => t !== '暂无');
+      return withoutNone.includes(next) ? withoutNone : [...withoutNone, next];
+    });
+    setCustomSkill('');
+  };
+  const addAdvantage = () => {
+    const next = customAdvantage.trim();
+    if (!next) return;
+    setAdvantageTags((tags) => {
+      const withoutNone = tags.filter((t) => t !== '暂无');
+      return withoutNone.includes(next) ? withoutNone : [...withoutNone, next];
+    });
+    setCustomAdvantage('');
+  };
+
+  // 已添加的自定义标签（不在预设列表里），逐个展示并支持删除
+  const customSkills = skillTags.filter((t) => t !== '暂无' && !techPresets.includes(t));
+  const customAdvantages = advantageTags.filter((t) => t !== '暂无' && !DEFAULT_PRESETS.includes(t));
+  const hasCustomSkill = customSkills.length > 0;
+  const hasCustomAdvantage = customAdvantages.length > 0;
 
   const skillFilled = skillTags.length > 0;
   const advantageFilled = advantageTags.length > 0;
@@ -2042,8 +2039,12 @@ function ProfessionalSkillsPicker({ value, onChange, role }) {
                 <SkillTagButton key={tag} label={tag} active={skillTags.includes(tag)} onClick={() => toggleSkill(tag)} />
               ))}
               <SkillTagButton label="暂无" muted active={skillTags.includes('暂无')} onClick={() => toggleSkill('暂无')} />
+              {hasCustomSkill && customSkills.map((tag) => (
+                <SkillTagButton key={`${tag}-custom`} label={`${tag} ×`} active onClick={() => toggleSkill(tag)} />
+              ))}
               <span className="skill-tag skill-tag-custom">
                 <input placeholder="自定义" value={customSkill} onChange={(e) => setCustomSkill(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSkill(); } }} />
+                <button type="button" className="skill-tag-add" onClick={addSkill}>＋</button>
               </span>
             </div>
           </SectionBlock>
@@ -2053,8 +2054,12 @@ function ProfessionalSkillsPicker({ value, onChange, role }) {
                 <SkillTagButton key={tag} label={tag} active={advantageTags.includes(tag)} onClick={() => toggleAdvantage(tag)} />
               ))}
               <SkillTagButton label="暂无" muted active={advantageTags.includes('暂无')} onClick={() => toggleAdvantage('暂无')} />
+              {hasCustomAdvantage && customAdvantages.map((tag) => (
+                <SkillTagButton key={`${tag}-custom`} label={`${tag} ×`} active onClick={() => toggleAdvantage(tag)} />
+              ))}
               <span className="skill-tag skill-tag-custom">
-                <input placeholder="自定义优势" value={customAdvantage} onChange={(e) => setCustomAdvantage(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAdvantage(); } }} />
+                <input placeholder="自定义" value={customAdvantage} onChange={(e) => setCustomAdvantage(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAdvantage(); } }} />
+                <button type="button" className="skill-tag-add" onClick={addAdvantage}>＋</button>
               </span>
             </div>
           </SectionBlock>
@@ -2334,9 +2339,9 @@ function ProjectEditor({ initial, editing, onCancel, onSave }) {
           <label className="education-field" key={f.key}>
             <span>{f.label}</span>
             {f.textarea ? (
-              <textarea rows={4} value={item[f.key]} placeholder={`${f.label}示例`} onChange={(e) => setItem((it) => ({ ...it, [f.key]: e.target.value }))} />
+              <textarea rows={4} value={item[f.key] || ''} placeholder={`${f.label}示例`} onChange={(e) => setItem((it) => ({ ...it, [f.key]: e.target.value }))} />
             ) : (
-              <input value={item[f.key]} placeholder={`${f.label}示例`} onChange={(e) => setItem((it) => ({ ...it, [f.key]: e.target.value }))} />
+              <input value={item[f.key] || ''} placeholder={`${f.label}示例`} onChange={(e) => setItem((it) => ({ ...it, [f.key]: e.target.value }))} />
             )}
           </label>
         ))}
@@ -2657,6 +2662,359 @@ function ResumeDownloader({ text, name }) {
   );
 }
 
+const JOB_MATCH_STATUS_LABELS = { satisfied: '已满足', partial: '部分满足', missing: '未体现' };
+
+function JobMatchResult({ result }) {
+  const detail = result?.result || {};
+  return (
+    <>
+      <div className="jcmp-result">
+        <div className={`jcmp-score ${detail.matchScore >= 75 ? 'high' : detail.matchScore >= 55 ? 'mid' : 'low'}`}>
+          <span>{detail.scoreLabel || '岗位匹配度'}</span>
+          <strong>{detail.matchScore ?? result.match_score}</strong>
+          <small>/100</small>
+        </div>
+        <div className="jcmp-result-copy">
+          <div className="jcmp-result-tags">
+            <StatusTag tone={result.source === 'library' ? 'blue' : 'amber'}>{result.source === 'library' ? '招聘信息库岗位' : '粘贴 JD'}</StatusTag>
+            <StatusTag tone={result.provider && result.provider !== 'local' ? 'green' : 'blue'}>
+              {result.provider && result.provider !== 'local' ? `AI 建议 · ${result.provider}` : '规则引擎打分'}
+            </StatusTag>
+          </div>
+          <h3>{result.job_title || '岗位'}{result.company ? ` · ${result.company}` : ''}</h3>
+          <p>{detail.summary || '已完成对比，请在下方查看分维度结果。'}</p>
+        </div>
+      </div>
+
+      {(detail.dimensions || []).length > 0 && (
+        <div className="jcmp-dimensions">
+          {detail.dimensions.map((dimension) => (
+            <div className="jcmp-dimension" key={dimension.label}>
+              <div className="jcmp-dimension-top">
+                <strong>{dimension.label}</strong>
+                <span>{dimension.score} 分 · 权重 {dimension.weight}</span>
+              </div>
+              <div className="jcmp-bar"><i style={{ width: `${Math.max(0, Math.min(100, dimension.score))}%` }} /></div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="jcmp-columns">
+        <div className="jcmp-column">
+          <h4>已具备技能（{detail.matchedSkills?.length || 0}）</h4>
+          <div className="jcmp-chips">
+            {(detail.matchedSkills || []).map((skill) => <b className="hit" key={skill}>{skill}</b>)}
+            {!detail.matchedSkills?.length && <span className="jcmp-hint">暂未匹配到明确技能，建议补充技术关键词。</span>}
+          </div>
+        </div>
+        <div className="jcmp-column">
+          <h4>待补充技能（{detail.missingSkills?.length || 0}）</h4>
+          <div className="jcmp-chips">
+            {(detail.missingSkills || []).map((skill) => <b className="miss" key={skill}>{skill}</b>)}
+            {!detail.missingSkills?.length && <span className="jcmp-hint">岗位要求的技能已全部覆盖。</span>}
+          </div>
+        </div>
+      </div>
+
+      {(detail.matrices || []).length > 0 && (
+        <div className="jcmp-block">
+          <h4>任职要求逐条比对</h4>
+          <div className="jcmp-matrix">
+            {detail.matrices.map((item, index) => (
+              <article key={`${item.requirement}-${index}`}>
+                <StatusTag tone={item.status === 'satisfied' ? 'green' : item.status === 'partial' ? 'amber' : 'blue'}>
+                  {JOB_MATCH_STATUS_LABELS[item.status] || item.status}
+                </StatusTag>
+                <div>
+                  <strong>{item.requirement}</strong>
+                  {item.matched?.length > 0 && <small>命中关键词：{item.matched.join('、')}</small>}
+                  {item.evidence && <small>简历依据：{item.evidence}</small>}
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="jcmp-columns">
+        <div className="jcmp-column">
+          <h4><CheckCircle2 size={15} />优势</h4>
+          <ul className="jcmp-points">{(detail.strengths || []).map((item, index) => <li key={`s-${index}`}>{item}</li>)}</ul>
+        </div>
+        <div className="jcmp-column">
+          <h4><AlertTriangle size={15} />差距</h4>
+          <ul className="jcmp-points">{(detail.gaps || []).map((item, index) => <li key={`g-${index}`}>{item}</li>)}</ul>
+        </div>
+        <div className="jcmp-column">
+          <h4><TrendingUp size={15} />改进建议</h4>
+          <ul className="jcmp-points">{(detail.suggestions || []).map((item, index) => <li key={`t-${index}`}>{item}</li>)}</ul>
+        </div>
+        <div className="jcmp-column">
+          <h4><MessageSquareText size={15} />面试关注点</h4>
+          <ul className="jcmp-points">{(detail.interviewFocus || []).map((item, index) => <li key={`f-${index}`}>{item}</li>)}</ul>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ResumeJobCompare() {
+  const [mode, setMode] = useState('library');
+  const [postings, setPostings] = useState([]);
+  const [loadingPostings, setLoadingPostings] = useState(true);
+  const [postingKeyword, setPostingKeyword] = useState('');
+  const [selectedId, setSelectedId] = useState('');
+  const [jdForm, setJdForm] = useState({ job_title: '', company: '', jd_text: '' });
+  const [matching, setMatching] = useState(false);
+  const [result, setResult] = useState(null);
+  const [compareError, setCompareError] = useState('');
+  const [compareMessage, setCompareMessage] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+    apiRequest('/api/job-postings')
+      .then((data) => { if (mounted) setPostings(data.postings || []); })
+      .catch(() => { if (mounted) setPostings([]); })
+      .finally(() => { if (mounted) setLoadingPostings(false); });
+    return () => { mounted = false; };
+  }, []);
+
+  const visiblePostings = postings.filter((posting) => {
+    const needle = postingKeyword.trim().toLowerCase();
+    if (!needle) return true;
+    return [posting.title, posting.company, posting.job_category, posting.city]
+      .filter(Boolean).join(' ').toLowerCase().includes(needle);
+  });
+
+  const selectedPosting = postings.find((posting) => posting.id === selectedId) || null;
+
+  const startCompare = async () => {
+    setCompareError('');
+    setCompareMessage('');
+    if (mode === 'library' && !selectedId) {
+      setCompareError('请先选择一个招聘岗位。');
+      return;
+    }
+    if (mode === 'pasted' && jdForm.jd_text.trim().length < 20) {
+      setCompareError('请粘贴岗位描述（JD），内容不少于 20 字。');
+      return;
+    }
+    setMatching(true);
+    try {
+      const payload = mode === 'library'
+        ? { job_posting_id: selectedId }
+        : { job_title: jdForm.job_title.trim() || '自定义岗位', company: jdForm.company.trim(), jd_text: jdForm.jd_text.trim() };
+      const data = await apiRequest('/api/job-matches', { method: 'POST', body: JSON.stringify(payload) });
+      setResult(data.job_match || null);
+      setCompareMessage('已完成对比，结果已保存，可在“复盘报告 → 岗位对比”中再次查看。');
+    } catch (requestError) {
+      setCompareError(requestError.message);
+    } finally {
+      setMatching(false);
+    }
+  };
+
+  return (
+    <section className="job-compare-section">
+      <Card title="简历与招聘岗位对比" icon={<BriefcaseBusiness size={18} />}>
+        <div className="jcmp-body">
+          <div className="jcmp-mode">
+            <button type="button" className={mode === 'library' ? 'active' : ''} onClick={() => setMode('library')}>从招聘信息库选择</button>
+            <button type="button" className={mode === 'pasted' ? 'active' : ''} onClick={() => setMode('pasted')}>粘贴岗位描述（JD）</button>
+          </div>
+
+          {mode === 'library' ? (
+            <div className="jcmp-library">
+              <label className="jcmp-search">
+                <Search size={15} />
+                <input value={postingKeyword} onChange={(event) => setPostingKeyword(event.target.value)} placeholder="搜索岗位名称、公司、类别或城市" />
+              </label>
+              {loadingPostings ? (
+                <p className="jcmp-hint">正在读取招聘信息库…</p>
+              ) : visiblePostings.length === 0 ? (
+                <p className="jcmp-hint">当前没有可对比的招聘岗位，可切换到“粘贴岗位描述”方式，或联系就业指导老师录入岗位。</p>
+              ) : (
+                <div className="jcmp-posting-list">
+                  {visiblePostings.map((posting) => (
+                    <button
+                      type="button"
+                      key={posting.id}
+                      className={`jcmp-posting ${selectedId === posting.id ? 'selected' : ''}`}
+                      onClick={() => setSelectedId(posting.id)}
+                    >
+                      <div className="jcmp-posting-head">
+                        <strong>{posting.title}</strong>
+                        {posting.city && <span>{posting.city}</span>}
+                      </div>
+                      <small>{[posting.company, posting.job_category, posting.graduation_year, posting.salary].filter(Boolean).join(' · ') || '未填写更多信息'}</small>
+                      {posting.skillList?.length > 0 && (
+                        <div className="jcmp-posting-skills">
+                          {posting.skillList.slice(0, 6).map((skill) => <em key={skill}>{skill}</em>)}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="jcmp-paste">
+              <div className="jcmp-paste-row">
+                <label className="brief-field">
+                  <span>岗位名称</span>
+                  <input value={jdForm.job_title} onChange={(event) => setJdForm((current) => ({ ...current, job_title: event.target.value }))} placeholder="例如：前端开发工程师" />
+                </label>
+                <label className="brief-field">
+                  <span>公司（可选）</span>
+                  <input value={jdForm.company} onChange={(event) => setJdForm((current) => ({ ...current, company: event.target.value }))} placeholder="例如：某某科技有限公司" />
+                </label>
+              </div>
+              <label className="brief-field">
+                <span>岗位描述 / 任职要求</span>
+                <textarea
+                  rows={8}
+                  value={jdForm.jd_text}
+                  onChange={(event) => setJdForm((current) => ({ ...current, jd_text: event.target.value }))}
+                  placeholder="把招聘网站上的岗位职责与任职要求粘贴到这里，建议保留原文分行，便于逐条比对。"
+                />
+              </label>
+            </div>
+          )}
+
+          {selectedPosting && mode === 'library' && (
+            <div className="jcmp-selected-note">
+              <strong>已选择：{selectedPosting.title}</strong>
+              <span>{[selectedPosting.company, selectedPosting.employment_type, selectedPosting.education_requirement].filter(Boolean).join(' · ') || '暂无更多岗位信息'}</span>
+            </div>
+          )}
+
+          <div className="jcmp-actions">
+            <button className="primary-action" type="button" onClick={startCompare} disabled={matching}>
+              <Sparkles size={16} />
+              {matching ? '对比中…' : '开始对比'}
+            </button>
+            <span className="jcmp-actions-note">对比使用“简历分析”中已保存的简历内容，结果会同步到管理端。</span>
+          </div>
+
+          {compareError && <div className="profile-message error">{compareError}</div>}
+          {compareMessage && <div className="profile-message success">{compareMessage}</div>}
+        </div>
+      </Card>
+
+      {result && (
+        <Card title="对比结果" icon={<Target size={18} />}>
+          <JobMatchResult result={result} />
+        </Card>
+      )}
+    </section>
+  );
+}
+
+function JobComparePage() {
+  return (
+    <section className="job-compare-page">
+      <ResumeJobCompare />
+    </section>
+  );
+}
+
+function JobMatchHistoryPage() {
+  const [matches, setMatches] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [activeMatch, setActiveMatch] = useState(null);
+  const [error, setError] = useState('');
+
+  const loadMatches = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await apiRequest('/api/job-matches');
+      setMatches(data.matches || []);
+    } catch (requestError) {
+      setError(requestError.message);
+      setMatches([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadMatches();
+  }, []);
+
+  const openMatch = async (match) => {
+    setError('');
+    setLoadingDetail(true);
+    try {
+      const data = await apiRequest(`/api/job-matches/${encodeURIComponent(match.id)}`);
+      setActiveMatch(data.job_match || null);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoadingDetail(false);
+    }
+  };
+
+  if (activeMatch) {
+    return (
+      <section className="job-match-history-page">
+        <button type="button" className="secondary-action report-back-action" onClick={() => setActiveMatch(null)}>
+          ← 返回岗位对比记录
+        </button>
+        <Card title="对比结果" icon={<Target size={18} />}>
+          <JobMatchResult result={activeMatch} />
+        </Card>
+      </section>
+    );
+  }
+
+  return (
+    <section className="job-match-history-page">
+      <div className="resume-hero">
+        <div>
+          <p className="eyebrow">Job Match History</p>
+          <h1>简历与招聘岗位对比记录</h1>
+          <span>这里读取 `GET /api/job-matches`，展示你在“简历分析”中发起过的岗位对比，点击即可回看完整结论。</span>
+        </div>
+      </div>
+
+      {error && <div className="profile-message error">{error}</div>}
+
+      {loading ? (
+        <div className="profile-loading">正在读取岗位对比记录</div>
+      ) : matches.length === 0 ? (
+        <div className="empty-state">
+          <strong>暂无岗位对比记录</strong>
+          <span>在“简历分析 → 简历与招聘岗位对比”中选择岗位或粘贴 JD，即可生成第一条对比记录。</span>
+        </div>
+      ) : (
+        <div className="history-list">
+          {matches.map((match) => (
+            <article className="history-item" key={match.id}>
+              <div>
+                <strong>{match.job_title || '岗位'}</strong>
+                <span>{[match.company, formatDateTime(match.created_at)].filter(Boolean).join(' · ')}</span>
+                <span>
+                  {match.source === 'library' ? '招聘信息库岗位' : '粘贴 JD'} · {match.provider && match.provider !== 'local' ? `AI 建议 · ${match.provider}` : '规则引擎打分'}
+                </span>
+              </div>
+              <div className="history-score">
+                <strong>{match.match_score}</strong>
+                <span>岗位匹配度</span>
+                <button className="secondary-action" type="button" onClick={() => openMatch(match)} disabled={loadingDetail}>
+                  {loadingDetail ? '读取中…' : '查看对比'}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ResumeAnalysisPage() {
   const [resumeText, setResumeText] = useState('');
   const [fileName, setFileName] = useState('');
@@ -2671,7 +3029,7 @@ function ResumeAnalysisPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [form, setForm] = useState(EMPTY_RESUME_FORM);
   const [collegeOptions, setCollegeOptions] = useState([]);
-  const [studentInfo, setStudentInfo] = useState({ name: '', studentNo: '' });
+  const [studentInfo, setStudentInfo] = useState({ name: '', studentNo: '', college: '' });
   const [savingForm, setSavingForm] = useState(false);
   const [editorMode, setEditorMode] = useState('document');
   const [uploading, setUploading] = useState(false);
@@ -2733,9 +3091,11 @@ function ResumeAnalysisPage() {
       .then((data) => {
         if (!mounted) return;
         if (data.form && Object.keys(data.form).length) {
-          setForm({ ...EMPTY_RESUME_FORM, ...data.form });
+          setForm({ ...EMPTY_RESUME_FORM, college: data.college || '', ...data.form });
+        } else {
+          setForm((current) => ({ ...current, college: data.college || current.college }));
         }
-        setStudentInfo({ name: data.name || '', studentNo: data.student_no || '' });
+        setStudentInfo({ name: data.name || '', studentNo: data.student_no || '', college: data.college || '' });
       })
       .catch(() => {});
 
@@ -2960,17 +3320,12 @@ function ResumeAnalysisPage() {
               </label>
               <label className="brief-field">
                 <span>学院</span>
-                <select value={form.college} onChange={(event) => handleFormChange('college', event.target.value)}>
-                  <option value="">请选择学院</option>
-                  {collegeOptions.map((college) => (
-                    <option key={college.id || college.name} value={college.name}>{college.name}</option>
-                  ))}
-                </select>
+                <input value={studentInfo.college || form.college || ''} disabled placeholder="登录后自动填写" />
               </label>
               <label className="brief-field">
                 <span>专业</span>
                 <select
-                  value={form.major}
+                  value={form.major || ''}
                   onChange={(event) => handleFormChange('major', event.target.value)}
                   disabled={!form.college}
                 >
@@ -3376,6 +3731,11 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
             )}
           </div>
         </Card>
+
+        <button className="primary-action start-interview" onClick={handleStart} disabled={starting || loadingProfile}>
+          <Phone size={17} />
+          {starting ? '创建中' : '开始电话面试'}
+        </button>
 
       </section>
       <div className="v4-setup-launch">
@@ -6642,6 +7002,7 @@ function V4MePage({ onNavigate }) {
       <div className="v4-me-grid">
         <button type="button" className="v4-feature" onClick={() => onNavigate('resume')}><span className="v4-eyebrow">01 / RESUME</span><FileText size={36} /><h2>我的简历</h2><p>管理简历，查看真实分析结果与就业方向。</p><strong>进入查看 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('report')}><span className="v4-eyebrow">02 / HISTORY</span><Phone size={36} /><h2>我的历史</h2><p>回顾面试记录与真实复盘报告。</p><strong>进入查看 ↗</strong></button>
+        <button type="button" className="v4-feature" onClick={() => onNavigate('jobcompare')}><span className="v4-eyebrow">03 / CAREER</span><BriefcaseBusiness size={36} /><h2>招聘对比</h2><p>将简历与招聘岗位对比，查看匹配情况和改进建议。</p><strong>开始对比 ↗</strong></button>
       </div>
     </section>
   );
@@ -6655,6 +7016,7 @@ function App() {
   const [activeInterviewId, setActiveInterviewId] = useState('');
   const [runningInterviewId, setRunningInterviewId] = useState('');
   const [reportMode, setReportMode] = useState('list');
+  const [reportTab, setReportTab] = useState('interview');
 
   useEffect(() => {
     let mounted = true;
@@ -6706,6 +7068,7 @@ function App() {
     if (interviewId === runningInterviewId) setRunningInterviewId('');
     setActiveInterviewId(interviewId);
     setReportMode('detail');
+    setReportTab('interview');
     setView('report');
   };
 
@@ -6717,6 +7080,7 @@ function App() {
     if (nextView === 'setup') nextView = 'phone-choice';
     if (nextView === 'report') {
       setReportMode('list');
+      setReportTab('interview');
     }
     setView(nextView);
   };
@@ -6754,7 +7118,7 @@ function App() {
       <div className="workspace-page v4-workspace">
         <div className="topbar">
           <button type="button" className="v4-brand-button" onClick={() => handleViewChange('home')} aria-label="返回面试空间"><V4Brand /></button>
-          <span className="v4-breadcrumb">Astrainterview <span>/</span> <b>{({ home: '面试空间', me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', phone: '正在面试', resume: '我的简历', profile: '个人资料', report: '历史报告', stats: '能力画像' })[view]}</b></span>
+          <span className="v4-breadcrumb">Astrainterview <span>/</span> <b>{({ home: '面试空间', me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', phone: '正在面试', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告', stats: '能力画像' })[view]}</b></span>
           <span className="v4-header-note"><i />专注于你的下一次成长</span>
           {runningInterviewId && view !== 'phone' && <button className="v4-continue-link" type="button" onClick={() => handleViewChange('phone')}>继续面试 ↗</button>}
           <button className="topbar-account" type="button" onClick={() => handleViewChange('me')} aria-label="打开我的空间">
@@ -6763,13 +7127,14 @@ function App() {
           <button className="v4-logout" aria-label="退出登录" onClick={handleLogout}>退出登录 ↗</button>
         </div>
 
-        {view !== 'home' && view !== 'phone' && <div className="v4-page-toolbar"><button type="button" onClick={() => handleViewChange(({ me: 'home', 'phone-choice': 'home', setup: 'phone-choice', stats: 'home', resume: 'me', profile: 'me', report: 'me' })[view] || 'home')}>← 返回{({ me: '面试空间', 'phone-choice': '面试空间', setup: '难度选择', stats: '面试空间', resume: '我的', profile: '我的', report: '我的' })[view]}</button><span>面试空间 / {({ me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', stats: '能力画像', resume: '我的简历', profile: '个人资料', report: '历史报告' })[view]}</span></div>}
+        {view !== 'home' && view !== 'phone' && <div className="v4-page-toolbar"><button type="button" onClick={() => handleViewChange(({ me: 'home', 'phone-choice': 'home', setup: 'phone-choice', stats: 'home', resume: 'me', jobcompare: 'me', profile: 'me', report: 'me' })[view] || 'home')}>← 返回{({ me: '面试空间', 'phone-choice': '面试空间', setup: '难度选择', stats: '面试空间', resume: '我的', jobcompare: '我的', profile: '我的', report: '我的' })[view]}</button><span>面试空间 / {({ me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', stats: '能力画像', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告' })[view]}</span></div>}
 
         {view === 'home' && <V4HomePage user={user} onNavigate={handleViewChange} onOpenReport={handleOpenReport} />}
         {view === 'phone-choice' && <V4PhoneChoicePage onSelect={handleSelectSetup} />}
         {view === 'me' && <V4MePage onNavigate={handleViewChange} />}
         {view === 'setup' && <SetupPage key={`${setupMode}-${setupPresetKey}`} mode={setupMode} presetKey={setupPresetKey} onStart={handleStartInterview} />}
         {view === 'resume' && <ResumeAnalysisPage />}
+        {view === 'jobcompare' && <JobComparePage />}
         {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
         {view === 'phone' && (
           <PhoneInterviewPage
@@ -6779,11 +7144,37 @@ function App() {
           />
         )}
         {view === 'report' && (
-          reportMode === 'detail' && activeInterviewId ? (
-            <ReportPage interviewId={activeInterviewId} user={user} onBackToList={() => setReportMode('list')} />
-          ) : (
-            <HistoryPage onOpenReport={handleOpenReport} />
-          )
+          <section className="report-view">
+            <div className="report-tabs" role="tablist" aria-label="复盘报告视图切换">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={reportTab === 'interview'}
+                className={reportTab === 'interview' ? 'active' : ''}
+                onClick={() => { setReportTab('interview'); setReportMode('list'); }}
+              >
+                <FileText size={15} />
+                面试报告
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={reportTab === 'jobmatch'}
+                className={reportTab === 'jobmatch' ? 'active' : ''}
+                onClick={() => setReportTab('jobmatch')}
+              >
+                <BriefcaseBusiness size={15} />
+                岗位对比
+              </button>
+            </div>
+            {reportTab === 'jobmatch' ? (
+              <JobMatchHistoryPage />
+            ) : reportMode === 'detail' && activeInterviewId ? (
+              <ReportPage interviewId={activeInterviewId} user={user} onBackToList={() => setReportMode('list')} />
+            ) : (
+              <HistoryPage onOpenReport={handleOpenReport} />
+            )}
+          </section>
         )}
         {view === 'stats' && <StatsPage onStartTraining={() => setView('phone-choice')} onOpenReport={handleOpenReport} />}
         <footer className="v4-footer"><span>© 2026 ASTRAINTERVIEW · 为每一次机会，做好准备</span><span>面试记录与报告来自你的真实账号</span></footer>

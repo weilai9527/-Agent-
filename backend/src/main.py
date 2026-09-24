@@ -56,6 +56,17 @@ from .password_reset import (
     validate_new_password,
 )
 from shared.career_catalog import catalog_tree, enrich_resume_directions, list_versions, refresh_resume_direction_matches
+from shared.recruitment import (
+    create_jd_submission,
+    create_job_match,
+    find_job_match_for_user,
+    find_pending_jd_submission,
+    get_job_posting,
+    list_job_matches,
+    list_job_postings,
+    update_jd_submission,
+)
+from .job_match import build_job_match
 from .security import (
     create_token,
     hash_password,
@@ -2475,13 +2486,14 @@ def get_resume_form_settings(user: dict = Depends(require_auth)):
 
 @app.get("/api/resume-form")
 def get_resume_form(user: dict = Depends(require_auth)):
-    """读取当前用户已填写的简历及自动回填的姓名、学号。"""
+    """读取当前用户已填写的简历及自动回填的姓名、学号、学院。"""
     form = one(f"SELECT {RESUME_FORM_COLUMNS} FROM resume_forms WHERE user_id = ?", (user["id"],))
     registration = one("SELECT student_no FROM student_registrations WHERE user_id = ?", (user["id"],))
     return {
         "form": form or {},
         "name": user["name"],
         "student_no": registration["student_no"] if registration else None,
+        "college": user["college"],
     }
 
 
@@ -2561,6 +2573,140 @@ def get_resume_analysis(user: dict = Depends(require_auth)):
 def create_resume_analysis(body: dict | None = None, user: dict = Depends(require_auth)):
     force = bool(json_body(body).get("force"))
     return {"resume_analysis": ensure_resume_analysis_for_user(user, force=force)}
+
+
+def _job_posting_to_compare(posting: dict) -> dict:
+    return {
+        "title": posting.get("title"),
+        "company": posting.get("company"),
+        "job_category": posting.get("job_category"),
+        "skillsText": posting.get("skillsText") or posting.get("skills"),
+        "description": posting.get("description"),
+        "requirements": posting.get("requirements"),
+    }
+
+
+@app.get("/api/job-postings")
+def list_user_job_postings(keyword: str = "", user: dict = Depends(require_auth)):
+    """候选人端可对比的招聘岗位列表（仅启用且已发布）。"""
+    postings = list_job_postings(db, keyword=keyword.strip() or None, published_only=True, limit=200)
+    return {
+        "postings": [
+            {
+                "id": posting["id"],
+                "title": posting.get("title"),
+                "company": posting.get("company"),
+                "job_category": posting.get("job_category"),
+                "city": posting.get("city"),
+                "graduation_year": posting.get("graduation_year"),
+                "employment_type": posting.get("employment_type"),
+                "salary": posting.get("salary"),
+                "education_requirement": posting.get("education_requirement"),
+                "experience_requirement": posting.get("experience_requirement"),
+                "deadline": posting.get("deadline"),
+                "skillList": posting.get("skillList") or [],
+                "catalog_job_name": posting.get("catalog_job_name"),
+                "requirements": posting.get("requirements"),
+                "description": posting.get("description"),
+            }
+            for posting in postings
+        ]
+    }
+
+
+@app.post("/api/job-matches", status_code=201)
+def create_job_match_record(body: dict | None = None, user: dict = Depends(require_auth)):
+    """用当前简历与指定招聘岗位（或粘贴的 JD 文本）做对比并保存结果。"""
+    payload = json_body(body)
+    ensure_profile(user)
+    profile = find_profile_by_user_id(user["id"])
+    resume_text = resume_source_text(profile)
+    if not resume_text:
+        raise error(400, "请先在“简历分析 → 填写简历”中完善简历内容，再进行岗位对比。")
+
+    posting_id = str(payload.get("job_posting_id") or "").strip()
+    if posting_id:
+        posting = get_job_posting(db, posting_id)
+        if not posting or not posting.get("published") or posting.get("status") != "active":
+            raise error(404, "该招聘岗位不存在或已下架。")
+        source = "library"
+        jd_text = "\n".join(
+            part for part in (posting.get("description"), posting.get("requirements")) if part
+        )
+    else:
+        jd_text = str(payload.get("jd_text") or "").strip()
+        if len(jd_text) < 20:
+            raise error(400, "请粘贴岗位描述（JD）后再进行对比，内容不少于 20 字。")
+        if len(jd_text) > 20000:
+            raise error(400, "岗位描述过长，请控制在 20000 字以内。")
+        source = "pasted"
+        posting = {
+            "title": str(payload.get("job_title") or "自定义岗位").strip(),
+            "company": str(payload.get("company") or "").strip(),
+            "skillsText": "",
+            "description": jd_text,
+            "requirements": jd_text,
+        }
+
+    result = build_job_match(
+        resume_text=resume_text,
+        resume_skills=str(profile.get("skills") or ""),
+        target_role=str(profile.get("target_role") or ""),
+        posting=_job_posting_to_compare(posting),
+    )
+    record = create_job_match(
+        db,
+        user_id=user["id"],
+        student_name=str(user.get("name") or ""),
+        student_no=str(user.get("student_no") or ""),
+        student_college=str(user.get("college") or ""),
+        job_posting_id=posting_id or None,
+        job_title=str(posting.get("title") or ""),
+        company=str(posting.get("company") or ""),
+        source=source,
+        jd_text=jd_text,
+        resume_hash=resume_source_hash(profile),
+        match_score=int(result.get("matchScore") or 0),
+        result=result,
+        provider=str(result.get("provider") or "local"),
+        model=str(result.get("model") or "rules-v1"),
+    )
+    if source == "pasted":
+        # 学生粘贴的 JD 额外落一条待审核记录，供管理端审核后录入招聘信息库。
+        title = str(posting.get("title") or "自定义岗位").strip() or "自定义岗位"
+        company = str(posting.get("company") or "").strip()
+        pending = find_pending_jd_submission(db, user["id"], title, company)
+        if pending:
+            update_jd_submission(db, pending["id"], {"job_title": title, "company": company, "jd_text": jd_text})
+        else:
+            create_jd_submission(
+                db,
+                user_id=user["id"],
+                student_name=str(user.get("name") or ""),
+                student_no=str(user.get("student_no") or ""),
+                student_college=str(user.get("college") or ""),
+                job_title=title,
+                company=company,
+                jd_text=jd_text,
+            )
+    db.commit()
+    result["id"] = record.get("id")
+    result["created_at"] = record.get("created_at")
+    return {"job_match": record}
+
+
+@app.get("/api/job-matches")
+def list_my_job_matches(user: dict = Depends(require_auth)):
+    matches = list_job_matches(db, user_id=user["id"], limit=30)
+    return {"matches": matches}
+
+
+@app.get("/api/job-matches/{match_id}")
+def get_my_job_match(match_id: str, user: dict = Depends(require_auth)):
+    match = find_job_match_for_user(db, match_id, user["id"])
+    if not match:
+        raise error(404, "对比记录不存在。")
+    return {"job_match": match}
 
 
 @app.post("/api/interviews", status_code=201)

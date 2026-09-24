@@ -47,6 +47,22 @@ from shared.career_catalog import (
     review_job_suggestion,
     update_catalog_entity,
 )
+from shared.recruitment import (
+    create_jd_submission,
+    create_job_posting,
+    delete_jd_submission,
+    delete_job_posting,
+    get_jd_submission,
+    get_job_match,
+    get_job_posting,
+    list_jd_submissions,
+    list_job_matches,
+    list_job_postings,
+    mark_jd_submission_approved,
+    update_jd_submission,
+    update_job_posting,
+    upsert_job_posting_by_source,
+)
 
 
 app = FastAPI(title="Multi Agent Interview Admin API")
@@ -1587,6 +1603,146 @@ async def create_campus_class(request: Request, admin: dict = Depends(require_pe
     return {"class": one("SELECT * FROM campus_classes WHERE id = ?", (class_id,))}
 
 
+def _delete_campus_enrollments_for_classes(class_ids: list[str]) -> None:
+    """删除指定班级下学生的归班记录。"""
+    if not class_ids:
+        return
+    placeholders = ",".join("?" for _ in class_ids)
+    db.execute(f"DELETE FROM student_enrollments WHERE class_id IN ({placeholders})", class_ids)
+
+
+@app.put("/api/admin/campus/colleges/{college_id}")
+async def update_campus_college(request: Request, college_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_colleges WHERE id = ?", (college_id,)):
+        raise error(404, "学院不存在。")
+    body = await request.json()
+    code = _required_text(body, "code", "学院编码", 64).upper()
+    name = _required_text(body, "name", "学院名称")
+    dup = one("SELECT id FROM campus_colleges WHERE (code = ? OR name = ?) AND id != ?", (code, name, college_id))
+    if dup:
+        raise error(409, "学院编码或名称已存在。")
+    db.execute("UPDATE campus_colleges SET code = ?, name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (code, name, college_id))
+    db.commit()
+    record_audit(request, admin, "campus.college.update", target_type="campus_college", target_id=college_id, summary=f"更新学院：{name}")
+    return {"college": one("SELECT * FROM campus_colleges WHERE id = ?", (college_id,))}
+
+
+@app.delete("/api/admin/campus/colleges/{college_id}")
+def delete_campus_college(request: Request, college_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    college = one("SELECT id, name FROM campus_colleges WHERE id = ?", (college_id,))
+    if not college:
+        raise error(404, "学院不存在。")
+    class_rows = all_rows(
+        """
+        SELECT classes.id FROM campus_classes AS classes
+        JOIN campus_programs AS programs ON programs.id = classes.program_id
+        WHERE programs.college_id = ?
+        """,
+        (college_id,),
+    )
+    try:
+        db.begin()
+        _delete_campus_enrollments_for_classes([row["id"] for row in class_rows])
+        db.execute("DELETE FROM campus_colleges WHERE id = ?", (college_id,))  # 级联删除其下专业、班级
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "campus.college.delete", target_type="campus_college", target_id=college_id, summary=f"级联删除学院：{college['name']}")
+    return {"ok": True}
+
+
+@app.put("/api/admin/campus/programs/{program_id}")
+async def update_campus_program(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_programs WHERE id = ?", (program_id,)):
+        raise error(404, "专业不存在。")
+    body = await request.json()
+    name = _required_text(body, "name", "专业名称")
+    direction = str(body.get("direction") or "").strip()[:160]
+    coordinator = str(body.get("coordinator") or "").strip()[:120]
+    standard_major_code = str(body.get("standardMajorCode") or "").strip()[:64]
+    db.execute(
+        """
+        UPDATE campus_programs
+        SET standard_major_code = ?, name = ?, direction = ?, coordinator = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (standard_major_code or None, name, direction or None, coordinator or None, program_id),
+    )
+    db.commit()
+    record_audit(request, admin, "campus.program.update", target_type="campus_program", target_id=program_id, summary=f"更新专业：{name}")
+    return {"program": one("SELECT * FROM campus_programs WHERE id = ?", (program_id,))}
+
+
+@app.delete("/api/admin/campus/programs/{program_id}")
+def delete_campus_program(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    program = one("SELECT id, name FROM campus_programs WHERE id = ?", (program_id,))
+    if not program:
+        raise error(404, "专业不存在。")
+    class_rows = all_rows("SELECT id FROM campus_classes WHERE program_id = ?", (program_id,))
+    try:
+        db.begin()
+        _delete_campus_enrollments_for_classes([row["id"] for row in class_rows])
+        db.execute("DELETE FROM campus_programs WHERE id = ?", (program_id,))  # 级联删除其下班级
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "campus.program.delete", target_type="campus_program", target_id=program_id, summary=f"级联删除专业：{program['name']}")
+    return {"ok": True}
+
+
+@app.put("/api/admin/campus/classes/{class_id}")
+async def update_campus_class(request: Request, class_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    if not one("SELECT id FROM campus_classes WHERE id = ?", (class_id,)):
+        raise error(404, "班级不存在。")
+    body = await request.json()
+    name = _required_text(body, "name", "班级名称")
+    advisor = str(body.get("advisor") or "").strip()[:120]
+    raw_year = body.get("graduationYear")
+    try:
+        graduation_year = int(raw_year) if raw_year not in {None, ""} else None
+    except (TypeError, ValueError) as exc:
+        raise error(400, "毕业年份格式不正确。") from exc
+    if graduation_year and not 2000 <= graduation_year <= 2100:
+        raise error(400, "毕业年份应在 2000 到 2100 之间。")
+    invite_code = str(body.get("inviteCode") or "").strip().upper()[:40]
+    if invite_code:
+        dup = one("SELECT id FROM campus_classes WHERE invite_code = ? AND id != ?", (invite_code, class_id))
+        if dup:
+            raise error(409, "班级邀请码已存在。")
+    db.execute(
+        "UPDATE campus_classes SET name = ?, graduation_year = ?, advisor = ?, invite_code = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (name, graduation_year, advisor or None, invite_code or None, class_id),
+    )
+    db.commit()
+    record_audit(request, admin, "campus.class.update", target_type="campus_class", target_id=class_id, summary=f"更新班级：{name}")
+    return {"class": one("SELECT * FROM campus_classes WHERE id = ?", (class_id,))}
+
+
+@app.delete("/api/admin/campus/classes/{class_id}")
+def delete_campus_class(request: Request, class_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
+    validate_admin_origin(request)
+    class_item = one("SELECT id, name FROM campus_classes WHERE id = ?", (class_id,))
+    if not class_item:
+        raise error(404, "班级不存在。")
+    try:
+        db.begin()
+        _delete_campus_enrollments_for_classes([class_id])
+        db.execute("DELETE FROM campus_classes WHERE id = ?", (class_id,))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "campus.class.delete", target_type="campus_class", target_id=class_id, summary=f"删除班级：{class_item['name']}")
+    return {"ok": True}
+
+
 @app.put("/api/admin/campus/programs/{program_id}/jobs")
 async def replace_program_jobs(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
     validate_admin_origin(request)
@@ -1796,6 +1952,595 @@ async def update_resume_form_settings(request: Request, admin: dict = Depends(re
 @app.get("/api/admin/health")
 def health():
     return {"ok": True, "authRequired": True, "databasePath": get_database_path()}
+
+
+# ---------------------------------------------------------------------------
+# 招聘信息库：岗位管理 + 简历对比记录
+# ---------------------------------------------------------------------------
+
+JOB_POSTING_MAX_BYTES = 5 * 1024 * 1024
+
+JOB_POSTING_EXPORT_COLUMNS = [
+    ("title", "岗位名称"),
+    ("company", "公司"),
+    ("job_category", "岗位类别"),
+    ("city", "工作地点"),
+    ("graduation_year", "届次"),
+    ("employment_type", "招聘类型"),
+    ("salary", "薪资范围"),
+    ("education_requirement", "学历要求"),
+    ("experience_requirement", "经验要求"),
+    ("headcount", "招聘人数"),
+    ("deadline", "截止时间"),
+    ("skills", "技能要求"),
+    ("tags", "标签"),
+    ("description", "岗位描述"),
+    ("requirements", "任职要求"),
+    ("catalog_job_name", "关联标准岗位"),
+    ("status", "状态"),
+    ("source_ref", "外部编号"),
+]
+
+JOB_POSTING_IMPORT_ALIASES = {
+    "岗位名称": "title", "岗位": "title", "招聘岗位": "title", "职位名称": "title", "职位": "title",
+    "公司": "company", "公司名称": "company", "企业名称": "company", "招聘公司": "company",
+    "岗位类别": "job_category", "职位类别": "job_category", "岗位方向": "job_category",
+    "工作地点": "city", "城市": "city", "地点": "city",
+    "届次": "graduation_year", "毕业届次": "graduation_year", "招聘届次": "graduation_year",
+    "招聘类型": "employment_type", "用工类型": "employment_type", "职位类型": "employment_type",
+    "薪资": "salary", "薪资范围": "salary", "月薪": "salary", "待遇": "salary",
+    "学历要求": "education_requirement", "学历": "education_requirement",
+    "经验要求": "experience_requirement", "工作经验": "experience_requirement",
+    "招聘人数": "headcount", "人数": "headcount",
+    "截止时间": "deadline", "截止日期": "deadline", "招聘截止": "deadline", "有效期": "deadline",
+    "技能要求": "skills", "技能": "skills", "技术栈": "skills",
+    "标签": "tags",
+    "岗位描述": "description", "岗位职责": "description", "职位描述": "description", "工作内容": "description",
+    "任职要求": "requirements", "岗位要求": "requirements", "任职资格": "requirements",
+    "关联标准岗位": "catalog_job_name", "标准岗位": "catalog_job_name",
+    "状态": "status",
+    "外部编号": "source_ref", "编号": "source_ref", "岗位编号": "source_ref",
+}
+
+
+def _published_job_role_map() -> dict[str, dict]:
+    versions = list_versions(db, include_drafts=False)
+    if not versions:
+        return {}
+    version_id = versions[0]["id"]
+    rows = all_rows(
+        "SELECT id, code, name FROM catalog_job_roles WHERE version_id = ? AND enabled = 1",
+        (version_id,),
+    )
+    return {str(row["name"]).strip(): {"id": row["id"], "code": row["code"], "name": row["name"]} for row in rows}
+
+
+def build_job_posting_workbook(rows: list[dict], *, template: bool = False) -> io.BytesIO:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "招聘信息库"
+    headers = [label for _field, label in JOB_POSTING_EXPORT_COLUMNS]
+    worksheet.append(headers)
+    header_fill = PatternFill("solid", fgColor="17324D")
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row in rows:
+        worksheet.append([
+            (row.get("status") == "active" and "启用") or ("停用" if row.get("status") == "disabled" else (row.get("status") or ""))
+            if field == "status"
+            else (row.get(field) if row.get(field) is not None else "")
+            for field, _label in JOB_POSTING_EXPORT_COLUMNS
+        ])
+
+    widths = [24, 20, 16, 14, 10, 12, 14, 12, 12, 10, 14, 26, 18, 40, 40, 18, 10, 16]
+    for index, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[chr(64 + index)].width = width
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    if template:
+        notes = workbook.create_sheet("填写说明")
+        notes.append(["字段", "是否必填", "说明"])
+        for cell in notes[1]:
+            cell.fill = header_fill
+            cell.font = Font(color="FFFFFF", bold=True)
+        for field, label in JOB_POSTING_EXPORT_COLUMNS:
+            required = "是" if field == "title" else "否"
+            hint = {
+                "title": "招聘岗位名称，必填。",
+                "skills": "多个技能用中文逗号、或顿号分隔。",
+                "description": "岗位职责/工作内容，可多行。",
+                "requirements": "任职要求，建议每行一条，便于逐条对比。",
+                "catalog_job_name": "可选，填写岗位知识库中已发布的标准岗位名称即可自动关联。",
+                "status": "填“启用”或“停用”，默认启用。",
+                "source_ref": "外部唯一编号；相同编号再次导入会更新原记录，留空则按“岗位名称+公司”去重。",
+            }.get(field, "")
+            if hint:
+                notes.append([label, required, hint])
+        notes.column_dimensions["A"].width = 18
+        notes.column_dimensions["B"].width = 10
+        notes.column_dimensions["C"].width = 80
+
+    stream = io.BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    return stream
+
+
+def evaluate_job_posting_import(content: bytes) -> dict[str, Any]:
+    try:
+        workbook = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    except Exception as exc:
+        raise error(400, f"无法解析 Excel 文件：{exc}") from exc
+
+    worksheet = workbook.worksheets[0] if workbook.worksheets else None
+    if worksheet is None:
+        raise error(400, "Excel 中没有可读取的工作表。")
+
+    rows = worksheet.iter_rows(values_only=True)
+    try:
+        header_row = next(rows)
+    except StopIteration:
+        raise error(400, "Excel 内容为空。")
+
+    field_by_index: dict[int, str] = {}
+    for index, cell in enumerate(header_row or []):
+        label = str(cell or "").strip()
+        field = JOB_POSTING_IMPORT_ALIASES.get(label)
+        if field:
+            field_by_index[index] = field
+    if "title" not in field_by_index.values():
+        raise error(400, "Excel 缺少“岗位名称”列，请参考导入模板。")
+
+    job_roles = _published_job_role_map()
+    result = {"total": 0, "created": 0, "updated": 0, "skipped": 0, "errors": []}
+    for row_number, raw_row in enumerate(rows, start=2):
+        if raw_row is None:
+            continue
+        payload: dict[str, Any] = {}
+        for index, field in field_by_index.items():
+            if index >= len(raw_row):
+                continue
+            value = raw_row[index]
+            if value is None:
+                continue
+            payload[field] = value if field == "headcount" else str(value).strip()
+        if not str(payload.get("title") or "").strip():
+            result["skipped"] += 1
+            continue
+
+        result["total"] += 1
+        catalog_name = str(payload.pop("catalog_job_name", "") or "").strip()
+        if catalog_name:
+            matched = job_roles.get(catalog_name)
+            if matched:
+                payload["catalog_job_role_id"] = matched["id"]
+                payload["catalog_job_name"] = matched["name"]
+            else:
+                payload["catalog_job_role_id"] = None
+                payload["catalog_job_name"] = catalog_name
+
+        status_label = str(payload.get("status") or "").strip()
+        if status_label:
+            payload["status"] = "active" if status_label in {"启用", "正常", "active", "有效"} else "disabled"
+
+        source_ref = str(payload.get("source_ref") or "").strip()
+        if not source_ref:
+            source_ref = f"{payload.get('title')}|{payload.get('company') or ''}"
+        payload["source_ref"] = source_ref
+
+        try:
+            _posting, action = upsert_job_posting_by_source(
+                db,
+                payload,
+                source="excel",
+                source_ref=source_ref,
+            )
+            result["created" if action == "created" else "updated"] += 1
+        except ValueError as exc:
+            result["skipped"] += 1
+            if len(result["errors"]) < 20:
+                result["errors"].append(f"第 {row_number} 行：{exc}")
+    db.commit()
+    return result
+
+
+def _job_posting_scope_note() -> str:
+    return "招聘信息库包含手动录入与 Excel 导入的岗位，可选择性关联岗位知识库中的标准岗位。"
+
+
+@app.get("/api/admin/job-postings")
+def admin_list_job_postings(
+    keyword: str = "",
+    status: str = "",
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    postings = list_job_postings(db, keyword=keyword.strip() or None, status=status.strip() or None)
+    return {
+        "postings": postings,
+        "jobRoles": [
+            {"id": role["id"], "name": role["name"]}
+            for role in _published_job_role_map().values()
+        ],
+        "scopeNote": _job_posting_scope_note(),
+    }
+
+
+@app.get("/api/admin/job-postings/template")
+def admin_download_job_posting_template(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    output = build_job_posting_workbook([], template=True)
+    record_audit(request, admin, "job_postings.template", target_type="job_posting", summary="下载招聘信息导入模板")
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="job-posting-import-template.xlsx"'},
+    )
+
+
+@app.get("/api/admin/job-postings/export")
+def admin_export_job_postings(
+    request: Request,
+    keyword: str = "",
+    status: str = "",
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    postings = list_job_postings(db, keyword=keyword.strip() or None, status=status.strip() or None)
+    output = build_job_posting_workbook(postings)
+    record_audit(
+        request,
+        admin,
+        "job_postings.export",
+        target_type="job_posting",
+        summary=f"导出 {len(postings)} 条招聘岗位",
+    )
+    filename = f"job-postings-{datetime.now().strftime('%Y%m%d-%H%M')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/admin/job-postings/import")
+async def admin_import_job_postings(
+    request: Request,
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    filename = str(file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise error(400, "请上传 .xlsx 格式的招聘岗位表。")
+    content = await file.read(JOB_POSTING_MAX_BYTES + 1)
+    if not content:
+        raise error(400, "上传的文件为空。")
+    if len(content) > JOB_POSTING_MAX_BYTES:
+        raise error(413, "招聘岗位表不能超过 5MB。")
+
+    result = evaluate_job_posting_import(content)
+    record_audit(
+        request,
+        admin,
+        "job_postings.import",
+        target_type="job_posting",
+        summary=f"导入招聘岗位：新增 {result['created']} 条，更新 {result['updated']} 条，跳过 {result['skipped']} 条",
+    )
+    return {"ok": True, **result}
+
+
+@app.post("/api/admin/job-postings/sync")
+async def admin_sync_job_postings(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    """预留的第三方招聘数据源同步入口。"""
+    validate_admin_origin(request)
+    endpoint = str(os.environ.get("JOB_POSTING_SYNC_ENDPOINT") or "").strip()
+    if not endpoint:
+        raise error(
+            400,
+            "尚未配置第三方招聘数据源。请设置环境变量 JOB_POSTING_SYNC_ENDPOINT 后再使用同步功能。",
+        )
+    raise error(
+        501,
+        "第三方招聘数据源同步接口已预留，但当前版本尚未接入具体数据源（"
+        f"{endpoint}）。请先使用手动录入或 Excel 导入。",
+    )
+
+
+@app.post("/api/admin/job-postings", status_code=201)
+async def admin_create_job_posting(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    payload = dict(body)
+    catalog_name = str(payload.get("catalog_job_name") or "").strip()
+    if catalog_name:
+        matched = _published_job_role_map().get(catalog_name)
+        if matched:
+            payload["catalog_job_role_id"] = matched["id"]
+            payload["catalog_job_name"] = matched["name"]
+    try:
+        posting = create_job_posting(db, payload, created_by=str(admin.get("email") or ""))
+    except ValueError as exc:
+        raise error(400, str(exc)) from exc
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "job_postings.create",
+        target_type="job_posting",
+        target_id=posting.get("id"),
+        summary=f"新增招聘岗位：{posting.get('title')}",
+    )
+    return {"ok": True, "posting": posting}
+
+
+@app.put("/api/admin/job-postings/{posting_id}")
+async def admin_update_job_posting(
+    request: Request,
+    posting_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    payload = dict(body)
+    catalog_name = str(payload.get("catalog_job_name") or "").strip()
+    if catalog_name:
+        matched = _published_job_role_map().get(catalog_name)
+        payload["catalog_job_role_id"] = matched["id"] if matched else None
+        if matched:
+            payload["catalog_job_name"] = matched["name"]
+    try:
+        posting = update_job_posting(db, posting_id, payload)
+    except ValueError as exc:
+        raise error(400, str(exc)) from exc
+    if not posting:
+        raise error(404, "招聘岗位不存在或已被删除。")
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "job_postings.update",
+        target_type="job_posting",
+        target_id=posting_id,
+        summary=f"更新招聘岗位：{posting.get('title')}",
+    )
+    return {"ok": True, "posting": posting}
+
+
+@app.delete("/api/admin/job-postings/{posting_id}")
+def admin_delete_job_posting(
+    request: Request,
+    posting_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    posting = get_job_posting(db, posting_id)
+    if not posting:
+        raise error(404, "招聘岗位不存在或已被删除。")
+    delete_job_posting(db, posting_id)
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "job_postings.delete",
+        target_type="job_posting",
+        target_id=posting_id,
+        summary=f"删除招聘岗位：{posting.get('title')}",
+    )
+    return {"ok": True}
+
+
+@app.get("/api/admin/job-matches")
+def admin_list_job_matches(
+    keyword: str = "",
+    jobPostingId: str = "",
+    limit: int = Query(200, ge=1, le=1000),
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    matches = list_job_matches(
+        db,
+        keyword=keyword.strip() or None,
+        job_posting_id=jobPostingId.strip() or None,
+        limit=limit,
+    )
+    return {
+        "matches": matches,
+        "postings": [
+            {"id": posting["id"], "title": posting["title"], "company": posting.get("company")}
+            for posting in list_job_postings(db, limit=1000)
+        ],
+        "scopeNote": "对比记录仅保存简历摘要与匹配结论，用于就业指导，不包含完整简历正文。",
+    }
+
+
+@app.get("/api/admin/job-matches/{match_id}")
+def admin_get_job_match(
+    match_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    match = get_job_match(db, match_id)
+    if not match:
+        raise error(404, "对比记录不存在。")
+    return {"match": match}
+
+
+def _jd_submission_scope_note() -> str:
+    return "学生粘贴的岗位描述（JD）在此统一管理，审核通过后会写入招聘信息库的岗位管理列表。"
+
+
+@app.get("/api/admin/jd-submissions")
+def admin_list_jd_submissions(
+    keyword: str = "",
+    status: str = "",
+    limit: int = Query(200, ge=1, le=1000),
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    submissions = list_jd_submissions(
+        db,
+        keyword=keyword.strip() or None,
+        status=status.strip() or None,
+        limit=limit,
+    )
+    return {"submissions": submissions, "scopeNote": _jd_submission_scope_note()}
+
+
+@app.post("/api/admin/jd-submissions", status_code=201)
+async def admin_create_jd_submission(
+    request: Request,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    payload = dict(body)
+    title = str(payload.get("job_title") or "").strip()
+    if not title:
+        raise error(400, "岗位名称不能为空。")
+    submission = create_jd_submission(
+        db,
+        job_title=title,
+        company=str(payload.get("company") or "").strip(),
+        jd_text=str(payload.get("jd_text") or "").strip(),
+        student_name=str(payload.get("student_name") or "管理员录入").strip(),
+    )
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.create",
+        target_type="jd_submission",
+        target_id=submission.get("id"),
+        summary=f"新增粘贴 JD 记录：{submission.get('job_title')}",
+    )
+    return {"ok": True, "submission": submission}
+
+
+@app.put("/api/admin/jd-submissions/{submission_id}")
+async def admin_update_jd_submission(
+    request: Request,
+    submission_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise error(400, "请求格式不正确。")
+    submission = update_jd_submission(
+        db,
+        submission_id,
+        dict(body),
+        decided_by=str(admin.get("email") or ""),
+    )
+    if not submission:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.update",
+        target_type="jd_submission",
+        target_id=submission_id,
+        summary=f"更新粘贴 JD 记录：{submission.get('job_title')}",
+    )
+    return {"ok": True, "submission": submission}
+
+
+@app.delete("/api/admin/jd-submissions/{submission_id}")
+def admin_delete_jd_submission(
+    request: Request,
+    submission_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    submission = get_jd_submission(db, submission_id)
+    if not submission:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+    delete_jd_submission(db, submission_id)
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.delete",
+        target_type="jd_submission",
+        target_id=submission_id,
+        summary=f"删除粘贴 JD 记录：{submission.get('job_title')}",
+    )
+    return {"ok": True}
+
+
+@app.post("/api/admin/jd-submissions/{submission_id}/approve")
+async def admin_approve_jd_submission(
+    request: Request,
+    submission_id: str,
+    admin: dict = Depends(require_permission("manageCatalog")),
+):
+    validate_admin_origin(request)
+    submission = get_jd_submission(db, submission_id)
+    if not submission:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    payload = dict(body) if isinstance(body, dict) else {}
+    title = str(payload.get("job_title") or submission.get("job_title") or "").strip() or "自定义岗位"
+    company = str(payload.get("company") or submission.get("company") or "").strip()
+    jd_text = str(payload.get("jd_text") or submission.get("jd_text") or "").strip()
+
+    updated = update_jd_submission(
+        db,
+        submission_id,
+        {"job_title": title, "company": company, "jd_text": jd_text},
+        decided_by=str(admin.get("email") or ""),
+    )
+    if not updated:
+        raise error(404, "粘贴 JD 记录不存在或已被删除。")
+
+    posting, action = upsert_job_posting_by_source(
+        db,
+        {
+            "title": title,
+            "company": company,
+            "description": jd_text,
+            "requirements": jd_text,
+            "status": "active",
+            "published": 1,
+        },
+        source="student_jd",
+        source_ref=submission_id,
+        created_by=str(admin.get("email") or ""),
+    )
+    submission = mark_jd_submission_approved(
+        db,
+        submission_id,
+        str(posting.get("id") or ""),
+        decided_by=str(admin.get("email") or ""),
+    )
+    db.commit()
+    record_audit(
+        request,
+        admin,
+        "jd_submissions.approve",
+        target_type="jd_submission",
+        target_id=submission_id,
+        summary=f"粘贴 JD 审核入库：{title}",
+    )
+    return {"ok": True, "submission": submission, "posting": posting, "action": action}
 
 
 @app.get("/api/admin/catalog/versions")
@@ -2150,6 +2895,7 @@ def snapshot(admin: dict = Depends(require_admin)):
                 "canWriteCatalog": can_catalog,
                 "canImportCatalog": can_catalog,
                 "canPublishCatalog": can_catalog,
+                "canViewJobPostings": can_catalog or is_super,
             },
             "admin": sanitize_admin(admin),
         }

@@ -27,6 +27,7 @@ import {
   LogOut,
   MousePointerClick,
   Network,
+  Pencil,
   Plus,
   RefreshCw,
   Rocket,
@@ -73,6 +74,7 @@ const emptyAdminData = {
     canWriteCatalog: false,
     canImportCatalog: false,
     canPublishCatalog: false,
+    canViewJobPostings: false,
   },
   settings: {
     reportOpenaiModel: 'gpt-4o-mini',
@@ -143,6 +145,7 @@ const navItems = [
   { key: 'organization', label: '学生', icon: School, permission: 'canManageStudents', group: '学生成长' },
   { key: 'organizationConfig', label: '组织', icon: Network, permission: 'canManageOrganization', group: '学生成长' },
   { key: 'catalog', label: '岗位知识库', icon: BookOpen, permission: 'canViewCatalog', group: '训练内容' },
+  { key: 'jobPostings', label: '招聘信息库', icon: Building2, permission: 'canViewJobPostings', group: '训练内容' },
   { key: 'agents', label: '面试模型配置', icon: Bot, permission: 'canViewAgents', group: '训练内容' },
   { key: 'connectionLogs', label: '连接日志', icon: Wifi, permission: 'canViewConnectionLogs', group: '系统' },
   { key: 'permission', label: '权限管理', icon: ShieldCheck, group: '系统' },
@@ -165,6 +168,10 @@ const statusTone = {
   复核未通过: 'red',
   需要复核: 'red',
   启用: 'green',
+  停用: 'gray',
+  待审核: 'blue',
+  已入库: 'green',
+  已驳回: 'gray',
   已禁用: 'gray',
   未归班: 'gray',
   尚未训练: 'gray',
@@ -1135,7 +1142,7 @@ function OrganizationPage({ onView }) {
         method: 'PATCH',
         body: JSON.stringify(updates),
       });
-      setMessage(updates.focus !== undefined ? (updates.focus ? '已标记为重点关注' : '已取消重点关注') : '学生归属已更新');
+      setMessage(updates.focus ? '已标记为重点关注' : '已取消重点关注');
       await loadCampus();
     } catch (requestError) {
       setError(requestError.message);
@@ -1169,7 +1176,7 @@ function OrganizationPage({ onView }) {
       {(error || message) && <div className={`campus-feedback ${error ? 'error' : 'success'}`}>{error || message}</div>}
 
       <section className="campus-workspace">
-        <SectionCard title="学生" icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
+        <SectionCard title="已激活学生" icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
           <div className="campus-student-toolbar">
             <label><Search size={15} /><input value={studentQuery} onChange={(event) => setStudentQuery(event.target.value)} placeholder="搜索姓名、学号、邮箱或目标岗位" /></label>
           </div>
@@ -1185,12 +1192,7 @@ function OrganizationPage({ onView }) {
                     <td><strong className={student.readiness < 60 && student.interviews > 0 ? 'score-alert' : ''}>{student.interviews ? `${student.readiness}分` : '-'}</strong></td>
                     <td>{student.interviews} 次</td>
                     <td><StatusBadge>{student.growthStatus}</StatusBadge></td>
-                    <td onClick={(event) => event.stopPropagation()}>
-                      <select value={student.classId || ''} disabled={busy === `student-${student.id}`} onChange={(event) => updateStudent(student, { classId: event.target.value })} aria-label={`调整 ${student.name} 的班级`}>
-                        <option value="">未归班</option>
-                        {campus.classes.map((classItem) => <option key={classItem.id} value={classItem.id}>{classItem.program_name} · {classItem.name}</option>)}
-                      </select>
-                    </td>
+                    <td className={student.className === '未归班' ? 'cell-unassigned' : ''}>{student.className}</td>
                     <td onClick={(event) => event.stopPropagation()}>
                       <button type="button" className={`focus-student-button ${student.focus ? 'active' : ''}`} disabled={busy === `student-${student.id}`} onClick={() => updateStudent(student, { focus: !student.focus })}>{student.focus ? '已关注' : '关注'}</button>
                     </td>
@@ -1780,6 +1782,612 @@ function CatalogPage({ permissions }) {
         {permissions.canImportCatalog && <SectionCard title="导入学院、专业与岗位" icon={<Upload size={18} />}><form className="catalog-action-form" onSubmit={importExcel}><p>选择草稿版本，上传包含七个规定工作表的 `.xlsx` 文件，可一次批量添加岗位和能力矩阵。</p><label className="field-block"><span>Excel 文件</span><input type="file" accept=".xlsx" onChange={(event) => setFile(event.target.files?.[0] || null)} required /></label><label className="field-block"><span>导入模式</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="merge">合并更新</option><option value="replace">替换草稿数据</option></select></label><button className="primary-button" disabled={importing || selectedVersion?.status !== 'draft' || !file}>{importing ? '导入中...' : '上传并导入'}</button>{selectedVersion?.status !== 'draft' && <small>已发布版本不可修改，请先新建草稿版本。</small>}</form></SectionCard>}
         {permissions.canPublishCatalog && <SectionCard title="审核与发布" icon={<Rocket size={18} />}><div className="catalog-action-form"><p>发布前会校验完整层级与岗位能力矩阵；发布后原版本自动归档。</p><button className="primary-button" type="button" onClick={publishDraft} disabled={publishing || selectedVersion?.status !== 'draft'}>{publishing ? '发布中...' : '发布当前草稿'}</button></div></SectionCard>}
       </section>
+    </div>
+  );
+}
+
+const jobPostingFormTemplate = {
+  title: '',
+  company: '',
+  job_category: '',
+  city: '',
+  graduation_year: '',
+  employment_type: '',
+  salary: '',
+  education_requirement: '',
+  experience_requirement: '',
+  headcount: '',
+  deadline: '',
+  skills: '',
+  tags: '',
+  description: '',
+  requirements: '',
+  catalog_job_name: '',
+  status: 'active',
+  source_ref: '',
+};
+
+const matchStatusLabels = { satisfied: '已满足', partial: '部分满足', missing: '未体现' };
+const jdSubmissionStatusLabels = { pending: '待审核', approved: '已入库', rejected: '已驳回' };
+
+function JobPostingsPage() {
+  const [tab, setTab] = useState('postings');
+  const [postings, setPostings] = useState([]);
+  const [jobRoles, setJobRoles] = useState([]);
+  const [postingNote, setPostingNote] = useState('');
+  const [matches, setMatches] = useState([]);
+  const [matchPostings, setMatchPostings] = useState([]);
+  const [matchNote, setMatchNote] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
+  const [message, setMessage] = useState('');
+  const [pageError, setPageError] = useState('');
+  const [keyword, setKeyword] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [formState, setFormState] = useState(null);
+  const [file, setFile] = useState(null);
+  const [activeMatch, setActiveMatch] = useState(null);
+  const [matchKeyword, setMatchKeyword] = useState('');
+  const [submissions, setSubmissions] = useState([]);
+  const [submissionNote, setSubmissionNote] = useState('');
+  const [submissionKeyword, setSubmissionKeyword] = useState('');
+  const [submissionStatusFilter, setSubmissionStatusFilter] = useState('');
+  const [submissionForm, setSubmissionForm] = useState(null);
+
+  const loadPostings = async () => {
+    const query = new URLSearchParams();
+    if (keyword.trim()) query.set('keyword', keyword.trim());
+    if (statusFilter) query.set('status', statusFilter);
+    const result = await adminRequest(`/api/admin/job-postings${query.toString() ? `?${query.toString()}` : ''}`);
+    setPostings(result.postings || []);
+    setJobRoles(result.jobRoles || []);
+    setPostingNote(result.scopeNote || '');
+  };
+
+  const loadMatches = async () => {
+    const query = new URLSearchParams();
+    if (matchKeyword.trim()) query.set('keyword', matchKeyword.trim());
+    const result = await adminRequest(`/api/admin/job-matches${query.toString() ? `?${query.toString()}` : ''}`);
+    setMatches(result.matches || []);
+    setMatchPostings(result.postings || []);
+    setMatchNote(result.scopeNote || '');
+  };
+
+  const loadSubmissions = async () => {
+    const query = new URLSearchParams();
+    if (submissionKeyword.trim()) query.set('keyword', submissionKeyword.trim());
+    if (submissionStatusFilter) query.set('status', submissionStatusFilter);
+    const result = await adminRequest(`/api/admin/jd-submissions${query.toString() ? `?${query.toString()}` : ''}`);
+    setSubmissions(result.submissions || []);
+    setSubmissionNote(result.scopeNote || '');
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        await Promise.all([loadPostings(), loadMatches(), loadSubmissions()]);
+        if (!cancelled) setPageError('');
+      } catch (requestError) {
+        if (!cancelled) setPageError(requestError.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const refreshPostings = async () => {
+    setBusy('refresh'); setPageError('');
+    try { await loadPostings(); } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const refreshSubmissions = async () => {
+    setBusy('refresh-submissions'); setPageError('');
+    try { await loadSubmissions(); } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const openCreateSubmission = () => {
+    setMessage(''); setPageError('');
+    setSubmissionForm({ id: '', form: { job_title: '', company: '', jd_text: '' } });
+  };
+
+  const openEditSubmission = (submission) => {
+    setMessage(''); setPageError('');
+    setSubmissionForm({
+      id: submission.id,
+      form: {
+        job_title: submission.job_title || '',
+        company: submission.company || '',
+        jd_text: submission.jd_text || '',
+      },
+    });
+  };
+
+  const submitSubmissionForm = async (event) => {
+    event.preventDefault();
+    const { id, form } = submissionForm;
+    setBusy('save-submission'); setMessage(''); setPageError('');
+    try {
+      await adminRequest(id ? `/api/admin/jd-submissions/${encodeURIComponent(id)}` : '/api/admin/jd-submissions', {
+        method: id ? 'PUT' : 'POST',
+        body: JSON.stringify(form),
+      });
+      setSubmissionForm(null);
+      await loadSubmissions();
+      setMessage(id ? '粘贴 JD 记录已更新。' : '粘贴 JD 记录已新增。');
+    } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const removeSubmission = async (submission) => {
+    if (!window.confirm(`确认删除「${submission.job_title || '该岗位'}」这条粘贴 JD 记录吗？`)) return;
+    setBusy(`delete-submission-${submission.id}`); setMessage(''); setPageError('');
+    try {
+      await adminRequest(`/api/admin/jd-submissions/${encodeURIComponent(submission.id)}`, { method: 'DELETE' });
+      await loadSubmissions();
+      setMessage('粘贴 JD 记录已删除。');
+    } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const approveSubmission = async (submission) => {
+    setBusy(`approve-submission-${submission.id}`); setMessage(''); setPageError('');
+    try {
+      const result = await adminRequest(`/api/admin/jd-submissions/${encodeURIComponent(submission.id)}/approve`, { method: 'POST' });
+      await Promise.all([loadSubmissions(), loadPostings()]);
+      setMessage(result.action === 'updated' ? '已同步更新招聘信息库中的对应岗位。' : '审核通过，已写入招聘信息库岗位列表。');
+    } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const openCreate = () => { setMessage(''); setPageError(''); setFormState({ id: '', form: { ...jobPostingFormTemplate } }); };
+
+  const openEdit = (posting) => {
+    setMessage(''); setPageError('');
+    setFormState({
+      id: posting.id,
+      form: Object.fromEntries(Object.keys(jobPostingFormTemplate).map((key) => [
+        key,
+        key === 'headcount' ? (posting.headcount || '') : (posting[key] ?? '') || '',
+      ])),
+    });
+  };
+
+  const submitForm = async (event) => {
+    event.preventDefault();
+    const { id, form } = formState;
+    setBusy('save'); setMessage(''); setPageError('');
+    try {
+      const payload = { ...form, headcount: Number(form.headcount) || 0 };
+      await adminRequest(id ? `/api/admin/job-postings/${encodeURIComponent(id)}` : '/api/admin/job-postings', {
+        method: id ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      });
+      setFormState(null);
+      await loadPostings();
+      setMessage(id ? '招聘岗位已更新。' : '招聘岗位已创建。');
+    } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const removePosting = async (posting) => {
+    if (!window.confirm(`确认删除招聘岗位“${posting.title}”吗？该操作不可撤销。`)) return;
+    setBusy(`delete-${posting.id}`); setMessage(''); setPageError('');
+    try {
+      await adminRequest(`/api/admin/job-postings/${encodeURIComponent(posting.id)}`, { method: 'DELETE' });
+      await loadPostings();
+      setMessage('招聘岗位已删除。');
+    } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const importExcel = async (event) => {
+    event.preventDefault();
+    if (!file) return;
+    const formElement = event.currentTarget;
+    setBusy('import'); setMessage(''); setPageError('');
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const result = await adminRequest('/api/admin/job-postings/import', { method: 'POST', body: formData });
+      setFile(null);
+      formElement.reset();
+      await loadPostings();
+      setMessage(`Excel 导入完成：新增 ${result.created} 条，更新 ${result.updated} 条，跳过 ${result.skipped} 条。`);
+    } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const downloadFile = async (path, fallback) => {
+    setMessage(''); setPageError('');
+    try { await adminDownload(path, fallback); }
+    catch (requestError) { setPageError(requestError.message); }
+  };
+
+  const syncPostings = async () => {
+    setBusy('sync'); setMessage(''); setPageError('');
+    try {
+      const result = await adminRequest('/api/admin/job-postings/sync', { method: 'POST' });
+      setMessage(result.message || '第三方数据源同步完成。');
+    } catch (requestError) { setPageError(requestError.message); }
+    finally { setBusy(''); }
+  };
+
+  const filteredPostings = useMemo(() => {
+    const needle = keyword.trim().toLowerCase();
+    if (!needle) return postings;
+    return postings.filter((posting) => [posting.title, posting.company, posting.job_category, posting.city]
+      .filter(Boolean).join(' ').toLowerCase().includes(needle));
+  }, [postings, keyword]);
+
+  const openMatchDetail = async (match) => {
+    setActiveMatch(match); setMessage(''); setPageError('');
+    try {
+      const result = await adminRequest(`/api/admin/job-matches/${encodeURIComponent(match.id)}`);
+      if (result.match) setActiveMatch(result.match);
+    } catch (requestError) { setPageError(requestError.message); }
+  };
+
+  if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取招聘信息库</div>;
+
+  return (
+    <div className="job-postings-page">
+      <div className="job-tabs" role="tablist">
+        <button type="button" className={tab === 'postings' ? 'active' : ''} onClick={() => setTab('postings')}>岗位管理<span>{postings.length}</span></button>
+        <button type="button" className={tab === 'matches' ? 'active' : ''} onClick={() => setTab('matches')}>对比记录<span>{matches.length}</span></button>
+        <button type="button" className={tab === 'jdSubmissions' ? 'active' : ''} onClick={() => setTab('jdSubmissions')}>学生粘贴JD<span>{submissions.length}</span></button>
+      </div>
+
+      {message && <p className="settings-message success catalog-message">{message}</p>}
+      {pageError && <p className="settings-message error catalog-message">{pageError}</p>}
+
+      {tab === 'postings' ? (
+        <div className="job-postings-layout">
+          <SectionCard
+            title="招聘岗位"
+            icon={<Building2 size={18} />}
+            action={(
+              <div className="job-toolbar-actions">
+                <button className="secondary-button" type="button" onClick={refreshPostings} disabled={busy === 'refresh'}><RefreshCw size={15} className={busy === 'refresh' ? 'spin' : ''} />刷新</button>
+                <button className="secondary-button" type="button" onClick={() => downloadFile('/api/admin/job-postings/template', 'job-posting-import-template.xlsx')}><Download size={15} />模板</button>
+                <button className="secondary-button" type="button" onClick={() => downloadFile('/api/admin/job-postings/export', 'job-postings.xlsx')}><Download size={15} />导出</button>
+                <button className="primary-button" type="button" onClick={openCreate}><Plus size={15} />新增岗位</button>
+              </div>
+            )}
+          >
+          <div className="job-toolbar">
+            <label className="job-search">
+              <Search size={15} />
+              <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索岗位名称、公司、类别或城市" />
+              {keyword && <button type="button" onClick={() => setKeyword('')} aria-label="清空搜索"><X size={14} /></button>}
+            </label>
+            <div className="job-filter">
+              <Filter size={15} />
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                <option value="">全部状态</option>
+                <option value="active">启用</option>
+                <option value="disabled">停用</option>
+              </select>
+              {(keyword || statusFilter) && <button type="button" className="clear-filter" onClick={refreshPostings}>应用筛选</button>}
+            </div>
+            <span className="job-count">{filteredPostings.length} 条岗位</span>
+          </div>
+          {postingNote && <p className="job-scope-note">{postingNote}</p>}
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>岗位名称</th>
+                  <th>公司</th>
+                  <th>类别 / 城市</th>
+                  <th>技能要求</th>
+                  <th>标准岗位</th>
+                  <th>状态</th>
+                  <th aria-label="操作" />
+                </tr>
+              </thead>
+              <tbody>
+                {filteredPostings.length === 0 && <tr><td colSpan={7}><EmptyState text="暂无招聘岗位，可手动新增或导入 Excel" /></td></tr>}
+                {filteredPostings.map((posting) => (
+                  <tr key={posting.id} className="data-row">
+                    <td><strong>{posting.title}</strong>{posting.graduation_year && <small className="job-sub">{posting.graduation_year}</small>}</td>
+                    <td>{posting.company || '-'}</td>
+                    <td>{[posting.job_category, posting.city].filter(Boolean).join(' · ') || '-'}</td>
+                    <td className="job-skills">{(posting.skillList || []).slice(0, 4).join('、') || '-'}</td>
+                    <td>{posting.catalog_job_name || '-'}</td>
+                    <td><StatusBadge>{posting.status === 'active' ? '启用' : '停用'}</StatusBadge></td>
+                    <td className="row-actions">
+                      <button type="button" onClick={() => openEdit(posting)} aria-label="编辑" title="编辑"><Pencil size={15} /></button>
+                      <button type="button" className="danger" onClick={() => removePosting(posting)} disabled={busy === `delete-${posting.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          </SectionCard>
+
+          <SectionCard title="Excel 导入与数据源同步" icon={<Upload size={18} />}>
+            <div className="job-import-grid">
+              <form className="job-action-form" onSubmit={importExcel}>
+                <p>上传 `.xlsx` 招聘岗位表，按「外部编号」或「岗位名称 + 公司」自动去重并更新已有记录。</p>
+                <label className="field-block"><span>Excel 文件</span><input type="file" accept=".xlsx" onChange={(event) => setFile(event.target.files?.[0] || null)} required /></label>
+                <button className="primary-button" type="submit" disabled={busy === 'import' || !file}>{busy === 'import' ? '导入中…' : '上传并导入'}</button>
+              </form>
+              <div className="job-action-form">
+                <p>预留第三方招聘平台数据源同步入口，配置 <code>JOB_POSTING_SYNC_ENDPOINT</code> 后即可启用。</p>
+                <button className="secondary-button" type="button" onClick={syncPostings} disabled={busy === 'sync'}><RefreshCw size={15} className={busy === 'sync' ? 'spin' : ''} />从数据源同步</button>
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+      ) : tab === 'matches' ? (
+        <SectionCard
+          title="简历与岗位对比记录"
+          icon={<FileText size={18} />}
+          action={<span className="record-count">{matches.length} 条记录</span>}
+        >
+          <div className="job-toolbar">
+            <label className="job-search">
+              <Search size={15} />
+              <input value={matchKeyword} onChange={(event) => setMatchKeyword(event.target.value)} placeholder="搜索学生姓名、学号或岗位" />
+              {matchKeyword && <button type="button" onClick={() => setMatchKeyword('')} aria-label="清空搜索"><X size={14} /></button>}
+            </label>
+            <button className="secondary-button" type="button" onClick={loadMatches}><RefreshCw size={15} />应用筛选</button>
+            {matchPostings.length > 0 && <span className="job-count">涉及 {matchPostings.length} 个岗位</span>}
+          </div>
+          {matchNote && <p className="job-scope-note">{matchNote}</p>}
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>学生</th>
+                  <th>学院</th>
+                  <th>对比岗位</th>
+                  <th>来源</th>
+                  <th>匹配度</th>
+                  <th>时间</th>
+                  <th aria-label="操作" />
+                </tr>
+              </thead>
+              <tbody>
+                {matches.length === 0 && <tr><td colSpan={7}><EmptyState text="学生尚未在候选人端发起简历与岗位对比" /></td></tr>}
+                {matches.map((match) => (
+                  <tr key={match.id} className="data-row" onClick={() => openMatchDetail(match)}>
+                    <td><strong>{match.student_name || '未知学生'}</strong>{match.student_no && <small className="job-sub">{match.student_no}</small>}</td>
+                    <td>{match.student_college || '-'}</td>
+                    <td>{match.job_title || '-'}{match.company && <small className="job-sub">{match.company}</small>}</td>
+                    <td><StatusBadge>{match.source === 'library' ? '岗位库' : '粘贴JD'}</StatusBadge></td>
+                    <td><span className={`job-score ${match.match_score >= 75 ? 'high' : match.match_score >= 55 ? 'mid' : 'low'}`}>{match.match_score}</span></td>
+                    <td>{String(match.created_at || '').slice(0, 16)}</td>
+                    <td className="row-action"><button type="button" tabIndex={-1} onClick={(event) => { event.stopPropagation(); openMatchDetail(match); }} aria-label="查看详情"><ChevronRight size={16} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </SectionCard>
+      ) : (
+        <SectionCard
+          title="学生粘贴JD审核"
+          icon={<ClipboardList size={18} />}
+          action={(
+            <div className="job-toolbar-actions">
+              <button className="secondary-button" type="button" onClick={refreshSubmissions} disabled={busy === 'refresh-submissions'}><RefreshCw size={15} className={busy === 'refresh-submissions' ? 'spin' : ''} />刷新</button>
+              <button className="primary-button" type="button" onClick={openCreateSubmission}><Plus size={15} />新增记录</button>
+            </div>
+          )}
+        >
+          <div className="job-toolbar">
+            <label className="job-search">
+              <Search size={15} />
+              <input value={submissionKeyword} onChange={(event) => setSubmissionKeyword(event.target.value)} placeholder="搜索学生姓名、学号、岗位或 JD 内容" />
+              {submissionKeyword && <button type="button" onClick={() => setSubmissionKeyword('')} aria-label="清空搜索"><X size={14} /></button>}
+            </label>
+            <div className="job-filter">
+              <Filter size={15} />
+              <select value={submissionStatusFilter} onChange={(event) => setSubmissionStatusFilter(event.target.value)}>
+                <option value="">全部状态</option>
+                <option value="pending">待审核</option>
+                <option value="approved">已入库</option>
+                <option value="rejected">已驳回</option>
+              </select>
+              <button type="button" className="clear-filter" onClick={refreshSubmissions}>应用筛选</button>
+            </div>
+            <span className="job-count">{submissions.length} 条记录</span>
+          </div>
+          {submissionNote && <p className="job-scope-note">{submissionNote}</p>}
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>学生</th>
+                  <th>学院</th>
+                  <th>岗位 / 公司</th>
+                  <th>JD 摘要</th>
+                  <th>状态</th>
+                  <th>时间</th>
+                  <th aria-label="操作" />
+                </tr>
+              </thead>
+              <tbody>
+                {submissions.length === 0 && <tr><td colSpan={7}><EmptyState text="暂无学生粘贴的岗位描述" /></td></tr>}
+                {submissions.map((submission) => (
+                  <tr key={submission.id} className="data-row">
+                    <td>
+                      <strong>{submission.student_name || '管理员录入'}</strong>
+                      {submission.student_no && <small className="job-sub">{submission.student_no}</small>}
+                    </td>
+                    <td>{submission.student_college || '-'}</td>
+                    <td>{submission.job_title || '-'}{submission.company && <small className="job-sub">{submission.company}</small>}</td>
+                    <td><div className="jd-preview" title={submission.jd_text || ''}>{String(submission.jd_text || '').slice(0, 60) || '-'}</div></td>
+                    <td><StatusBadge>{jdSubmissionStatusLabels[submission.status] || '待审核'}</StatusBadge></td>
+                    <td>{String(submission.created_at || '').slice(0, 16)}</td>
+                    <td className="row-actions">
+                      <button type="button" onClick={() => approveSubmission(submission)} disabled={busy === `approve-submission-${submission.id}` || submission.status === 'approved'} aria-label="审核入库" title={submission.status === 'approved' ? '已入库' : '审核入库'}><CheckCircle2 size={15} /></button>
+                      <button type="button" onClick={() => openEditSubmission(submission)} aria-label="编辑" title="编辑"><Pencil size={15} /></button>
+                      <button type="button" className="danger" onClick={() => removeSubmission(submission)} disabled={busy === `delete-submission-${submission.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </SectionCard>
+      )}
+
+      {submissionForm && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="粘贴 JD 记录编辑" onClick={() => setSubmissionForm(null)}>
+          <div className="modal-card job-form-modal" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <div><FileText size={18} /><h2>{submissionForm.id ? '编辑粘贴 JD 记录' : '新增粘贴 JD 记录'}</h2></div>
+              <button type="button" className="modal-close" onClick={() => setSubmissionForm(null)}><X size={18} /></button>
+            </header>
+            <form className="job-form" onSubmit={submitSubmissionForm}>
+              <div className="field-grid">
+                <label className="field-block"><span>岗位名称 *</span><input value={submissionForm.form.job_title} onChange={(event) => setSubmissionForm((current) => ({ ...current, form: { ...current.form, job_title: event.target.value } }))} required /></label>
+                <label className="field-block"><span>公司</span><input value={submissionForm.form.company} onChange={(event) => setSubmissionForm((current) => ({ ...current, form: { ...current.form, company: event.target.value } }))} /></label>
+              </div>
+              <label className="field-block"><span>岗位描述（JD）</span><textarea rows={10} value={submissionForm.form.jd_text} onChange={(event) => setSubmissionForm((current) => ({ ...current, form: { ...current.form, jd_text: event.target.value } }))} /></label>
+              <footer>
+                <button type="button" className="secondary-button" onClick={() => setSubmissionForm(null)} disabled={busy === 'save-submission'}>取消</button>
+                <button type="submit" className="primary-button" disabled={busy === 'save-submission'}>{busy === 'save-submission' ? '保存中…' : '保存记录'}</button>
+              </footer>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {formState && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="招聘岗位编辑" onClick={() => setFormState(null)}>
+          <div className="modal-card job-form-modal" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <div><Building2 size={18} /><h2>{formState.id ? '编辑招聘岗位' : '新增招聘岗位'}</h2></div>
+              <button type="button" className="modal-close" onClick={() => setFormState(null)}><X size={18} /></button>
+            </header>
+            <form className="job-form" onSubmit={submitForm}>
+              <div className="field-grid">
+                <label className="field-block"><span>岗位名称 *</span><input value={formState.form.title} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, title: event.target.value } }))} required /></label>
+                <label className="field-block"><span>公司</span><input value={formState.form.company} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, company: event.target.value } }))} /></label>
+                <label className="field-block"><span>岗位类别</span><input value={formState.form.job_category} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, job_category: event.target.value } }))} /></label>
+                <label className="field-block"><span>工作地点</span><input value={formState.form.city} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, city: event.target.value } }))} /></label>
+                <label className="field-block"><span>届次</span><input value={formState.form.graduation_year} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, graduation_year: event.target.value } }))} placeholder="例如：2026 届" /></label>
+                <label className="field-block"><span>招聘类型</span><input value={formState.form.employment_type} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, employment_type: event.target.value } }))} placeholder="校招 / 社招 / 实习" /></label>
+                <label className="field-block"><span>薪资范围</span><input value={formState.form.salary} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, salary: event.target.value } }))} /></label>
+                <label className="field-block"><span>学历要求</span><input value={formState.form.education_requirement} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, education_requirement: event.target.value } }))} /></label>
+                <label className="field-block"><span>经验要求</span><input value={formState.form.experience_requirement} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, experience_requirement: event.target.value } }))} /></label>
+                <label className="field-block"><span>招聘人数</span><input type="number" min="0" value={formState.form.headcount} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, headcount: event.target.value } }))} /></label>
+                <label className="field-block"><span>截止时间</span><input value={formState.form.deadline} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, deadline: event.target.value } }))} placeholder="例如：2026-06-30" /></label>
+                <label className="field-block"><span>关联标准岗位</span><select value={formState.form.catalog_job_name} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, catalog_job_name: event.target.value } }))}><option value="">不关联</option>{jobRoles.map((role) => <option value={role.name} key={role.id}>{role.name}</option>)}</select></label>
+                <label className="field-block"><span>技能要求</span><input value={formState.form.skills} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, skills: event.target.value } }))} placeholder="多个技能用中文逗号分隔" /></label>
+                <label className="field-block"><span>标签</span><input value={formState.form.tags} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, tags: event.target.value } }))} /></label>
+                <label className="field-block"><span>状态</span><select value={formState.form.status} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, status: event.target.value } }))}><option value="active">启用</option><option value="disabled">停用</option></select></label>
+                <label className="field-block"><span>外部编号</span><input value={formState.form.source_ref} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, source_ref: event.target.value } }))} placeholder="用于导入去重，可留空" /></label>
+              </div>
+              <label className="field-block"><span>岗位描述</span><textarea rows={3} value={formState.form.description} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, description: event.target.value } }))} /></label>
+              <label className="field-block"><span>任职要求（建议每行一条，便于逐条比对）</span><textarea rows={4} value={formState.form.requirements} onChange={(event) => setFormState((current) => ({ ...current, form: { ...current.form, requirements: event.target.value } }))} /></label>
+              <footer>
+                <button type="button" className="secondary-button" onClick={() => setFormState(null)} disabled={busy === 'save'}>取消</button>
+                <button type="submit" className="primary-button" disabled={busy === 'save'}>{busy === 'save' ? '保存中…' : '保存岗位'}</button>
+              </footer>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {activeMatch && (
+        <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setActiveMatch(null); }}>
+          <section className="detail-drawer job-match-drawer" role="dialog" aria-modal="true" aria-label="对比详情">
+            <header>
+              <div>
+                <span>对比详情</span>
+                <h2>{activeMatch.student_name || '未知学生'} · {activeMatch.job_title || '岗位'}</h2>
+              </div>
+              <button type="button" onClick={() => setActiveMatch(null)} aria-label="关闭详情"><X size={18} /></button>
+            </header>
+            <div className="detail-body">
+              <div className="detail-grid">
+                <div><span>学号</span><strong>{activeMatch.student_no || '-'}</strong></div>
+                <div><span>学院</span><strong>{activeMatch.student_college || '-'}</strong></div>
+                <div><span>公司</span><strong>{activeMatch.company || '-'}</strong></div>
+                <div><span>对比来源</span><strong>{activeMatch.source === 'library' ? '招聘信息库岗位' : '粘贴 JD'}</strong></div>
+                <div><span>匹配度</span><strong>{activeMatch.match_score} / 100</strong></div>
+                <div><span>生成时间</span><strong>{String(activeMatch.created_at || '').slice(0, 19)}</strong></div>
+                <div><span>生成方式</span><strong>{activeMatch.provider === 'local' ? '规则引擎（AI 未启用）' : `${activeMatch.provider || '规则引擎'}${activeMatch.model ? ` · ${activeMatch.model}` : ''}`}</strong></div>
+                <div><span>状态</span><strong>{activeMatch.status === 'completed' ? '已完成' : activeMatch.status || '-'}</strong></div>
+              </div>
+
+              {activeMatch.result?.summary && <section className="detail-block"><h3>匹配结论</h3><p>{activeMatch.result.summary}</p></section>}
+
+              {(activeMatch.result?.dimensions || []).length > 0 && (
+                <section className="detail-block">
+                  <h3>评分维度</h3>
+                  <div className="job-dimensions">
+                    {activeMatch.result.dimensions.map((dimension) => (
+                      <article key={dimension.label}>
+                        <div><strong>{dimension.label}</strong><span>{dimension.weight}</span></div>
+                        <div className="job-bar"><i style={{ width: `${Math.max(0, Math.min(100, dimension.score))}%` }} /></div>
+                        <small>{dimension.score} 分</small>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {((activeMatch.result?.matchedSkills || []).length > 0 || (activeMatch.result?.missingSkills || []).length > 0) && (
+                <section className="detail-block">
+                  <h3>技能匹配</h3>
+                  <div className="job-skill-groups">
+                    <div><span>已具备（{(activeMatch.result.matchedSkills || []).length}）</span><p>{(activeMatch.result.matchedSkills || []).map((skill) => <b className="hit" key={skill}>{skill}</b>)}</p></div>
+                    <div><span>待补充（{(activeMatch.result.missingSkills || []).length}）</span><p>{(activeMatch.result.missingSkills || []).map((skill) => <b className="miss" key={skill}>{skill}</b>)}</p></div>
+                  </div>
+                </section>
+              )}
+
+              {(activeMatch.result?.matrices || []).length > 0 && (
+                <section className="detail-block">
+                  <h3>任职要求逐条比对</h3>
+                  <div className="job-matrix">
+                    {activeMatch.result.matrices.map((item, index) => (
+                      <article key={`${item.requirement}-${index}`}>
+                        <StatusBadge>{matchStatusLabels[item.status] || item.status}</StatusBadge>
+                        <div>
+                          <strong>{item.requirement}</strong>
+                          {item.matched?.length > 0 && <small>命中：{item.matched.join('、')}</small>}
+                          {item.evidence && <small>简历依据：{item.evidence}</small>}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {[
+                { title: '优势', items: activeMatch.result?.strengths },
+                { title: '差距', items: activeMatch.result?.gaps },
+                { title: '改进建议', items: activeMatch.result?.suggestions },
+                { title: '面试关注点', items: activeMatch.result?.interviewFocus },
+              ].map((block) => (
+                (block.items || []).length > 0 && (
+                  <section className="detail-block" key={block.title}>
+                    <h3>{block.title}</h3>
+                    <ul className="job-points">{(block.items || []).map((item, index) => <li key={`${block.title}-${index}`}>{item}</li>)}</ul>
+                  </section>
+                )
+              ))}
+
+              {activeMatch.error_message && <section className="detail-block"><h3>错误信息</h3><p>{activeMatch.error_message}</p></section>}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -2704,6 +3312,7 @@ const pageDescriptions = {
   organization: '维护学院、专业、班级和学生组织归属',
   organizationConfig: '维护学院、专业和班级结构',
   catalog: '维护目标岗位、专业方向与能力模型',
+  jobPostings: '维护招聘岗位信息，查看对比记录，并审核学生粘贴的岗位描述',
   agents: '查看 AI 陪练角色及使用情况',
   connectionLogs: '排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路',
   settings: '管理服务配置、管理员与审计记录',
@@ -2874,6 +3483,66 @@ function OrganizationConfigPage({ onNavigate }) {
     }
   };
 
+  // 编辑 / 删除组织结构节点
+  const [editState, setEditState] = useState(null); // { type, item }
+  const [editing, setEditing] = useState(false);
+
+  const openEdit = (type, item) => {
+    setEditState({ type, item, form: type === 'college'
+      ? { code: item.code, name: item.name }
+      : type === 'program'
+        ? { collegeId: item.college_id, standardMajorCode: item.standard_major_code || '', name: item.name, direction: item.direction || '', coordinator: item.coordinator || '' }
+        : { name: item.name, graduationYear: item.graduation_year ?? '', advisor: item.advisor || '', inviteCode: item.invite_code || '' } });
+  };
+
+  const saveEdit = async (event) => {
+    event.preventDefault();
+    if (!editState) return;
+    const { type, item, form } = editState;
+    const endpoint = type === 'college'
+      ? `/api/admin/campus/colleges/${item.id}`
+      : type === 'program'
+        ? `/api/admin/campus/programs/${item.id}`
+        : `/api/admin/campus/classes/${item.id}`;
+    setEditing(true);
+    setPageError('');
+    setNotice('');
+    try {
+      await adminRequest(endpoint, { method: 'PUT', body: JSON.stringify(form) });
+      const label = type === 'college' ? '学院' : type === 'program' ? '专业' : '班级';
+      setNotice(`${label}已更新`);
+      setEditState(null);
+      await loadStructure();
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setEditing(false);
+    }
+  };
+
+  const confirmDelete = async (type, item) => {
+    const label = type === 'college' ? '学院' : type === 'program' ? '专业' : '班级';
+    const cascade = type === 'college' ? '其下所有专业、班级及学生归班记录' : type === 'program' ? '其下所有班级及学生归班记录' : '该班学生归班记录';
+    if (!window.confirm(`确认删除${label}「${item.name}」？将同时删除${cascade}，该操作不可恢复。`)) return;
+    setConfigBusy(`delete-${type}-${item.id}`);
+    setPageError('');
+    setNotice('');
+    try {
+      const endpoint = type === 'college'
+        ? `/api/admin/campus/colleges/${item.id}`
+        : type === 'program'
+          ? `/api/admin/campus/programs/${item.id}`
+          : `/api/admin/campus/classes/${item.id}`;
+      await adminRequest(endpoint, { method: 'DELETE' });
+      setNotice(`已删除${label}「${item.name}」`);
+      await loadStructure();
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setConfigBusy('');
+    }
+  };
+
   const { colleges, programs, classes } = structure;
 
   return (
@@ -2925,10 +3594,14 @@ function OrganizationConfigPage({ onNavigate }) {
       </SectionCard>
 
       <section className="org-config-single">
-        <SectionCard title="组织配置" icon={<Plus size={18} />}>
+        <SectionCard
+          title="组织配置"
+          icon={<Plus size={18} />}
+        >
           <div className="campus-config-tabs">
-            {[['college', '添加学院'], ['program', '添加专业'], ['class', '添加班级']].map(([key, label]) => <button type="button" key={key} className={creator === key ? 'active' : ''} onClick={() => setCreator(key)}>{label}</button>)}
+            {[['college', '学院'], ['program', '专业'], ['class', '班级']].map(([key, label]) => <button type="button" key={key} className={creator === key ? 'active' : ''} onClick={() => setCreator(key)}>{creator === key ? `添加${label}` : label}</button>)}
           </div>
+
           <form className="campus-create-form" onSubmit={createOrganizationItem}>
             {creator === 'college' && (
               <>
@@ -2956,8 +3629,79 @@ function OrganizationConfigPage({ onNavigate }) {
             )}
             <button className="primary-button" type="submit" disabled={configBusy === `create-${creator}`}>{configBusy === `create-${creator}` ? '创建中…' : '确认创建'}</button>
           </form>
+
+          <div className="org-manage-list">
+            <strong>已配置的结构（可编辑 / 删除）</strong>
+            {creator === 'college' && (colleges.length === 0 ? <p className="page-message">暂无学院。</p> : colleges.map((item) => (
+              <div className="org-manage-row" key={item.id}>
+                <span>{item.name} <em>{item.code}</em></span>
+                <span className="org-manage-actions">
+                  <button type="button" className="secondary-button" onClick={() => openEdit('college', item)}><Pencil size={14} />编辑</button>
+                  <button type="button" className="secondary-button danger" disabled={configBusy === `delete-college-${item.id}`} onClick={() => confirmDelete('college', item)}><Trash2 size={14} />删除</button>
+                </span>
+              </div>
+            )))}
+            {creator === 'program' && (programs.length === 0 ? <p className="page-message">暂无专业。</p> : programs.map((item) => (
+              <div className="org-manage-row" key={item.id}>
+                <span>{item.college_name} · {item.name}{item.direction ? ` · ${item.direction}` : ''}</span>
+                <span className="org-manage-actions">
+                  <button type="button" className="secondary-button" onClick={() => openEdit('program', item)}><Pencil size={14} />编辑</button>
+                  <button type="button" className="secondary-button danger" disabled={configBusy === `delete-program-${item.id}`} onClick={() => confirmDelete('program', item)}><Trash2 size={14} />删除</button>
+                </span>
+              </div>
+            )))}
+            {creator === 'class' && (classes.length === 0 ? <p className="page-message">暂无班级。</p> : classes.map((item) => (
+              <div className="org-manage-row" key={item.id}>
+                <span>{item.program_name} · {item.name}{item.graduation_year ? `（${item.graduation_year}届）` : ''}</span>
+                <span className="org-manage-actions">
+                  <button type="button" className="secondary-button" onClick={() => openEdit('class', item)}><Pencil size={14} />编辑</button>
+                  <button type="button" className="secondary-button danger" disabled={configBusy === `delete-class-${item.id}`} onClick={() => confirmDelete('class', item)}><Trash2 size={14} />删除</button>
+                </span>
+              </div>
+            )))}
+          </div>
         </SectionCard>
       </section>
+
+      {editState && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="编辑组织结构" onClick={() => setEditState(null)}>
+          <div className="modal-card org-edit-modal" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <div><Pencil size={18} /><h2>编辑{editState.type === 'college' ? '学院' : editState.type === 'program' ? '专业' : '班级'}</h2></div>
+              <button type="button" className="modal-close" onClick={() => setEditState(null)}><X size={18} /></button>
+            </header>
+            <form className="campus-create-form" onSubmit={saveEdit}>
+              {editState.type === 'college' && (
+                <>
+                  <label className="field-block"><span>学院编码</span><input value={editState.form.code} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, code: event.target.value } }))} required /></label>
+                  <label className="field-block"><span>学院名称</span><input value={editState.form.name} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, name: event.target.value } }))} required /></label>
+                </>
+              )}
+              {editState.type === 'program' && (
+                <>
+                  <label className="field-block"><span>所属学院</span><select value={editState.form.collegeId} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, collegeId: event.target.value } }))} required><option value="">请选择学院</option>{structure.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+                  <label className="field-block"><span>标准专业</span><select value={editState.form.standardMajorCode} onChange={(event) => { const major = structure.standardMajors.find((item) => item.code === event.target.value); setEditState((current) => ({ ...current, form: { ...current.form, standardMajorCode: event.target.value, name: major?.name || current.form.name } })); }}><option value="">自定义专业</option>{structure.standardMajors.map((item) => <option value={item.code} key={item.id}>{item.name} · {item.code}</option>)}</select></label>
+                  <label className="field-block"><span>学校专业名称</span><input value={editState.form.name} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, name: event.target.value } }))} required /></label>
+                  <label className="field-block"><span>培养方向</span><input value={editState.form.direction} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, direction: event.target.value } }))} /></label>
+                  <label className="field-block"><span>专业负责人</span><input value={editState.form.coordinator} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, coordinator: event.target.value } }))} /></label>
+                </>
+              )}
+              {editState.type === 'class' && (
+                <>
+                  <label className="field-block"><span>班级名称</span><input value={editState.form.name} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, name: event.target.value } }))} required /></label>
+                  <label className="field-block"><span>毕业年份</span><input type="number" min="2000" max="2100" value={editState.form.graduationYear} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, graduationYear: event.target.value } }))} /></label>
+                  <label className="field-block"><span>辅导员</span><input value={editState.form.advisor} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, advisor: event.target.value } }))} /></label>
+                  <label className="field-block"><span>邀请码（可选）</span><input value={editState.form.inviteCode} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, inviteCode: event.target.value } }))} /></label>
+                </>
+              )}
+              <footer>
+                <button type="button" className="secondary-button" onClick={() => setEditState(null)} disabled={editing}>取消</button>
+                <button type="submit" className="primary-button" disabled={editing}>{editing ? '保存中…' : '保存修改'}</button>
+              </footer>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3178,6 +3922,7 @@ function AdminApp({ admin, onSignedOut }) {
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
     if (activeView === 'guide') return <GuidePage onNavigate={navigateTo} admin={admin} />;
     if (activeView === 'catalog') return <CatalogPage permissions={adminData.permissions || {}} />;
+    if (activeView === 'jobPostings') return <JobPostingsPage />;
     if (activeView === 'organization') return <OrganizationPage onView={openDetail} />;
     if (activeView === 'organizationConfig') return <OrganizationConfigPage onNavigate={navigateTo} />;
     const listProps = {

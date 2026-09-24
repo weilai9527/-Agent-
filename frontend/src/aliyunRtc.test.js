@@ -55,6 +55,7 @@ test('startup errors explain how to recover without dumping provider responses',
   assert.match(formatAliyunRtcStartError(new Error('启动确认超时')), /超时/);
   assert.equal(formatAliyunRtcStartError(new Error('请允许麦克风权限')), '请允许麦克风权限');
   assert.match(formatAliyunRtcStartError(new Error('Network error, please check your network connectivity')), /网络或代理/);
+  assert.match(formatAliyunRtcStartError(new TypeError('Failed to fetch')), /网络或代理/);
 });
 
 function startupHarness(failures, { failAt = 'join', cleanupThrows = false } = {}) {
@@ -102,6 +103,14 @@ test('cleans failed join before retrying on a fresh client', async () => {
   await session.leave();
   assert.equal(harness.calls.left, 2);
   assert.equal(harness.calls.closed, 1);
+});
+
+test('retries a fetch failure raised by RTC join', async () => {
+  const harness = startupHarness([new TypeError('Failed to fetch')]);
+  const session = await createAliyunRtcAudioSession(harness);
+  assert.equal(harness.calls.created, 2);
+  assert.equal(harness.calls.left, 1);
+  await session.leave();
 });
 
 test('network retry is bounded and cleanup errors do not replace the cause', async () => {

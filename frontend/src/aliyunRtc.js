@@ -163,7 +163,8 @@ export async function ensureAiAgentMessagingReady(aiAgentClient, {
 }
 
 function isRtcNetworkError(error) {
-  return Number(error?.code) === 40001 || /network error|networkerror/i.test(String(error?.message || ''));
+  return Number(error?.code) === 40001
+    || /network error|networkerror|failed to fetch|fetch failed|network request failed/i.test(String(error?.message || ''));
 }
 
 export async function createAliyunRtcAudioSession(options) {

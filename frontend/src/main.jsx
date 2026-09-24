@@ -4181,6 +4181,11 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         metadata: { expires_in: credentials.expires_in },
       });
 
+      if (!credentials.ai_agent?.enabled) {
+        startupPhase = 'agent_config';
+        throw new Error('语音面试官尚未完成服务端配置，请联系管理员；可切换文字面试，已保存的进度会保留。');
+      }
+
       startupPhase = 'sdk';
       setAliyunRtcMessage('正在连接阿里云 RTC 频道');
       const session = await createAliyunRtcAudioSession({
@@ -4337,9 +4342,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
             setAliyunRtcMessage(notifyError.message || 'RTC 当前问题播报失败');
           });
         }
-      } else {
-        setAliyunAgentStatus('disabled');
-        setAliyunRtcMessage('已加入 RTC；配置模板和 RAM 密钥后会自动启动 AI 面试官');
       }
     } catch (requestError) {
       if (aliyunRtcAttemptRef.current !== attempt) return;

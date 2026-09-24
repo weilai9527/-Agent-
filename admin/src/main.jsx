@@ -47,7 +47,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-const ADMIN_API_BASE_URL = import.meta.env.VITE_ADMIN_API_BASE_URL || 'http://127.0.0.1:3002';
+const ADMIN_API_BASE_URL = import.meta.env.VITE_ADMIN_API_BASE_URL || (import.meta.env.DEV ? 'http://127.0.0.1:3002' : '');
 
 const emptyAdminData = {
   metrics: [],

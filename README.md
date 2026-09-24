@@ -110,6 +110,12 @@ AI Interview Agent 是一个面向招聘与人才评估场景的智能面试平�
 - 管理端：独立 FastAPI 服务，负责候选人、职业目录、连接日志和统计管理。
 - 数据层：MySQL 用于生产数据，SQLite 用于本地开发与自动化测试。
 
+## Cloudflare 前端部署
+
+根目录的 `wrangler.jsonc` 将 `npm run build` 生成的 `frontend/dist` 作为静态资源部署到名为 `agent` 的 Worker，并为前端单页路由返回 `index.html`。这个部署不包含两个 Python API 服务或数据库。
+
+正式使用前，请单独部署业务后端，并为前端构建设置 `VITE_API_BASE_URL`，同时把前端域名加入后端的 `FRONTEND_ORIGIN`。当前登录 Cookie 使用 `SameSite=Lax`，前端与 API 应使用同站点域名；仅部署静态页面时，登录和面试接口无法使用。
+
 
 ## ☁️ Alibaba Cloud RTC
 

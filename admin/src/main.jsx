@@ -535,7 +535,7 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
             </div>
           </footer>
         )}
-        {detail?.type === 'candidate' && !error && (
+        {detail?.type === 'candidate' && !detail.pending && !error && (
           <footer className="detail-actions student-password-actions">
             <span>
               {detail.temporaryPassword
@@ -569,6 +569,7 @@ function formatDetail(type, payload, fallbackRow) {
     return {
       type: 'candidate',
       id: item.id || fallbackRow.id,
+      pending: Boolean(fallbackRow.pending),
       title: `学生 · ${item.name || item.nickname || fallbackRow.name}`,
       mustChangePassword: Boolean(item.must_change_password ?? fallbackRow.canViewTemporaryPassword),
       canViewTemporaryPassword: Boolean(item.can_view_temp_password ?? fallbackRow.canViewTemporaryPassword),
@@ -579,7 +580,7 @@ function formatDetail(type, payload, fallbackRow) {
         { label: '辅导员', value: item.counselor },
         { label: '学生状态', value: item.student_status },
         { label: '状态', value: item.status },
-        { label: '激活状态', value: (item.must_change_password ?? fallbackRow.canViewTemporaryPassword) ? '待首次改密' : ((item.student_no || item.studentNo) ? '已激活' : '待绑定学号') },
+        { label: '激活状态', value: fallbackRow.pending ? '未激活' : ((item.must_change_password ?? fallbackRow.canViewTemporaryPassword) ? '待首次改密' : ((item.student_no || item.studentNo) ? '已激活' : '待绑定学号')) },
         { label: '目标岗位', value: item.target_role || item.role },
         { label: '最后登录', value: item.last_login_at || item.lastLogin },
       ],
@@ -861,6 +862,7 @@ function RegistrationsPage() {
   const [addStructure, setAddStructure] = useState({ colleges: [], classes: [] });
   const [addStructureLoading, setAddStructureLoading] = useState(false);
   const [addStructureError, setAddStructureError] = useState('');
+  const [inspectMode, setInspectMode] = useState('');
 
   const loadRegistrations = async () => {
     setLoading(true);
@@ -1074,6 +1076,12 @@ function RegistrationsPage() {
   const activatedCount = useMemo(() => registrations.filter((item) => item.activated).length, [registrations]);
   const missingCount = useMemo(() => registrations.filter((item) => (item.missing || []).length > 0).length, [registrations]);
 
+  const inspectList = useMemo(() => {
+    if (inspectMode === 'missing') return registrations.filter((item) => (item.missing || []).length > 0);
+    if (inspectMode === 'pending') return registrations.filter((item) => !item.activated);
+    return [];
+  }, [registrations, inspectMode]);
+
   const handleClearFilter = () => {
     setQuery('');
     setStatusFilter('all');
@@ -1135,6 +1143,22 @@ function RegistrationsPage() {
           >
             <UserPlus size={15} />添加学生信息
           </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => setInspectMode('missing')}
+            title="查看六项信息未填写完整的学生"
+          >
+            <AlertCircle size={15} />检测信息
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => setInspectMode('pending')}
+            title="查看尚未激活的学生"
+          >
+            <UsersRound size={15} />检测激活
+          </button>
           <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
             <Upload size={15} className={importing ? 'spin' : ''} />
             {importing ? '正在导入…' : '导入文档（CSV / Excel）'}
@@ -1180,7 +1204,7 @@ function RegistrationsPage() {
           </button>
         </div>
 
-        <p className="form-hint">文档需包含「学院」「学号」「姓名」「性别」「班级」「辅导员」六列（支持中文或 college / student_no / name / gender / class_name / counselor 列名）；导入后会自动为学号与姓名齐全的学生开通候选人端账号，账号使用随机临时密码，学生凭「学号 + 临时密码」首次登录后必须修改密码。缺任一字段的学生会被标记为「信息缺失」。「导出临时密码」会导出尚未改密学生的临时密码，请交由对应辅导员发放。</p>
+        <p className="form-hint">文档需包含「学院」「学号」「姓名」「性别」「班级」「辅导员」六列（支持中文或 college / student_no / name / gender / class_name / counselor 列名）；导入后会自动为六项信息（学院、学号、姓名、性别、班级、辅导员）齐全的学生开通候选人端账号，账号使用随机临时密码，学生凭「学号 + 临时密码」首次登录后必须修改密码。缺任一字段的学生会被标记为「信息缺失」，且不会被开通账号。「导出临时密码」会导出尚未改密学生的临时密码，请交由对应辅导员发放。</p>
 
         {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
         {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
@@ -1337,6 +1361,56 @@ function RegistrationsPage() {
                 <button type="submit" className="primary-button" disabled={addSaving || addStructureLoading || !addForm.collegeId || !addForm.classId}>{addSaving ? '添加中…' : '确认添加'}</button>
               </footer>
             </form>
+          </div>
+        </div>
+      )}
+
+      {inspectMode && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={inspectMode === 'missing' ? '检测信息' : '检测激活'} onClick={() => setInspectMode('')}>
+          <div className="modal-card inspect-modal" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <div><AlertCircle size={18} /><h2>{inspectMode === 'missing' ? '信息未填写完整的学生' : '未激活的学生'}</h2></div>
+              <button className="modal-close" type="button" onClick={() => setInspectMode('')} title="关闭"><X size={18} /></button>
+            </header>
+            {inspectList.length === 0 ? (
+              <div className="page-message">
+                {inspectMode === 'missing' ? '所有学生的六项信息都已填写完整。' : '当前没有未激活的学生。'}
+              </div>
+            ) : (
+              <div className="table-wrap inspect-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>学院</th>
+                      <th>学号</th>
+                      <th>姓名</th>
+                      <th>性别</th>
+                      <th>班级</th>
+                      <th>辅导员</th>
+                      {inspectMode === 'missing' && <th>缺失项</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {inspectList.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.college || '-'}</td>
+                        <td>{item.studentNo || '-'}</td>
+                        <td>{item.name || '-'}</td>
+                        <td>{item.gender || '-'}</td>
+                        <td>{item.className || '-'}</td>
+                        <td>{item.counselor || '-'}</td>
+                        {inspectMode === 'missing' && <td className="cell-missing">{(item.missing || []).join('、') || '-'}</td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="form-hint">
+              {inspectMode === 'missing'
+                ? `共 ${inspectList.length} 名学生信息不完整，补齐六项信息后才能开通账号。`
+                : `共 ${inspectList.length} 名学生尚未激活，可在列表中点击「一键激活账号」批量开通。`}
+            </p>
           </div>
         </div>
       )}
@@ -1525,6 +1599,7 @@ const emptyCampusData = {
   programs: [],
   classes: [],
   students: [],
+  pendingStudents: [],
   standardMajors: [],
   jobRoles: [],
   summary: { colleges: 0, programs: 0, classes: 0, students: 0, unassigned: 0, focus: 0 },
@@ -1537,6 +1612,7 @@ function OrganizationPage({ onView }) {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState('');
   const [studentQuery, setStudentQuery] = useState('');
+  const [studentFilter, setStudentFilter] = useState({ collegeId: '', programId: '', classId: '' });
 
   const loadCampus = async () => {
     setLoading(true);
@@ -1555,14 +1631,43 @@ function OrganizationPage({ onView }) {
     loadCampus();
   }, []);
 
+  const allStudents = useMemo(() => {
+    const activated = (campus.students || []).filter((item) => item.infoComplete);
+    return [...activated, ...(campus.pendingStudents || [])];
+  }, [campus.students, campus.pendingStudents]);
+
+  const filterPrograms = useMemo(
+    () => (studentFilter.collegeId ? campus.programs.filter((item) => item.college_id === studentFilter.collegeId) : []),
+    [campus.programs, studentFilter.collegeId],
+  );
+  const filterClasses = useMemo(
+    () => (studentFilter.programId ? campus.classes.filter((item) => item.program_id === studentFilter.programId) : []),
+    [campus.classes, studentFilter.programId],
+  );
+
+  const updateStudentFilter = (field, value) => {
+    setStudentFilter((current) => {
+      if (field === 'collegeId') return { collegeId: value, programId: '', classId: '' };
+      if (field === 'programId') return { ...current, programId: value, classId: '' };
+      return { ...current, [field]: value };
+    });
+  };
+
+  const clearStudentFilter = () => setStudentFilter({ collegeId: '', programId: '', classId: '' });
+
   const filteredStudents = useMemo(() => {
     const keyword = studentQuery.trim().toLowerCase();
-    if (!keyword) return campus.students;
-    return campus.students.filter((student) => {
+    return allStudents.filter((student) => {
+      if (studentFilter.collegeId && student.collegeId !== studentFilter.collegeId) return false;
+      if (studentFilter.programId && student.programId !== studentFilter.programId) return false;
+      if (studentFilter.classId && student.classId !== studentFilter.classId) return false;
+      if (!keyword) return true;
       const searchable = [student.name, student.email, student.studentNo, student.targetRole, student.program, student.className].join(' ').toLowerCase();
       return searchable.includes(keyword);
     });
-  }, [campus.students, studentQuery]);
+  }, [allStudents, studentQuery, studentFilter]);
+
+  const hasStudentFilter = Boolean(studentFilter.collegeId || studentFilter.programId || studentFilter.classId);
 
   const updateStudent = async (student, updates) => {
     setBusy(`student-${student.id}`);
@@ -1599,16 +1704,31 @@ function OrganizationPage({ onView }) {
     onView('candidate', asCandidate, context);
   };
 
-  if (loading && campus.students.length === 0) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取组织与学生数据</div>;
+  if (loading && campus.students.length === 0 && campus.pendingStudents.length === 0) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取组织与学生数据</div>;
 
   return (
     <div className="campus-page">
       {(error || message) && <div className={`campus-feedback ${error ? 'error' : 'success'}`}>{error || message}</div>}
 
       <section className="campus-workspace">
-        <SectionCard title="已激活学生" icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
+        <SectionCard title="学生列表" icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
           <div className="campus-student-toolbar">
-            <label><Search size={15} /><input value={studentQuery} onChange={(event) => setStudentQuery(event.target.value)} placeholder="搜索姓名、学号、邮箱或目标岗位" /></label>
+            <label className="campus-student-search"><Search size={15} /><input value={studentQuery} onChange={(event) => setStudentQuery(event.target.value)} placeholder="搜索姓名、学号、邮箱或目标岗位" /></label>
+            <div className="campus-student-filters">
+              <select value={studentFilter.collegeId} onChange={(event) => updateStudentFilter('collegeId', event.target.value)} aria-label="按学院筛选">
+                <option value="">全部学院</option>
+                {campus.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+              </select>
+              <select value={studentFilter.programId} onChange={(event) => updateStudentFilter('programId', event.target.value)} disabled={!studentFilter.collegeId} aria-label="按专业筛选">
+                <option value="">{studentFilter.collegeId ? '全部专业' : '请先选学院'}</option>
+                {filterPrograms.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+              </select>
+              <select value={studentFilter.classId} onChange={(event) => updateStudentFilter('classId', event.target.value)} disabled={!studentFilter.programId} aria-label="按班级筛选">
+                <option value="">{studentFilter.programId ? '全部班级' : '请先选专业'}</option>
+                {filterClasses.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+              </select>
+              <button className="secondary-button" type="button" onClick={clearStudentFilter} disabled={!hasStudentFilter} title="清空学院/专业/班级筛选"><X size={15} />清空筛选</button>
+            </div>
           </div>
           <div className="table-wrap campus-student-table">
             <table>
@@ -1617,14 +1737,16 @@ function OrganizationPage({ onView }) {
                 {filteredStudents.length === 0 && <tr><td colSpan="7"><EmptyState text="当前范围没有学生" /></td></tr>}
                 {filteredStudents.map((student) => (
                   <tr key={student.id} className="data-row" onClick={() => openStudent(student)}>
-                    <td><div className="student-identity"><span className="student-identity-name"><strong>{student.name}</strong>{student.registrationRemoved && <em className="student-removed-tag">名单已删除</em>}</span><span>{student.studentNo !== '-' ? student.studentNo : student.email}</span></div></td>
+                    <td><div className="student-identity"><span className="student-identity-name"><strong>{student.name}</strong>{student.registrationRemoved && <em className="student-removed-tag">名单已删除</em>}{student.pending && <em className="student-pending-tag">未激活</em>}</span><span>{student.studentNo !== '-' ? student.studentNo : student.email}</span></div></td>
                     <td>{student.targetRole}</td>
                     <td><strong className={student.readiness < 60 && student.interviews > 0 ? 'score-alert' : ''}>{student.interviews ? `${student.readiness}分` : '-'}</strong></td>
                     <td>{student.interviews} 次</td>
                     <td><StatusBadge>{student.growthStatus}</StatusBadge></td>
                     <td className={student.className === '未归班' ? 'cell-unassigned' : ''}>{student.className}</td>
                     <td onClick={(event) => event.stopPropagation()}>
-                      <button type="button" className={`focus-student-button ${student.focus ? 'active' : ''}`} disabled={busy === `student-${student.id}`} onClick={() => updateStudent(student, { focus: !student.focus })}>{student.focus ? '已关注' : '关注'}</button>
+                      {student.pending
+                        ? <span className="student-pending-hint">未激活</span>
+                        : <button type="button" className={`focus-student-button ${student.focus ? 'active' : ''}`} disabled={busy === `student-${student.id}`} onClick={() => updateStudent(student, { focus: !student.focus })}>{student.focus ? '已关注' : '关注'}</button>}
                     </td>
                   </tr>
                 ))}
@@ -3203,6 +3325,7 @@ function scopeCovers(entries, collegeId, programId, classId) {
 }
 
 function ScopeTree({ colleges, programs, classes, value, onChange }) {
+  const [expandedNodes, setExpandedNodes] = useState({});
   const programsByCollege = useMemo(() => {
     const map = {};
     (programs || []).forEach((program) => {
@@ -3235,51 +3358,99 @@ function ScopeTree({ colleges, programs, classes, value, onChange }) {
     return <p className="settings-message">暂无组织结构数据，请先在「组织」页维护学院、专业与班级。</p>;
   }
 
+  const toggleNode = (key) => setExpandedNodes((current) => ({ ...current, [key]: !current[key] }));
+
   return (
     <div className="scope-tree">
       {(colleges || []).map((college) => {
         const collegeCovered = scopeCovers(value, college.id, null, null);
         const collegePrograms = programsByCollege[college.id] || [];
+        const collegeKey = `college:${college.id}`;
+        const collegeCollapsed = collegePrograms.length > 0 && !expandedNodes[collegeKey];
         return (
-          <div className="scope-tree-college" key={college.id}>
-            <label>
-              <input
-                type="checkbox"
-                checked={collegeCovered}
-                onChange={(event) => toggle({ college: college.id, program: '', class: '' }, event.target.checked)}
-              />
-              <strong>{college.name}</strong>
-              <small>（整个学院）</small>
-            </label>
-            {!collegeCovered &&
-              collegePrograms.map((program) => {
-                const programCovered = scopeCovers(value, college.id, program.id, null);
-                const programClasses = classesByProgram[program.id] || [];
-                return (
-                  <div className="scope-tree-program" key={program.id}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={programCovered}
-                        onChange={(event) => toggle({ college: college.id, program: program.id, class: '' }, event.target.checked)}
-                      />
-                      {program.name}
-                      <small>（整个专业）</small>
-                    </label>
-                    {!programCovered &&
-                      programClasses.map((classItem) => (
-                        <label className="scope-tree-class" key={classItem.id}>
+          <div className="scope-tree-node scope-tree-college" key={college.id}>
+            <div className={`scope-tree-row${collegeCovered ? ' covered' : ''}`}>
+              {collegePrograms.length > 0 && !collegeCovered ? (
+                <button
+                  type="button"
+                  className="scope-caret"
+                  aria-expanded={!collegeCollapsed}
+                  title={collegeCollapsed ? '展开学院' : '收起学院'}
+                  onClick={() => toggleNode(collegeKey)}
+                >
+                  {collegeCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                </button>
+              ) : <i className="scope-caret-gap" aria-hidden="true" />}
+              <label>
+                <input
+                  type="checkbox"
+                  checked={collegeCovered}
+                  onChange={(event) => toggle({ college: college.id, program: '', class: '' }, event.target.checked)}
+                />
+                <Building2 size={15} />
+                <span className="scope-tree-name">{college.name}</span>
+                <small className="scope-tree-hint">（整个学院）</small>
+              </label>
+            </div>
+            {collegePrograms.length > 0 && !collegeCollapsed && !collegeCovered && (
+              <div className="scope-tree-children">
+                {collegePrograms.map((program) => {
+                  const programCovered = scopeCovers(value, college.id, program.id, null);
+                  const programClasses = classesByProgram[program.id] || [];
+                  const programKey = `program:${program.id}`;
+                  const programCollapsed = programClasses.length > 0 && !expandedNodes[programKey];
+                  return (
+                    <div className="scope-tree-node scope-tree-program" key={program.id}>
+                      <div className={`scope-tree-row${programCovered ? ' covered' : ''}`}>
+                        {programClasses.length > 0 && !programCovered ? (
+                          <button
+                            type="button"
+                            className="scope-caret"
+                            aria-expanded={!programCollapsed}
+                            title={programCollapsed ? '展开专业' : '收起专业'}
+                            onClick={() => toggleNode(programKey)}
+                          >
+                            {programCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                          </button>
+                        ) : <i className="scope-caret-gap" aria-hidden="true" />}
+                        <label>
                           <input
                             type="checkbox"
-                            checked={scopeCovers(value, college.id, program.id, classItem.id)}
-                            onChange={(event) => toggle({ college: college.id, program: program.id, class: classItem.id }, event.target.checked)}
+                            checked={programCovered}
+                            onChange={(event) => toggle({ college: college.id, program: program.id, class: '' }, event.target.checked)}
                           />
-                          {classItem.name}
+                          <GraduationCap size={14} />
+                          <span className="scope-tree-name">{program.name}</span>
+                          <small className="scope-tree-hint">（整个专业）</small>
                         </label>
-                      ))}
-                  </div>
-                );
-              })}
+                      </div>
+                      {programClasses.length > 0 && !programCollapsed && !programCovered && (
+                        <div className="scope-tree-children">
+                          {programClasses.map((classItem) => {
+                            const classCovered = scopeCovers(value, college.id, program.id, classItem.id);
+                            return (
+                              <div className="scope-tree-node scope-tree-class" key={classItem.id}>
+                                <div className={`scope-tree-row${classCovered ? ' covered' : ''}`}>
+                                  <i className="scope-caret-gap" aria-hidden="true" />
+                                  <label>
+                                    <input
+                                      type="checkbox"
+                                      checked={classCovered}
+                                      onChange={(event) => toggle({ college: college.id, program: program.id, class: classItem.id }, event.target.checked)}
+                                    />
+                                    <span className="scope-tree-name">{classItem.name}</span>
+                                  </label>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         );
       })}
@@ -4521,6 +4692,13 @@ function AdminApp({ admin, onSignedOut }) {
     };
     const currentKey = type === 'agent' ? row.name : row.id;
     setDetailContext({ type, rows: contextRows, currentKey });
+    if (type === 'candidate' && row.pending) {
+      // 未激活学生尚未开通账号，直接展示名单信息，不请求候选人详情接口。
+      setDetail(formatDetail(type, {}, row));
+      setDetailLoading(false);
+      setDetailError('');
+      return;
+    }
     setDetail(formatDetail(type, {}, row));
     setDetailLoading(true);
     setDetailError('');

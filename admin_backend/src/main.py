@@ -1339,6 +1339,8 @@ def list_campus_students() -> list[dict[str, Any]]:
     rows = all_rows(
         """
         SELECT users.id, users.email, users.name, users.status, users.last_login_at,
+               users.college AS user_college, users.gender, users.counselor,
+               users.class_name AS user_class_name, users.student_no AS user_student_no,
                profiles.target_role,
                enrollments.id AS enrollment_id, enrollments.student_no,
                enrollments.status AS enrollment_status, enrollments.focus_flag, enrollments.note,
@@ -1367,6 +1369,10 @@ def list_campus_students() -> list[dict[str, Any]]:
           FROM interview_reports
           GROUP BY user_id
         ) AS report_scores ON report_scores.user_id = users.id
+        WHERE users.id IN (
+          SELECT user_id FROM student_registrations
+          WHERE deleted_at IS NULL AND user_id IS NOT NULL AND user_id != ''
+        )
         ORDER BY enrollments.focus_flag DESC, users.updated_at DESC, users.created_at DESC
         LIMIT 500
         """
@@ -1395,8 +1401,77 @@ def list_campus_students() -> list[dict[str, Any]]:
             "lastLogin": str(row.get("last_login_at") or "-"),
             "registrationRemoved": bool(row.get("removed_registration_id")),
         }
+        item["infoComplete"] = all(
+            str(row.get(field) or "").strip()
+            for field in ("user_college", "user_student_no", "name", "gender", "user_class_name", "counselor")
+        )
         item["growthStatus"] = _student_growth_status(row)
         result.append(item)
+    return result
+
+
+def list_pending_campus_students() -> list[dict[str, Any]]:
+    """未开通账号、且六项信息（学院/学号/姓名/性别/班级/辅导员）齐全的注册学生。
+
+    供「学生列表」与已激活学生同表展示；信息不完整的注册学生不在此列。
+    """
+    rows = all_rows(
+        """
+        SELECT reg.id, reg.student_no, reg.name, reg.college, reg.gender,
+               reg.class_name, reg.counselor, reg.created_at
+        FROM student_registrations AS reg
+        LEFT JOIN users ON users.id = reg.user_id
+        WHERE reg.deleted_at IS NULL AND (reg.user_id IS NULL OR reg.user_id = '' OR users.id IS NULL)
+        ORDER BY reg.created_at DESC, reg.student_no
+        """
+    )
+    structure = all_rows(
+        """
+        SELECT classes.id AS class_id, classes.name AS class_name, classes.graduation_year,
+               programs.id AS program_id, programs.name AS program_name,
+               colleges.id AS college_id, colleges.name AS college_name
+        FROM campus_classes AS classes
+        JOIN campus_programs AS programs ON programs.id = classes.program_id
+        JOIN campus_colleges AS colleges ON colleges.id = programs.college_id
+        """
+    )
+    lookup = {(row["college_name"], row["class_name"]): row for row in structure}
+    result = []
+    for row in rows:
+        if not all(str(row.get(field) or "").strip()
+                   for field in ("college", "student_no", "name", "gender", "class_name", "counselor")):
+            continue
+        matched = lookup.get((row["college"], row["class_name"]))
+        result.append({
+            "id": row["id"],
+            "name": row.get("name") or "未命名学生",
+            "email": "-",
+            "studentNo": row.get("student_no") or "-",
+            "collegeId": matched["college_id"] if matched else None,
+            "college": row.get("college") or "未归属",
+            "programId": matched["program_id"] if matched else None,
+            "program": matched["program_name"] if matched else "未归属",
+            "direction": "",
+            "classId": matched["class_id"] if matched else None,
+            "className": row.get("class_name") or "未归班",
+            "graduationYear": matched["graduation_year"] if matched else None,
+            "targetRole": "尚未选择",
+            "readiness": 0.0,
+            "interviews": 0,
+            "focus": False,
+            "note": "",
+            "accountStatus": "未激活",
+            "status": "未激活",
+            "student_status": "未激活",
+            "lastLogin": "-",
+            "registrationRemoved": False,
+            "infoComplete": True,
+            "pending": True,
+            "activated": False,
+            "growthStatus": "待激活",
+            "counselor": row.get("counselor") or "",
+            "gender": row.get("gender") or "",
+        })
     return result
 
 
@@ -1441,6 +1516,17 @@ def campus_overview_data(scope: list[dict[str, str]] | None = None) -> dict[str,
             if scope_allows(scope, item.get("collegeId"), item.get("programId"), item.get("classId"))
         ]
 
+    try:
+        pending_students = list_pending_campus_students()
+    except Exception:
+        pending_students = []
+    if scope is not None:
+        pending_students = [
+            item
+            for item in pending_students
+            if scope_allows(scope, item.get("collegeId"), item.get("programId"), item.get("classId"))
+        ]
+
     program_counts: dict[str, int] = {}
     class_counts: dict[str, int] = {}
     for student in students:
@@ -1460,6 +1546,7 @@ def campus_overview_data(scope: list[dict[str, str]] | None = None) -> dict[str,
         "programs": programs,
         "classes": classes,
         "students": students,
+        "pendingStudents": pending_students,
         "standardMajors": majors,
         "jobRoles": jobs,
         "summary": {
@@ -2196,19 +2283,18 @@ def assign_registration_to_class(user_id: str, student_no: str, college: str | N
 def provision_registration_account(reg: dict[str, Any]) -> str:
     """为一条学生注册信息开通候选人端账号，返回 created / existing / skipped。
 
-    - 学号或姓名缺失：返回 skipped。
+    - 六项信息（学院/学号/姓名/性别/班级/辅导员）任缺其一：返回 skipped，不允许激活。
     - 已存在同号账号：只同步名单信息，不重置密码与改密标记，返回 existing。
     - 新账号：使用随机临时密码并置为待改密状态，首次登录强制修改密码，返回 created。
     """
     student_no = str(reg.get("student_no") or "").strip()
     name = str(reg.get("name") or "").strip()
-    if not student_no or not name:
-        return "skipped"
-
     college = str(reg.get("college") or "").strip() or None
     gender = str(reg.get("gender") or "").strip() or None
     class_name = str(reg.get("class_name") or "").strip() or None
     counselor = str(reg.get("counselor") or "").strip() or None
+    if not all((student_no, name, college, gender, class_name, counselor)):
+        return "skipped"
 
     existing = one("SELECT id FROM users WHERE student_no = ?", (student_no,))
     if existing:

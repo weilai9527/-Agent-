@@ -2715,7 +2715,11 @@ td {
 }
 
 .campus-student-toolbar {
+  align-items: center;
   border-bottom: 1px solid #edf0f5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   padding: 0 0 14px;
 }
 
@@ -2726,9 +2730,35 @@ td {
   border-radius: 9px;
   color: #8591a3;
   display: flex;
+  flex: 1 1 280px;
   gap: 8px;
   max-width: 460px;
   padding: 0 11px;
+}
+
+.campus-student-filters {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.campus-student-filters select {
+  background: #fff;
+  border: 1px solid #dbe2eb;
+  border-radius: 8px;
+  color: #415169;
+  font: inherit;
+  font-size: 12px;
+  max-width: 170px;
+  padding: 8px 26px 8px 9px;
+}
+
+.campus-student-filters select:disabled {
+  background: #f5f7fa;
+  color: #9aa6b6;
+  cursor: not-allowed;
 }
 
 .campus-student-toolbar input {
@@ -2798,6 +2828,23 @@ td {
   line-height: 1;
   padding: 3px 6px;
   white-space: nowrap;
+}
+
+.student-pending-tag {
+  background: #eef2f7;
+  border: 1px solid #d5dde8;
+  border-radius: 999px;
+  color: #6b7b90;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1;
+  padding: 3px 6px;
+  white-space: nowrap;
+}
+
+.student-pending-hint {
+  color: #9aa6b6;
+  font-size: 12px;
 }
 
 .form-hint {
@@ -3884,6 +3931,33 @@ td {
   margin-left: auto;
 }
 
+.inspect-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 80vh;
+  overflow: auto;
+  width: min(820px, 100%);
+}
+
+.inspect-modal header {
+  color: #111827;
+}
+
+.inspect-modal header div {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.inspect-table table {
+  min-width: 620px;
+}
+
+.inspect-table td:last-child {
+  color: #c0392b;
+}
+
 .clog-modal {
   width: min(1120px, 100%);
 }
@@ -4179,9 +4253,10 @@ td {
 }
 
 .permission-checklist {
+  align-items: stretch;
   display: grid;
+  gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
 }
 
 @media (max-width: 900px) {
@@ -4191,39 +4266,55 @@ td {
 }
 
 .permission-check {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 10px 12px;
-  border: 1px solid #eef2f7;
-  border-radius: 7px;
-  background: #fbfdff;
+  align-items: start;
+  background: #ffffff;
+  border: 1px solid #e8eef6;
+  border-radius: 10px;
   cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 12px 14px;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
 }
 
 .permission-check:hover {
   border-color: #91caff;
-  background: #f2f8ff;
+  background: #f7fbff;
 }
 
-.permission-check input {
-  margin-top: 3px;
+/* 勾选后整张卡片高亮，状态更直观（不支持 :has 的浏览器会自动忽略） */
+.permission-check:has(input:checked) {
+  background: #f0f7ff;
+  border-color: #1677ff;
+  box-shadow: inset 0 0 0 1px rgba(22, 119, 255, 0.12);
+}
+
+/* 覆盖 .settings-form / .admin-account-form 对 input 的 width:100%、height:40px */
+.permission-check input[type="checkbox"] {
   accent-color: #1677ff;
   cursor: pointer;
+  height: 16px;
+  margin: 1px 0 0;
+  padding: 0;
+  width: 16px;
 }
 
-.permission-check span {
+.permission-check > span {
   display: grid;
   gap: 3px;
+  min-width: 0;
 }
 
 .permission-check strong {
-  color: #111827;
+  color: #1f2937;
   font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
 }
 
 .permission-check small {
-  color: #94a3b8;
+  color: #8b97a8;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -4237,76 +4328,111 @@ td {
 }
 
 .scope-tree-college {
-  display: grid;
+  padding: 4px 2px;
+}
+
+.scope-tree-row {
+  align-items: center;
+  border-radius: 9px;
+  color: #45556c;
+  display: flex;
   gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid #eef2f7;
-  border-radius: 7px;
-  background: #fbfdff;
+  min-height: 36px;
+  padding: 5px 9px;
+  transition: background 160ms ease, color 160ms ease;
 }
 
-.scope-tree-college > label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
+.scope-tree-row:hover {
+  background: #f5f8fc;
 }
 
-.scope-tree-college > label input {
-  accent-color: #1677ff;
-  cursor: pointer;
-}
-
-.scope-tree-college > label strong {
+.scope-tree-row.covered {
+  background: #eaf3ff;
   color: #0958d9;
-  font-size: 14px;
 }
 
-.scope-tree-college > label small {
+.scope-tree-row.covered .scope-tree-name {
+  font-weight: 650;
+}
+
+.scope-caret {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #8591a3;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding: 2px;
+}
+
+.scope-caret:hover {
+  color: #185fb8;
+}
+
+/* 无下级的节点用占位保持「展开箭头」列对齐 */
+.scope-tree .scope-caret-gap {
+  display: block;
+  flex: 0 0 auto;
+  height: 1px;
+  width: 19px;
+}
+
+.scope-tree-row label {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  flex: 1 1 auto;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* 覆盖 .admin-account-form / .settings-form 对 input 的 width:100%、height:40px */
+.scope-tree .scope-tree-row input[type="checkbox"] {
+  accent-color: #1677ff;
+  cursor: pointer;
+  flex: 0 0 auto;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  width: 15px;
+}
+
+.scope-tree .scope-tree-name {
+  color: inherit;
+  flex: 1 1 auto;
+  font-size: inherit;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-tree .scope-tree-hint {
   color: #94a3b8;
-  font-size: 12px;
+  flex: 0 0 auto;
+  font-size: 11px;
 }
 
-.scope-tree-program {
+.scope-tree-node > .scope-tree-children {
+  border-left: 1px solid #e6ebf2;
   display: grid;
-  gap: 5px;
-  margin-left: 22px;
-  padding-left: 12px;
-  border-left: 1px dashed #d9e2ef;
+  gap: 4px;
+  margin-left: 16px;
+  padding-left: 7px;
 }
 
-.scope-tree-program > label {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #334155;
-  font-size: 13px;
-  cursor: pointer;
+.scope-tree-program > .scope-tree-children {
+  border-left: 1px dashed #e2e7ef;
+  margin-left: 15px;
 }
 
-.scope-tree-program > label input {
-  accent-color: #1677ff;
-  cursor: pointer;
-}
-
-.scope-tree-program > label small {
-  color: #94a3b8;
+.scope-tree-class .scope-tree-row {
+  color: #68778c;
   font-size: 12px;
-}
-
-.scope-tree-class {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-left: 24px;
-  color: #475569;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.scope-tree-class input {
-  accent-color: #1677ff;
-  cursor: pointer;
+  min-height: 32px;
 }
 
 .perm-badge {

@@ -314,6 +314,7 @@ def ensure_admin_schema() -> None:
               counselor TEXT,
               user_id TEXT,
               imported_by TEXT,
+              deleted_at TEXT,
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
               updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -627,7 +628,7 @@ def _migrate_admin_users() -> None:
 
 
 def _migrate_student_registrations() -> None:
-    """兼容升级：为 student_registrations 补充学院/性别/班级/辅导员等列。"""
+    """兼容升级：为 student_registrations 补充学院/性别/班级/辅导员/删除标记等列。"""
     if not _table_exists("student_registrations"):
         return
     reg_columns = [
@@ -635,6 +636,7 @@ def _migrate_student_registrations() -> None:
         ("gender", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(20) NULL"),
         ("class_name", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(160) NULL"),
         ("counselor", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(120) NULL"),
+        ("deleted_at", "TEXT" if DB_ENGINE == "sqlite" else "DATETIME NULL"),
     ]
     for column_name, column_type in reg_columns:
         if not _column_exists("student_registrations", column_name):

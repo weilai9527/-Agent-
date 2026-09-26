@@ -10,6 +10,7 @@ import {
   Bot,
   BookOpen,
   Building2,
+  ChevronDown,
   ChevronRight,
   CheckCircle2,
   ClipboardList,
@@ -147,7 +148,6 @@ const navItems = [
   { key: 'catalog', label: '岗位知识库', icon: BookOpen, permission: 'canViewCatalog', group: '训练内容' },
   { key: 'jobPostings', label: '招聘信息库', icon: Building2, permission: 'canViewJobPostings', group: '训练内容' },
   { key: 'agents', label: '面试模型配置', icon: Bot, permission: 'canViewAgents', group: '训练内容' },
-  { key: 'connectionLogs', label: '连接日志', icon: Wifi, permission: 'canViewConnectionLogs', group: '系统' },
   { key: 'permission', label: '权限管理', icon: ShieldCheck, group: '系统' },
   { key: 'settings', label: '系统管理', icon: Settings, permission: 'canManageSettings', group: '系统' },
 ];
@@ -842,33 +842,139 @@ const connectionLevelLabels = {
   error: '错误',
 };
 
-function StudentAccountsImportPage({ candidates, canImport, onAccountsChanged }) {
-  const [importing, setImporting] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [result, setResult] = useState(null);
+function RegistrationsPage() {
+  const [registrations, setRegistrations] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [notice, setNotice] = useState('');
-  const accounts = candidates.filter((item) => item.studentNo && item.studentNo !== '-');
-  const pending = accounts.filter((item) => item.activationStatus === '准备改密').length;
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [importing, setImporting] = useState(false);
+  const [activating, setActivating] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const [deletingId, setDeletingId] = useState('');
+  const [addOpen, setAddOpen] = useState(false);
+  const [addSaving, setAddSaving] = useState(false);
+  const [addError, setAddError] = useState('');
+  const [addForm, setAddForm] = useState({ collegeId: '', classId: '', studentNo: '', name: '', gender: '' });
+  const [addStructure, setAddStructure] = useState({ colleges: [], classes: [] });
+  const [addStructureLoading, setAddStructureLoading] = useState(false);
+  const [addStructureError, setAddStructureError] = useState('');
+
+  const loadRegistrations = async () => {
+    setLoading(true);
+    setPageError('');
+    try {
+      const data = await adminRequest('/api/admin/student-registrations');
+      setRegistrations(data.registrations || []);
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadRegistrations();
+  }, []);
+
+  const loadAddStructure = async () => {
+    setAddStructureLoading(true);
+    setAddStructureError('');
+    try {
+      const data = await adminRequest('/api/admin/organization/structure');
+      setAddStructure({ colleges: data.colleges || [], classes: data.classes || [] });
+    } catch (requestError) {
+      setAddStructureError(requestError.message);
+    } finally {
+      setAddStructureLoading(false);
+    }
+  };
+
+  const openAddStudent = () => {
+    setAddForm({ collegeId: '', classId: '', studentNo: '', name: '', gender: '' });
+    setAddError('');
+    setAddStructure({ colleges: [], classes: [] });
+    setAddOpen(true);
+    loadAddStructure();
+  };
+
+  const closeAddStudent = () => {
+    if (addSaving) return;
+    setAddOpen(false);
+  };
+
+  const updateAddForm = (field, value) => setAddForm((current) => (
+    field === 'collegeId' ? { ...current, collegeId: value, classId: '' } : { ...current, [field]: value }
+  ));
+
+  // 班级只列所选学院下的班级；辅导员由所选班级自动带出，不可手填。
+  const addClasses = addStructure.classes.filter((item) => item.college_id === addForm.collegeId);
+  const addSelectedClass = addStructure.classes.find((item) => item.id === addForm.classId) || null;
+  const addSelectedCollege = addStructure.colleges.find((item) => item.id === addForm.collegeId) || null;
+
+  const handleAddStudent = async (event) => {
+    event.preventDefault();
+    if (!addSelectedCollege || !addSelectedClass) {
+      setAddError('请先选择学院与班级。');
+      return;
+    }
+    if (!addSelectedClass.advisor) {
+      setAddError(`班级「${addSelectedClass.name}」在组织配置中未填写辅导员，请先到组织配置补充后再添加。`);
+      return;
+    }
+    const payload = {
+      college: addSelectedCollege.name,
+      className: addSelectedClass.name,
+      counselor: addSelectedClass.advisor,
+      studentNo: addForm.studentNo.trim(),
+      name: addForm.name.trim(),
+      gender: addForm.gender.trim(),
+    };
+    if (!payload.studentNo || !payload.name) {
+      setAddError('学号与姓名不能为空。');
+      return;
+    }
+    setAddSaving(true);
+    setAddError('');
+    setNotice('');
+    try {
+      const data = await adminRequest('/api/admin/student-registrations', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setNotice(`已${data.created ? '添加' : '更新'}学生信息：${payload.name}（${payload.studentNo}），当前为待激活状态`);
+      setAddOpen(false);
+      await loadRegistrations();
+    } catch (requestError) {
+      setAddError(requestError.message);
+    } finally {
+      setAddSaving(false);
+    }
+  };
 
   const handleImport = async (event) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
+    const input = event.target;
+    const file = input.files && input.files[0];
     if (!file) return;
     setImporting(true);
     setPageError('');
     setNotice('');
-    setResult(null);
+    setImportResult(null);
     try {
+      // 先把文件内容读进内存再上传，避免选中后文件被再次保存导致 ERR_UPLOAD_FILE_CHANGED。
+      const buffer = await file.arrayBuffer();
+      input.value = '';
       const formData = new FormData();
-      formData.append('file', file);
-      const data = await adminRequest('/api/admin/student-accounts/import', {
+      formData.append('file', new File([buffer], file.name, { type: file.type || 'application/octet-stream' }));
+      const data = await adminRequest('/api/admin/student-registrations/import', {
         method: 'POST',
         body: formData,
       });
-      setResult(data.result);
-      setNotice('学生账号名单已导入。');
-      await onAccountsChanged();
+      setImportResult(data);
+      setNotice(`导入完成：新增 ${data.imported} 人，更新 ${data.updated} 人，开通账号 ${data.activated} 个，跳过 ${data.skipped.length} 行`);
+      await loadRegistrations();
     } catch (requestError) {
       setPageError(requestError.message);
     } finally {
@@ -879,6 +985,7 @@ function StudentAccountsImportPage({ candidates, canImport, onAccountsChanged })
   const handleExport = async () => {
     setExporting(true);
     setPageError('');
+    setNotice('');
     try {
       await adminDownload('/api/admin/student-accounts/export', 'student-temporary-passwords.xlsx');
     } catch (requestError) {
@@ -888,46 +995,369 @@ function StudentAccountsImportPage({ candidates, canImport, onAccountsChanged })
     }
   };
 
+  const handleActivate = async () => {
+    const pending = registrations.length - activatedCount;
+    if (!window.confirm(`将为尚未开通账号的 ${pending} 名注册学生批量开通候选人端账号。账号使用随机临时密码，首次登录需修改密码。确定继续吗？`)) return;
+    setActivating(true);
+    setPageError('');
+    setNotice('');
+    try {
+      const data = await adminRequest('/api/admin/student-registrations/activate', { method: 'POST' });
+      setNotice(`账号开通完成：新建 ${data.created} 个，已存在 ${data.existing} 个，跳过 ${data.skipped} 条`);
+      await loadRegistrations();
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  const handleRevokeAccount = async (item) => {
+    if (!window.confirm(`确认删除 ${item.name}（${item.studentNo}）的登录账号？注册名单会保留，该学生将回到「待激活」，可再次开通账号。`)) return;
+    setDeletingId(item.id);
+    setPageError('');
+    setNotice('');
+    try {
+      await adminRequest(`/api/admin/student-registrations/${item.id}/account`, { method: 'DELETE' });
+      setNotice(`已删除 ${item.name}（${item.studentNo}）的账号，注册名单已保留`);
+      await loadRegistrations();
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setDeletingId('');
+    }
+  };
+
+  const handleRevokeAllAccounts = async () => {
+    if (!window.confirm(`确认删除全部 ${activatedCount} 个已开通的学生账号？注册名单会保留，学生将回到「待激活」，可再次开通账号。该操作不可撤销。`)) return;
+    setDeletingId('revoke-all');
+    setPageError('');
+    setNotice('');
+    try {
+      const data = await adminRequest('/api/admin/student-registrations/accounts', { method: 'DELETE' });
+      setNotice(`已删除 ${data.revoked} 个学生账号，注册名单保留 ${data.total} 条`);
+      await loadRegistrations();
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setDeletingId('');
+    }
+  };
+
+  const handleDelete = async (item) => {
+    if (!window.confirm(`确认删除 ${item.name}（${item.studentNo}）的注册信息？该学生将无法再登录候选人端。`)) return;
+    setDeletingId(item.id);
+    setPageError('');
+    setNotice('');
+    try {
+      await adminRequest(`/api/admin/student-registrations/${item.id}`, { method: 'DELETE' });
+      setNotice(`已删除 ${item.name}（${item.studentNo}）的注册信息`);
+      setRegistrations((current) => current.filter((entry) => entry.id !== item.id));
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setDeletingId('');
+    }
+  };
+
+  const filtered = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    return registrations.filter((item) => {
+      if (statusFilter === 'activated' && !item.activated) return false;
+      if (statusFilter === 'pending' && item.activated) return false;
+      if (!keyword) return true;
+      return [item.studentNo, item.name, item.college, item.gender, item.className, item.counselor, item.importedBy]
+        .join(' ').toLowerCase().includes(keyword);
+    });
+  }, [registrations, query, statusFilter]);
+
+  const activatedCount = useMemo(() => registrations.filter((item) => item.activated).length, [registrations]);
+  const missingCount = useMemo(() => registrations.filter((item) => (item.missing || []).length > 0).length, [registrations]);
+
+  const handleClearFilter = () => {
+    setQuery('');
+    setStatusFilter('all');
+  };
+
+  const handleClearAll = async () => {
+    if (!window.confirm('确认清空全部学生注册信息？该操作不可撤销，所有学生将无法再登录候选人端。')) return;
+    setDeletingId('clear-all');
+    setPageError('');
+    setNotice('');
+    try {
+      await adminRequest('/api/admin/student-registrations', { method: 'DELETE' });
+      setNotice('已清空全部学生注册信息');
+      setRegistrations([]);
+    } catch (requestError) {
+      setPageError(requestError.message);
+    } finally {
+      setDeletingId('');
+    }
+  };
+
   return (
     <div className="registrations-page">
       <section className="connection-log-summary">
-        <article><span>当前范围学生账号</span><strong>{accounts.length}</strong></article>
-        <article><span>待首次改密</span><strong>{pending}</strong></article>
-        <article><span>已完成首次改密</span><strong>{accounts.length - pending}</strong></article>
+        <article><span>已导入学生</span><strong>{registrations.length}</strong></article>
+        <article><span>已激活账号</span><strong>{activatedCount}</strong></article>
+        <article><span>待激活</span><strong>{registrations.length - activatedCount}</strong></article>
+        <article><span>信息缺失</span><strong className={missingCount > 0 ? 'count-alert' : ''}>{missingCount}</strong></article>
       </section>
+
       <SectionCard
-        title="学生账号"
+        title="学生注册"
         icon={<UserPlus size={18} />}
-        action={<span className="record-count">学号 + 临时密码登录</span>}
+        action={<span className="record-count">候选人端凭学号 + 临时密码登录</span>}
       >
-        <div className="connection-log-toolbar">
-          {canImport && (
-            <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
-              <Upload size={15} className={importing ? 'spin' : ''} />
-              {importing ? '正在导入…' : '导入学生名单（.xlsx）'}
-              <input type="file" accept=".xlsx" onChange={handleImport} disabled={importing} hidden />
-            </label>
-          )}
-          <button className="secondary-button" type="button" onClick={handleExport} disabled={exporting}>
-            <Download size={15} />{exporting ? '正在导出…' : '导出当前范围的临时密码'}
+        <div className="connection-log-toolbar registration-toolbar">
+          <label>
+            <Search size={15} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学院、学号、姓名、性别、班级、辅导员" />
+          </label>
+          <select
+            className="registration-status-filter"
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            aria-label="按激活状态筛选"
+          >
+            <option value="all">全部状态</option>
+            <option value="activated">已激活</option>
+            <option value="pending">待激活</option>
+          </select>
+          <button className="secondary-button" type="button" onClick={handleClearFilter} disabled={!query && statusFilter === 'all'} title="清空筛选条件">
+            <X size={15} />清空筛选
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={openAddStudent}
+            title="手动添加单个学生信息，用于补充数据或添加测试学生"
+          >
+            <UserPlus size={15} />添加学生信息
+          </button>
+          <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
+            <Upload size={15} className={importing ? 'spin' : ''} />
+            {importing ? '正在导入…' : '导入文档（CSV / Excel）'}
+            <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleImport} disabled={importing} hidden />
+          </label>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={exporting}
+            onClick={handleExport}
+            title="导出尚未改密学生的临时密码，交由对应辅导员发放"
+          >
+            <Download size={15} className={exporting ? 'spin' : ''} />{exporting ? '正在导出…' : '导出临时密码'}
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={activating || registrations.length === 0}
+            onClick={handleActivate}
+            title="为尚未开通账号的注册学生批量开通候选人端账号"
+          >
+            <UserPlus size={15} className={activating ? 'spin' : ''} />一键激活账号
+          </button>
+          <button
+            className="secondary-button danger"
+            type="button"
+            disabled={deletingId === 'revoke-all' || activatedCount === 0}
+            onClick={handleRevokeAllAccounts}
+            title="删除全部已开通的学生账号，注册名单保留"
+          >
+            <Trash2 size={15} />删除全部账号
+          </button>
+          <button className="secondary-button" type="button" onClick={loadRegistrations} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
+          </button>
+          <button
+            className="secondary-button danger"
+            type="button"
+            disabled={deletingId === 'clear-all' || registrations.length === 0}
+            onClick={handleClearAll}
+          >
+            <Trash2 size={15} />清空数据
           </button>
         </div>
-        <p className="form-hint">
-          学校名单至少包含「学号」「姓名」两列。新账号及迁移的旧账号会生成独立临时密码，学生首次登录后必须改密。
-          导出表包含尚未改密学生的临时密码，请交由对应辅导员发放。
-        </p>
+
+        <p className="form-hint">文档需包含「学院」「学号」「姓名」「性别」「班级」「辅导员」六列（支持中文或 college / student_no / name / gender / class_name / counselor 列名）；导入后会自动为学号与姓名齐全的学生开通候选人端账号，账号使用随机临时密码，学生凭「学号 + 临时密码」首次登录后必须修改密码。缺任一字段的学生会被标记为「信息缺失」。「导出临时密码」会导出尚未改密学生的临时密码，请交由对应辅导员发放。</p>
+
         {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
         {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
-        {result && (
-          <div className="page-message">
-            新增 {result.created} 人，更新 {result.updated} 人，迁移旧账号 {result.migrated || 0} 人，跳过 {result.skipped} 行。
-            {(result.errors || []).length > 0 && <ul>{result.errors.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+
+        {importResult && importResult.skipped.length > 0 && (
+          <div className="page-message warning">
+            <AlertCircle size={18} />
+            <div>
+              <strong>以下 {importResult.skipped.length} 行被跳过：</strong>
+              <ul>
+                {importResult.skipped.map((item) => (
+                  <li key={item.row}>第 {item.row} 行 {item.name || item.studentNo || '（空行）'}：{item.reason}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {!pageError && loading && <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取注册信息</div>}
+        {!pageError && !loading && filtered.length === 0 && (
+          <div className="page-message">{(query || statusFilter !== 'all') ? '没有匹配的注册信息。' : '尚未导入学生注册信息，请先导入文档。'}</div>
+        )}
+        {!pageError && !loading && filtered.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>学院</th>
+                  <th>学号</th>
+                  <th>姓名</th>
+                  <th>性别</th>
+                  <th>班级</th>
+                  <th>辅导员</th>
+                  <th>状态</th>
+                  <th>导入人</th>
+                  <th>导入时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((item) => {
+                  const missing = item.missing || [];
+                  const mark = (field, value) => (missing.includes(field)
+                    ? <td className="cell-missing"><span className="missing-mark">缺失</span></td>
+                    : <td>{value || '-'}</td>);
+                  return (
+                    <tr key={item.id} className={missing.length > 0 ? 'row-missing' : ''}>
+                      {mark('学院', item.college)}
+                      {mark('学号', item.studentNo)}
+                      {mark('姓名', item.name)}
+                      {mark('性别', item.gender)}
+                      {mark('班级', item.className)}
+                      {mark('辅导员', item.counselor)}
+                      <td><span className={`status-badge ${item.activated ? 'green' : 'gray'}`}>{item.activated ? '已激活' : '待激活'}</span></td>
+                      <td>{item.importedBy || '-'}</td>
+                      <td>{item.createdAt ? item.createdAt.slice(0, 19).replace('T', ' ') : '-'}</td>
+                      <td>
+                        <div className="registration-row-actions">
+                          {item.activated && (
+                            <button
+                              className="secondary-button"
+                              type="button"
+                              disabled={deletingId === item.id}
+                              onClick={() => handleRevokeAccount(item)}
+                              title="删除该学生的登录账号，注册名单保留"
+                            >
+                              删除账号
+                            </button>
+                          )}
+                          <button
+                            className="secondary-button danger"
+                            type="button"
+                            disabled={deletingId === item.id}
+                            onClick={() => handleDelete(item)}
+                            title="删除该学生的注册名单记录"
+                          >
+                            删除名单
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </SectionCard>
+
+      {addOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="添加学生信息" onClick={closeAddStudent}>
+          <div className="modal-card student-add-modal" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <div><UserPlus size={18} /><h2>添加学生信息</h2></div>
+              <button className="modal-close" type="button" onClick={closeAddStudent} disabled={addSaving} title="关闭"><X size={18} /></button>
+            </header>
+            <form className="job-form" onSubmit={handleAddStudent}>
+              {addStructureLoading ? (
+                <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取组织结构</div>
+              ) : addStructureError ? (
+                <div className="page-message error"><AlertCircle size={18} />{addStructureError}<button type="button" onClick={loadAddStructure}>重新加载</button></div>
+              ) : addStructure.colleges.length === 0 ? (
+                <div className="page-message">组织里还没有学院，请先到「组织配置」新增学院、专业和班级。</div>
+              ) : (
+                <>
+                  <div className="field-grid">
+                    <label className="field-block">
+                      <span>学院 *</span>
+                      <select value={addForm.collegeId} onChange={(event) => updateAddForm('collegeId', event.target.value)} required>
+                        <option value="">请选择学院</option>
+                        {addStructure.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="field-block">
+                      <span>班级 *</span>
+                      <select value={addForm.classId} onChange={(event) => updateAddForm('classId', event.target.value)} required disabled={!addForm.collegeId}>
+                        <option value="">{addForm.collegeId ? (addClasses.length > 0 ? '请选择班级' : '该学院下暂无班级') : '请先选择学院'}</option>
+                        {addClasses.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="field-block">
+                      <span>辅导员 *</span>
+                      <input value={addSelectedClass?.advisor || ''} placeholder="选择班级后自动带出" readOnly disabled />
+                    </label>
+                    <label className="field-block">
+                      <span>学号 *</span>
+                      <input value={addForm.studentNo} onChange={(event) => updateAddForm('studentNo', event.target.value)} placeholder="候选人端登录账号" required />
+                    </label>
+                    <label className="field-block">
+                      <span>姓名 *</span>
+                      <input value={addForm.name} onChange={(event) => updateAddForm('name', event.target.value)} required />
+                    </label>
+                    <label className="field-block">
+                      <span>性别 *</span>
+                      <select value={addForm.gender} onChange={(event) => updateAddForm('gender', event.target.value)} required>
+                        <option value="">请选择</option>
+                        <option value="男">男</option>
+                        <option value="女">女</option>
+                      </select>
+                    </label>
+                  </div>
+                  {addForm.collegeId && addClasses.length === 0 && (
+                    <p className="form-hint">该学院下还没有班级，请先到「组织配置」为该学院添加专业与班级。</p>
+                  )}
+                  {addSelectedClass && !addSelectedClass.advisor && (
+                    <p className="form-hint error-hint">班级「{addSelectedClass.name}」在组织配置中未填写辅导员，请先补充后再添加学生。</p>
+                  )}
+                </>
+              )}
+              {addError && <div className="page-message error"><AlertCircle size={18} />{addError}</div>}
+              <p className="form-hint">填写完成后加入下方学生信息列表，状态为「待激活」。需要开通候选人端账号时，请在列表中点击「批量开通账号」；学号已存在时按补录更新该学生的六项信息。</p>
+              <footer>
+                <button type="button" className="secondary-button" onClick={closeAddStudent} disabled={addSaving}>取消</button>
+                <button type="submit" className="primary-button" disabled={addSaving || addStructureLoading || !addForm.collegeId || !addForm.classId}>{addSaving ? '添加中…' : '确认添加'}</button>
+              </footer>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+function ConnectionLogsModal({ onClose }) {
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="连接日志" onClick={onClose}>
+      <div className="modal-card clog-modal" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <span><Wifi size={18} />连接日志</span>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭连接日志"><X size={15} /></button>
+        </header>
+        <ConnectionLogsPage />
+      </div>
+    </div>
+  );
+}
+
 function ConnectionLogsPage() {
   const [payload, setPayload] = useState({
     logs: [],
@@ -1187,7 +1617,7 @@ function OrganizationPage({ onView }) {
                 {filteredStudents.length === 0 && <tr><td colSpan="7"><EmptyState text="当前范围没有学生" /></td></tr>}
                 {filteredStudents.map((student) => (
                   <tr key={student.id} className="data-row" onClick={() => openStudent(student)}>
-                    <td><div className="student-identity"><strong>{student.name}</strong><span>{student.studentNo !== '-' ? student.studentNo : student.email}</span></div></td>
+                    <td><div className="student-identity"><span className="student-identity-name"><strong>{student.name}</strong>{student.registrationRemoved && <em className="student-removed-tag">名单已删除</em>}</span><span>{student.studentNo !== '-' ? student.studentNo : student.email}</span></div></td>
                     <td>{student.targetRole}</td>
                     <td><strong className={student.readiness < 60 && student.interviews > 0 ? 'score-alert' : ''}>{student.interviews ? `${student.readiness}分` : '-'}</strong></td>
                     <td>{student.interviews} 次</td>
@@ -3314,7 +3744,6 @@ const pageDescriptions = {
   catalog: '维护目标岗位、专业方向与能力模型',
   jobPostings: '维护招聘岗位信息，查看对比记录，并审核学生粘贴的岗位描述',
   agents: '查看 AI 陪练角色及使用情况',
-  connectionLogs: '排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路',
   settings: '管理服务配置、管理员与审计记录',
   permission: '创建下级管理员、分配权限与数据范围，审核下级权限申请',
 };
@@ -3334,7 +3763,7 @@ const guideFlow = [
     steps: [
       { view: 'settings', text: '在「系统管理」中配置报告大模型 / 供应商，以及质检相关规则。' },
       { view: 'organization', text: '在「组织与学生」中维护学院、专业、班级等组织归属，保证学生归班准确。' },
-      { view: 'organization', text: '在「学生」页导入学生账号名单，导出临时密码供学生首次登录并改密。' },
+      { view: 'organization', text: '在「学生」页点击「学生注册」导入学生名单，候选人端凭学号 + 临时密码登录并改密。' },
     ],
   },
   {
@@ -3364,7 +3793,7 @@ const guideFlow = [
     icon: 'Wifi',
     desc: '出现链路异常或需要审计时，在系统模块定位和排查问题。',
     steps: [
-      { view: 'connectionLogs', text: '在「连接日志」排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路。' },
+      { view: 'settings', text: '在「系统管理」点击右上角「连接日志」排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路。' },
       { view: 'settings', text: '在「系统管理」管理全局配置、管理员账号并查看审计记录。' },
     ],
   },
@@ -3395,10 +3824,10 @@ function GuidePage({ onNavigate, admin }) {
                 </div>
               </header>
               <div className="guide-steps">
-                {phase.steps.map((step) => (
+                {phase.steps.map((step, index) => (
                   <button
                     className="guide-step"
-                    key={step.view}
+                    key={`${step.view}-${index}`}
                     type="button"
                     onClick={() => onNavigate(step.view)}
                     title={`前往「${step.view}」`}
@@ -3421,20 +3850,17 @@ const emptyOrgStructure = {
   colleges: [],
   programs: [],
   classes: [],
-  standardMajors: [],
   summary: { colleges: 0, programs: 0, classes: 0, students: 0, unassigned: 0, focus: 0 },
 };
 
-function OrganizationConfigPage({ onNavigate }) {
+function OrganizationConfigPage({ onNavigate, revision = 0 }) {
   const [structure, setStructure] = useState(emptyOrgStructure);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [creator, setCreator] = useState('college');
-  const [collegeForm, setCollegeForm] = useState({ code: '', name: '' });
-  const [programForm, setProgramForm] = useState({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
-  const [classForm, setClassForm] = useState({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
-  const [configBusy, setConfigBusy] = useState('');
+  // 展开状态：缺省即收起（学院/专业默认折叠）
+  const [expandedNodes, setExpandedNodes] = useState({});
+
+  const toggleNode = (key) => setExpandedNodes((current) => ({ ...current, [key]: !current[key] }));
 
   const loadStructure = async () => {
     setLoading(true);
@@ -3445,7 +3871,6 @@ function OrganizationConfigPage({ onNavigate }) {
         colleges: data.colleges || [],
         programs: data.programs || [],
         classes: data.classes || [],
-        standardMajors: data.standardMajors || [],
         summary: { ...emptyOrgStructure.summary, ...(data.summary || {}) },
       });
     } catch (requestError) {
@@ -3457,91 +3882,7 @@ function OrganizationConfigPage({ onNavigate }) {
 
   useEffect(() => {
     loadStructure();
-  }, []);
-
-  const createOrganizationItem = async (event) => {
-    event.preventDefault();
-    const config = {
-      college: { path: '/api/admin/campus/colleges', body: collegeForm, label: '学院' },
-      program: { path: '/api/admin/campus/programs', body: programForm, label: '专业' },
-      class: { path: '/api/admin/campus/classes', body: classForm, label: '班级' },
-    }[creator];
-    setConfigBusy(`create-${creator}`);
-    setPageError('');
-    setNotice('');
-    try {
-      await adminRequest(config.path, { method: 'POST', body: JSON.stringify(config.body) });
-      setCollegeForm({ code: '', name: '' });
-      setProgramForm({ collegeId: '', standardMajorCode: '', name: '', direction: '', coordinator: '' });
-      setClassForm({ programId: '', name: '', graduationYear: '', advisor: '', inviteCode: '' });
-      setNotice(`${config.label}创建成功`);
-      await loadStructure();
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setConfigBusy('');
-    }
-  };
-
-  // 编辑 / 删除组织结构节点
-  const [editState, setEditState] = useState(null); // { type, item }
-  const [editing, setEditing] = useState(false);
-
-  const openEdit = (type, item) => {
-    setEditState({ type, item, form: type === 'college'
-      ? { code: item.code, name: item.name }
-      : type === 'program'
-        ? { collegeId: item.college_id, standardMajorCode: item.standard_major_code || '', name: item.name, direction: item.direction || '', coordinator: item.coordinator || '' }
-        : { name: item.name, graduationYear: item.graduation_year ?? '', advisor: item.advisor || '', inviteCode: item.invite_code || '' } });
-  };
-
-  const saveEdit = async (event) => {
-    event.preventDefault();
-    if (!editState) return;
-    const { type, item, form } = editState;
-    const endpoint = type === 'college'
-      ? `/api/admin/campus/colleges/${item.id}`
-      : type === 'program'
-        ? `/api/admin/campus/programs/${item.id}`
-        : `/api/admin/campus/classes/${item.id}`;
-    setEditing(true);
-    setPageError('');
-    setNotice('');
-    try {
-      await adminRequest(endpoint, { method: 'PUT', body: JSON.stringify(form) });
-      const label = type === 'college' ? '学院' : type === 'program' ? '专业' : '班级';
-      setNotice(`${label}已更新`);
-      setEditState(null);
-      await loadStructure();
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setEditing(false);
-    }
-  };
-
-  const confirmDelete = async (type, item) => {
-    const label = type === 'college' ? '学院' : type === 'program' ? '专业' : '班级';
-    const cascade = type === 'college' ? '其下所有专业、班级及学生归班记录' : type === 'program' ? '其下所有班级及学生归班记录' : '该班学生归班记录';
-    if (!window.confirm(`确认删除${label}「${item.name}」？将同时删除${cascade}，该操作不可恢复。`)) return;
-    setConfigBusy(`delete-${type}-${item.id}`);
-    setPageError('');
-    setNotice('');
-    try {
-      const endpoint = type === 'college'
-        ? `/api/admin/campus/colleges/${item.id}`
-        : type === 'program'
-          ? `/api/admin/campus/programs/${item.id}`
-          : `/api/admin/campus/classes/${item.id}`;
-      await adminRequest(endpoint, { method: 'DELETE' });
-      setNotice(`已删除${label}「${item.name}」`);
-      await loadStructure();
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setConfigBusy('');
-    }
-  };
+  }, [revision]);
 
   const { colleges, programs, classes } = structure;
 
@@ -3557,151 +3898,512 @@ function OrganizationConfigPage({ onNavigate }) {
         ) : pageError ? (
           <div className="page-message error"><AlertCircle size={18} />{pageError}<button type="button" onClick={loadStructure}>重新加载</button></div>
         ) : colleges.length === 0 ? (
-          <div className="page-message">当前还没有组织结构，请在下方添加学院、专业和班级。</div>
+          <div className="page-message">当前还没有组织结构，可点击右上角「组织配置」新增学院、专业和班级。</div>
         ) : (
           <div className="campus-tree">
             <button type="button" className="active">
-              <span><UsersRound size={15} />全部学生</span><b>{structure.summary.students}</b>
+              <span><i className="campus-caret-gap" aria-hidden="true" /><UsersRound size={15} />全部学生</span><b>{structure.summary.students}</b>
             </button>
-            <button type="button" className="warning">
-              <span><AlertCircle size={15} />未归班</span><b>{structure.summary.unassigned}</b>
-            </button>
-            {colleges.map((college) => (
-              <div className="campus-college-node" key={college.id}>
-                <button type="button">
-                  <span><Building2 size={15} />{college.name}</span><b>{college.studentCount || 0}</b>
-                </button>
-                <div>
-                  {programs.filter((program) => program.college_id === college.id).map((program) => (
-                    <div className="campus-program-node" key={program.id}>
-                      <button type="button">
-                        <span><GraduationCap size={14} />{program.name}{program.direction ? ` · ${program.direction}` : ''}</span><b>{program.studentCount || 0}</b>
-                      </button>
-                      <div>
-                        {classes.filter((classItem) => classItem.program_id === program.id).map((classItem) => (
-                          <button type="button" key={classItem.id}>
-                            <span>{classItem.graduation_year ? `${classItem.graduation_year}届 · ` : ''}{classItem.name}</span><b>{classItem.studentCount || 0}</b>
-                          </button>
-                        ))}
-                      </div>
+            {colleges.map((college) => {
+              const collegeKey = `college:${college.id}`;
+              const collegePrograms = programs.filter((program) => program.college_id === college.id);
+              const collegeCollapsed = collegePrograms.length > 0 && !expandedNodes[collegeKey];
+              return (
+                <div className="campus-college-node" key={college.id}>
+                  <button
+                    type="button"
+                    className={collegeCollapsed ? 'collapsed' : ''}
+                    aria-expanded={collegePrograms.length > 0 ? !collegeCollapsed : undefined}
+                    title={collegePrograms.length > 0 ? (collegeCollapsed ? '展开学院' : '收起学院') : undefined}
+                    onClick={collegePrograms.length > 0 ? () => toggleNode(collegeKey) : undefined}
+                  >
+                    <span>
+                      {collegePrograms.length > 0
+                        ? (collegeCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />)
+                        : <i className="campus-caret-gap" aria-hidden="true" />}
+                      <Building2 size={15} />{college.name}
+                    </span><b>{college.studentCount || 0}</b>
+                  </button>
+                  {!collegeCollapsed && (
+                    <div>
+                      {collegePrograms.map((program) => {
+                        const programKey = `program:${program.id}`;
+                        const programClasses = classes.filter((classItem) => classItem.program_id === program.id);
+                        const programCollapsed = programClasses.length > 0 && !expandedNodes[programKey];
+                        return (
+                          <div className="campus-program-node" key={program.id}>
+                            <button
+                              type="button"
+                              className={programCollapsed ? 'collapsed' : ''}
+                              aria-expanded={programClasses.length > 0 ? !programCollapsed : undefined}
+                              title={programClasses.length > 0 ? (programCollapsed ? '展开专业' : '收起专业') : undefined}
+                              onClick={programClasses.length > 0 ? () => toggleNode(programKey) : undefined}
+                            >
+                              <span>
+                                {programClasses.length > 0
+                                  ? (programCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />)
+                                  : <i className="campus-caret-gap" aria-hidden="true" />}
+                                <GraduationCap size={14} />{program.name}
+                              </span><b>{program.studentCount || 0}</b>
+                            </button>
+                            {!programCollapsed && (
+                              <div>
+                                {programClasses.map((classItem) => (
+                                  <button type="button" key={classItem.id}>
+                                    <span><i className="campus-caret-gap" aria-hidden="true" />{classItem.name}</span><b>{classItem.studentCount || 0}</b>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
-                  ))}
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </SectionCard>
+    </div>
+  );
+}
 
-      <section className="org-config-single">
-        <SectionCard
-          title="组织配置"
-          icon={<Plus size={18} />}
-        >
-          <div className="campus-config-tabs">
-            {[['college', '学院'], ['program', '专业'], ['class', '班级']].map(([key, label]) => <button type="button" key={key} className={creator === key ? 'active' : ''} onClick={() => setCreator(key)}>{creator === key ? `添加${label}` : label}</button>)}
+const orgcEmptyForm = {
+  college: { code: '', name: '' },
+  program: { collegeId: '', name: '' },
+  class: { programId: '', name: '', advisor: '', inviteCode: '' },
+};
+
+const orgcTypeLabel = { college: '学院', program: '专业', class: '班级' };
+
+const orgcTypePath = {
+  college: '/api/admin/campus/colleges',
+  program: '/api/admin/campus/programs',
+  class: '/api/admin/campus/classes',
+};
+
+function OrganizationConfigModal({ onClose, onChanged }) {
+  const [structure, setStructure] = useState(emptyOrgStructure);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  // 展开状态：缺省即收起（学院/专业默认折叠）
+  const [expandedBranches, setExpandedBranches] = useState({});
+  const [selected, setSelected] = useState(null);
+  const [draft, setDraft] = useState({ mode: 'create', type: 'college', form: { ...orgcEmptyForm.college } });
+  const [busy, setBusy] = useState('');
+  const [importFile, setImportFile] = useState(null);
+  const [importResult, setImportResult] = useState(null);
+
+  const { colleges, programs, classes } = structure;
+
+  const loadStructure = async () => {
+    setLoading(true);
+    try {
+      const data = await adminRequest('/api/admin/organization/structure');
+      setStructure({
+        colleges: data.colleges || [],
+        programs: data.programs || [],
+        classes: data.classes || [],
+        summary: { ...emptyOrgStructure.summary, ...(data.summary || {}) },
+      });
+      setError('');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadStructure();
+  }, []);
+
+  const toggleBranch = (key) => setExpandedBranches((current) => ({ ...current, [key]: !current[key] }));
+  const isBranchOpen = (key) => !!expandedBranches[key];
+
+  const selectedCollegeId = selected
+    ? selected.type === 'college'
+      ? selected.id
+      : selected.type === 'program'
+        ? (programs.find((item) => item.id === selected.id)?.college_id || '')
+        : (classes.find((item) => item.id === selected.id)?.college_id || '')
+    : '';
+
+  const selectedProgramId = selected
+    ? selected.type === 'program'
+      ? selected.id
+      : selected.type === 'class'
+        ? (classes.find((item) => item.id === selected.id)?.program_id || '')
+        : ''
+    : '';
+
+  const startCreate = (type, parentId = '') => {
+    const form = { ...orgcEmptyForm[type] };
+    if (type === 'program' && parentId) form.collegeId = parentId;
+    if (type === 'class' && parentId) form.programId = parentId;
+    setSelected(null);
+    setDraft({ mode: 'create', type, form });
+    setError('');
+    setNotice('');
+  };
+
+  const startEdit = (type, item) => {
+    const form = type === 'college'
+      ? { code: item.code || '', name: item.name || '' }
+      : type === 'program'
+        ? { collegeId: item.college_id, name: item.name || '' }
+        : { programId: item.program_id, name: item.name || '', advisor: item.advisor || '', inviteCode: item.invite_code || '' };
+    setSelected({ type, id: item.id });
+    setDraft({ mode: 'edit', type, form });
+    setError('');
+    setNotice('');
+  };
+
+  const updateForm = (patch) => setDraft((current) => ({ ...current, form: { ...current.form, ...patch } }));
+
+  const submitDraft = async (event) => {
+    event.preventDefault();
+    const { mode, type, form } = draft;
+    const label = orgcTypeLabel[type];
+    setBusy('save');
+    setError('');
+    setNotice('');
+    try {
+      if (mode === 'edit') {
+        await adminRequest(`${orgcTypePath[type]}/${selected.id}`, { method: 'PUT', body: JSON.stringify(form) });
+        setNotice(`${label}「${form.name}」已更新`);
+      } else {
+        await adminRequest(orgcTypePath[type], { method: 'POST', body: JSON.stringify(form) });
+        setNotice(`${label}「${form.name}」已创建`);
+        setDraft({ mode: 'create', type, form: { ...orgcEmptyForm[type] } });
+      }
+      await loadStructure();
+      onChanged();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const deleteNode = async (type, item) => {
+    const label = orgcTypeLabel[type];
+    const cascade = type === 'college'
+      ? '其下所有专业、班级及学生的归班记录'
+      : type === 'program'
+        ? '其下所有班级及学生的归班记录'
+        : '该班学生的归班记录';
+    if (!window.confirm(`确认删除${label}「${item.name}」？将同时删除${cascade}，该操作不可恢复。`)) return;
+    setBusy(`delete-${item.id}`);
+    setError('');
+    setNotice('');
+    try {
+      await adminRequest(`${orgcTypePath[type]}/${item.id}`, { method: 'DELETE' });
+      setNotice(`已删除${label}「${item.name}」`);
+      if (selected && selected.id === item.id) startCreate(type === 'class' ? 'class' : type);
+      await loadStructure();
+      onChanged();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // 选中文件后立刻把内容读进内存再上传：避免选中后文件被再次保存（如 Excel 另存）
+  // 导致浏览器上传时判定文件已变更，报 net::ERR_UPLOAD_FILE_CHANGED。
+  const handleImportFileChange = async (event) => {
+    const input = event.target;
+    const file = input.files?.[0] || null;
+    if (!file) {
+      setImportFile(null);
+      return;
+    }
+    try {
+      const buffer = await file.arrayBuffer();
+      input.value = '';
+      setImportFile(new File([buffer], file.name, { type: file.type || 'application/octet-stream' }));
+      setError('');
+    } catch (readError) {
+      input.value = '';
+      setImportFile(null);
+      setError(`读取文件失败：${readError.message}，请重新选择文件。`);
+    }
+  };
+
+  const submitImport = async (event) => {
+    event.preventDefault();
+    const formElement = event.target;
+    if (!importFile) {
+      setError('请先选择要导入的 Excel 或 CSV 文件。');
+      return;
+    }
+    const payload = new FormData();
+    payload.append('file', importFile);
+    setBusy('import');
+    setError('');
+    setNotice('');
+    setImportResult(null);
+    try {
+      const data = await adminRequest('/api/admin/campus/structure/import', { method: 'POST', body: payload });
+      setImportResult(data);
+      setNotice(`导入完成：新增学院 ${data.createdColleges}、专业 ${data.createdPrograms}、班级 ${data.createdClasses}`);
+      setImportFile(null);
+      formElement.reset();
+      await loadStructure();
+      onChanged();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const editing = draft.mode === 'edit' ? selected : null;
+  const editingItem = editing
+    ? (editing.type === 'college' ? colleges : editing.type === 'program' ? programs : classes).find((item) => item.id === editing.id)
+    : null;
+
+  const renderTree = () => {
+    if (loading && colleges.length === 0) {
+      return <p className="orgc-empty"><RefreshCw size={14} className="spin" />正在读取组织结构…</p>;
+    }
+    if (colleges.length === 0) {
+      return <p className="orgc-empty">暂无学院。点击上方「新增学院」，或使用底部批量导入。</p>;
+    }
+    return colleges.map((college) => {
+      const collegeKey = `college:${college.id}`;
+      const collegePrograms = programs.filter((program) => program.college_id === college.id);
+      return (
+        <div className="orgc-group" key={college.id}>
+          <div className={`orgc-node level-1${selected?.type === 'college' && selected.id === college.id ? ' active' : ''}`}>
+            <button
+              type="button"
+              className="orgc-caret"
+              aria-expanded={isBranchOpen(collegeKey)}
+              title={collegePrograms.length > 0 ? (isBranchOpen(collegeKey) ? '收起学院' : '展开学院') : '暂无专业'}
+              disabled={collegePrograms.length === 0}
+              onClick={() => toggleBranch(collegeKey)}
+            >
+              {collegePrograms.length > 0
+                ? (isBranchOpen(collegeKey) ? <ChevronDown size={14} /> : <ChevronRight size={14} />)
+                : <span className="orgc-caret-dot" />}
+            </button>
+            <button type="button" className="orgc-label" onClick={() => startEdit('college', college)}>
+              <Building2 size={14} />
+              <span className="orgc-name">{college.name}</span>
+              {college.code ? <em>{college.code}</em> : null}
+            </button>
           </div>
-
-          <form className="campus-create-form" onSubmit={createOrganizationItem}>
-            {creator === 'college' && (
-              <>
-                <label className="field-block"><span>学院编码</span><input value={collegeForm.code} onChange={(event) => setCollegeForm((current) => ({ ...current, code: event.target.value }))} placeholder="例如 CS" required /></label>
-                <label className="field-block"><span>学院名称</span><input value={collegeForm.name} onChange={(event) => setCollegeForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 计算机学院" required /></label>
-              </>
-            )}
-            {creator === 'program' && (
-              <>
-                <label className="field-block"><span>所属学院</span><select value={programForm.collegeId} onChange={(event) => setProgramForm((current) => ({ ...current, collegeId: event.target.value }))} required><option value="">请选择学院</option>{structure.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-                <label className="field-block"><span>标准专业</span><select value={programForm.standardMajorCode} onChange={(event) => { const major = structure.standardMajors.find((item) => item.code === event.target.value); setProgramForm((current) => ({ ...current, standardMajorCode: event.target.value, name: major?.name || current.name })); }}><option value="">自定义专业</option>{structure.standardMajors.map((item) => <option value={item.code} key={item.id}>{item.name} · {item.code}</option>)}</select></label>
-                <label className="field-block"><span>学校专业名称</span><input value={programForm.name} onChange={(event) => setProgramForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程" required /></label>
-                <label className="field-block"><span>培养方向</span><input value={programForm.direction} onChange={(event) => setProgramForm((current) => ({ ...current, direction: event.target.value }))} placeholder="例如 Java 开发" /></label>
-                <label className="field-block"><span>专业负责人</span><input value={programForm.coordinator} onChange={(event) => setProgramForm((current) => ({ ...current, coordinator: event.target.value }))} placeholder="姓名" /></label>
-              </>
-            )}
-            {creator === 'class' && (
-              <>
-                <label className="field-block"><span>所属专业</span><select value={classForm.programId} onChange={(event) => setClassForm((current) => ({ ...current, programId: event.target.value }))} required><option value="">请选择专业</option>{structure.programs.map((item) => <option value={item.id} key={item.id}>{item.college_name} · {item.name}</option>)}</select></label>
-                <label className="field-block"><span>班级名称</span><input value={classForm.name} onChange={(event) => setClassForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 软件工程1班" required /></label>
-                <label className="field-block"><span>毕业年份</span><input type="number" min="2000" max="2100" value={classForm.graduationYear} onChange={(event) => setClassForm((current) => ({ ...current, graduationYear: event.target.value }))} placeholder="2026" /></label>
-                <label className="field-block"><span>辅导员</span><input value={classForm.advisor} onChange={(event) => setClassForm((current) => ({ ...current, advisor: event.target.value }))} placeholder="姓名" /></label>
-                <label className="field-block"><span>邀请码（可选）</span><input value={classForm.inviteCode} onChange={(event) => setClassForm((current) => ({ ...current, inviteCode: event.target.value }))} placeholder="留空自动生成" /></label>
-              </>
-            )}
-            <button className="primary-button" type="submit" disabled={configBusy === `create-${creator}`}>{configBusy === `create-${creator}` ? '创建中…' : '确认创建'}</button>
-          </form>
-
-          <div className="org-manage-list">
-            <strong>已配置的结构（可编辑 / 删除）</strong>
-            {creator === 'college' && (colleges.length === 0 ? <p className="page-message">暂无学院。</p> : colleges.map((item) => (
-              <div className="org-manage-row" key={item.id}>
-                <span>{item.name} <em>{item.code}</em></span>
-                <span className="org-manage-actions">
-                  <button type="button" className="secondary-button" onClick={() => openEdit('college', item)}><Pencil size={14} />编辑</button>
-                  <button type="button" className="secondary-button danger" disabled={configBusy === `delete-college-${item.id}`} onClick={() => confirmDelete('college', item)}><Trash2 size={14} />删除</button>
-                </span>
-              </div>
-            )))}
-            {creator === 'program' && (programs.length === 0 ? <p className="page-message">暂无专业。</p> : programs.map((item) => (
-              <div className="org-manage-row" key={item.id}>
-                <span>{item.college_name} · {item.name}{item.direction ? ` · ${item.direction}` : ''}</span>
-                <span className="org-manage-actions">
-                  <button type="button" className="secondary-button" onClick={() => openEdit('program', item)}><Pencil size={14} />编辑</button>
-                  <button type="button" className="secondary-button danger" disabled={configBusy === `delete-program-${item.id}`} onClick={() => confirmDelete('program', item)}><Trash2 size={14} />删除</button>
-                </span>
-              </div>
-            )))}
-            {creator === 'class' && (classes.length === 0 ? <p className="page-message">暂无班级。</p> : classes.map((item) => (
-              <div className="org-manage-row" key={item.id}>
-                <span>{item.program_name} · {item.name}{item.graduation_year ? `（${item.graduation_year}届）` : ''}</span>
-                <span className="org-manage-actions">
-                  <button type="button" className="secondary-button" onClick={() => openEdit('class', item)}><Pencil size={14} />编辑</button>
-                  <button type="button" className="secondary-button danger" disabled={configBusy === `delete-class-${item.id}`} onClick={() => confirmDelete('class', item)}><Trash2 size={14} />删除</button>
-                </span>
-              </div>
-            )))}
-          </div>
-        </SectionCard>
-      </section>
-
-      {editState && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="编辑组织结构" onClick={() => setEditState(null)}>
-          <div className="modal-card org-edit-modal" onClick={(event) => event.stopPropagation()}>
-            <header>
-              <div><Pencil size={18} /><h2>编辑{editState.type === 'college' ? '学院' : editState.type === 'program' ? '专业' : '班级'}</h2></div>
-              <button type="button" className="modal-close" onClick={() => setEditState(null)}><X size={18} /></button>
-            </header>
-            <form className="campus-create-form" onSubmit={saveEdit}>
-              {editState.type === 'college' && (
-                <>
-                  <label className="field-block"><span>学院编码</span><input value={editState.form.code} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, code: event.target.value } }))} required /></label>
-                  <label className="field-block"><span>学院名称</span><input value={editState.form.name} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, name: event.target.value } }))} required /></label>
-                </>
-              )}
-              {editState.type === 'program' && (
-                <>
-                  <label className="field-block"><span>所属学院</span><select value={editState.form.collegeId} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, collegeId: event.target.value } }))} required><option value="">请选择学院</option>{structure.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-                  <label className="field-block"><span>标准专业</span><select value={editState.form.standardMajorCode} onChange={(event) => { const major = structure.standardMajors.find((item) => item.code === event.target.value); setEditState((current) => ({ ...current, form: { ...current.form, standardMajorCode: event.target.value, name: major?.name || current.form.name } })); }}><option value="">自定义专业</option>{structure.standardMajors.map((item) => <option value={item.code} key={item.id}>{item.name} · {item.code}</option>)}</select></label>
-                  <label className="field-block"><span>学校专业名称</span><input value={editState.form.name} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, name: event.target.value } }))} required /></label>
-                  <label className="field-block"><span>培养方向</span><input value={editState.form.direction} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, direction: event.target.value } }))} /></label>
-                  <label className="field-block"><span>专业负责人</span><input value={editState.form.coordinator} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, coordinator: event.target.value } }))} /></label>
-                </>
-              )}
-              {editState.type === 'class' && (
-                <>
-                  <label className="field-block"><span>班级名称</span><input value={editState.form.name} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, name: event.target.value } }))} required /></label>
-                  <label className="field-block"><span>毕业年份</span><input type="number" min="2000" max="2100" value={editState.form.graduationYear} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, graduationYear: event.target.value } }))} /></label>
-                  <label className="field-block"><span>辅导员</span><input value={editState.form.advisor} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, advisor: event.target.value } }))} /></label>
-                  <label className="field-block"><span>邀请码（可选）</span><input value={editState.form.inviteCode} onChange={(event) => setEditState((current) => ({ ...current, form: { ...current.form, inviteCode: event.target.value } }))} /></label>
-                </>
-              )}
-              <footer>
-                <button type="button" className="secondary-button" onClick={() => setEditState(null)} disabled={editing}>取消</button>
-                <button type="submit" className="primary-button" disabled={editing}>{editing ? '保存中…' : '保存修改'}</button>
-              </footer>
-            </form>
-          </div>
+          {isBranchOpen(collegeKey) && collegePrograms.length > 0 && (
+            <div className="orgc-children">
+              {collegePrograms.map((program) => {
+                const programKey = `program:${program.id}`;
+                const programClasses = classes.filter((classItem) => classItem.program_id === program.id);
+                return (
+                  <div className="orgc-group" key={program.id}>
+                    <div className={`orgc-node level-2${selected?.type === 'program' && selected.id === program.id ? ' active' : ''}`}>
+                      <button
+                        type="button"
+                        className="orgc-caret"
+                        aria-expanded={isBranchOpen(programKey)}
+                        title={programClasses.length > 0 ? (isBranchOpen(programKey) ? '收起专业' : '展开专业') : '暂无班级'}
+                        disabled={programClasses.length === 0}
+                        onClick={() => toggleBranch(programKey)}
+                      >
+                        {programClasses.length > 0
+                          ? (isBranchOpen(programKey) ? <ChevronDown size={13} /> : <ChevronRight size={13} />)
+                          : <span className="orgc-caret-dot" />}
+                      </button>
+                      <button type="button" className="orgc-label" onClick={() => startEdit('program', program)}>
+                        <GraduationCap size={13} />
+                        <span className="orgc-name">{program.name}</span>
+                      </button>
+                    </div>
+                    {isBranchOpen(programKey) && programClasses.length > 0 && (
+                      <div className="orgc-children">
+                        {programClasses.map((classItem) => (
+                          <div className={`orgc-node level-3${selected?.type === 'class' && selected.id === classItem.id ? ' active' : ''}`} key={classItem.id}>
+                            <span className="orgc-caret-dot" />
+                            <button type="button" className="orgc-label" onClick={() => startEdit('class', classItem)}>
+                              <UsersRound size={13} />
+                              <span className="orgc-name">{classItem.name}</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
-      )}
+      );
+    });
+  };
+
+  return (
+    <div className="orgc-overlay" role="dialog" aria-modal="true" aria-label="组织配置" onClick={onClose}>
+      <div className="orgc-modal" onClick={(event) => event.stopPropagation()}>
+        <header className="orgc-head">
+          <div>
+            <Network size={18} />
+            <h2>组织配置</h2>
+            <span className="orgc-head-note">学院 / 专业 / 班级的新增、编辑、删除与批量导入</span>
+          </div>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+        </header>
+
+        {(error || notice) && (
+          <div className={`orgc-message${error ? ' error' : ' success'}`}>
+            {error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />}
+            <span>{error || notice}</span>
+            <button type="button" onClick={() => { setError(''); setNotice(''); }} aria-label="关闭提示"><X size={14} /></button>
+          </div>
+        )}
+
+        <div className="orgc-body">
+          <aside className="orgc-tree">
+            <div className="orgc-tree-head">
+              <strong>组织结构</strong>
+              <span>{structure.summary.colleges} 学院 / {structure.summary.programs} 专业 / {structure.summary.classes} 班级</span>
+              <button type="button" className="orgc-refresh" onClick={loadStructure} title="重新读取"><RefreshCw size={14} className={loading ? 'spin' : ''} /></button>
+            </div>
+            <div className="orgc-tree-actions">
+              <button type="button" onClick={() => startCreate('college')}><Building2 size={13} />新增学院</button>
+              <button type="button" onClick={() => startCreate('program', selectedCollegeId)}><GraduationCap size={13} />新增专业</button>
+              <button type="button" onClick={() => startCreate('class', selectedProgramId)}><UsersRound size={13} />新增班级</button>
+            </div>
+            <div className="orgc-tree-body">{renderTree()}</div>
+          </aside>
+
+          <section className="orgc-detail">
+            <div className="orgc-detail-head">
+              <div>
+                <span className={`orgc-badge ${draft.type}`}>{orgcTypeLabel[draft.type]}</span>
+                <h3>{draft.mode === 'edit' ? `编辑${orgcTypeLabel[draft.type]}` : `新增${orgcTypeLabel[draft.type]}`}</h3>
+              </div>
+              {editingItem && (
+                <button
+                  type="button"
+                  className="orgc-danger"
+                  disabled={busy === `delete-${editingItem.id}`}
+                  onClick={() => deleteNode(draft.type, editingItem)}
+                >
+                  <Trash2 size={14} />{busy === `delete-${editingItem.id}` ? '删除中…' : '删除'}
+                </button>
+              )}
+            </div>
+
+            <form className="orgc-form" onSubmit={submitDraft}>
+              {draft.type === 'college' && (
+                <>
+                  <label className="orgc-field">
+                    <span>学院编码</span>
+                    <input value={draft.form.code} onChange={(event) => updateForm({ code: event.target.value })} placeholder="例如 CS" required />
+                  </label>
+                  <label className="orgc-field">
+                    <span>学院名称</span>
+                    <input value={draft.form.name} onChange={(event) => updateForm({ name: event.target.value })} placeholder="例如 计算机学院" required />
+                  </label>
+                </>
+              )}
+
+              {draft.type === 'program' && (
+                <>
+                  <label className="orgc-field">
+                    <span>所属学院</span>
+                    <select value={draft.form.collegeId} onChange={(event) => updateForm({ collegeId: event.target.value })} required>
+                      <option value="">请选择学院</option>
+                      {colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="orgc-field">
+                    <span>专业名称</span>
+                    <input value={draft.form.name} onChange={(event) => updateForm({ name: event.target.value })} placeholder="例如 软件工程" required />
+                  </label>
+                </>
+              )}
+
+              {draft.type === 'class' && (
+                <>
+                  <label className="orgc-field">
+                    <span>所属专业</span>
+                    <select value={draft.form.programId} onChange={(event) => updateForm({ programId: event.target.value })} required>
+                      <option value="">请选择专业</option>
+                      {programs.map((item) => <option value={item.id} key={item.id}>{item.college_name} · {item.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="orgc-field">
+                    <span>班级名称</span>
+                    <input value={draft.form.name} onChange={(event) => updateForm({ name: event.target.value })} placeholder="例如 2301软件工程班" required />
+                  </label>
+                  <label className="orgc-field">
+                    <span>辅导员</span>
+                    <input value={draft.form.advisor} onChange={(event) => updateForm({ advisor: event.target.value })} placeholder="姓名" />
+                  </label>
+                  <label className="orgc-field">
+                    <span>邀请码（可选）</span>
+                    <input value={draft.form.inviteCode} onChange={(event) => updateForm({ inviteCode: event.target.value })} placeholder="留空自动生成" />
+                  </label>
+                </>
+              )}
+
+              <p className="orgc-hint">
+                {draft.type === 'college'
+                  ? '学院编码需全局唯一；删除学院会连带删除其全部专业、班级与归班记录。'
+                  : draft.type === 'program'
+                    ? '同一学院下专业名称不可重复；删除专业会连带删除其下班级与归班记录。'
+                    : '同一专业下班级名称不可重复；邀请码留空时自动生成。'}
+              </p>
+
+              <div className="orgc-form-footer">
+                {draft.mode === 'edit' && (
+                  <button type="button" className="secondary-button" onClick={() => startCreate(draft.type)} disabled={busy === 'save'}>改为新增</button>
+                )}
+                <button className="primary-button" type="submit" disabled={busy === 'save'}>
+                  <Save size={15} />{busy === 'save' ? '保存中…' : draft.mode === 'edit' ? '保存修改' : '确认创建'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+
+        <form className="orgc-import" onSubmit={submitImport}>
+          <div className="orgc-import-title">
+            <Upload size={15} />
+            <strong>批量导入组织结构</strong>
+            <span>支持 .xlsx 与 UTF-8 CSV：可一行填写「学院 / 专业 / 班级」，也可分表（多个工作表）按表头自动识别；已存在的节点会自动跳过。</span>
+          </div>
+          <div className="orgc-import-actions">
+            <label className="orgc-file">
+              <FileText size={14} />
+              <span>{importFile ? importFile.name : '选择文件'}</span>
+              <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleImportFileChange} />
+            </label>
+            <button className="primary-button" type="submit" disabled={busy === 'import' || !importFile}>
+              <Upload size={15} />{busy === 'import' ? '导入中…' : '开始导入'}
+            </button>
+          </div>
+          {importResult && (
+            <div className="orgc-import-result">
+              <p>
+                <CheckCircle2 size={14} />
+                共 {importResult.total} 行：新增学院 {importResult.createdColleges}、专业 {importResult.createdPrograms}、班级 {importResult.createdClasses}，跳过 {importResult.skippedCount} 行。
+              </p>
+              {importResult.skipped?.length > 0 && (
+                <ul>
+                  {importResult.skipped.map((item) => <li key={item.row}>第 {item.row} 行：{item.reason}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+        </form>
+      </div>
     </div>
   );
 }
@@ -3715,6 +4417,9 @@ function AdminApp({ admin, onSignedOut }) {
   const [activeView, setActiveView] = useState(initialAdminView);
   const [adminData, setAdminData] = useState(emptyAdminData);
   const [registrationsOpen, setRegistrationsOpen] = useState(false);
+  const [orgConfigOpen, setOrgConfigOpen] = useState(false);
+  const [connectionLogsOpen, setConnectionLogsOpen] = useState(false);
+  const [orgRevision, setOrgRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -3924,7 +4629,7 @@ function AdminApp({ admin, onSignedOut }) {
     if (activeView === 'catalog') return <CatalogPage permissions={adminData.permissions || {}} />;
     if (activeView === 'jobPostings') return <JobPostingsPage />;
     if (activeView === 'organization') return <OrganizationPage onView={openDetail} />;
-    if (activeView === 'organizationConfig') return <OrganizationConfigPage onNavigate={navigateTo} />;
+    if (activeView === 'organizationConfig') return <OrganizationConfigPage onNavigate={navigateTo} revision={orgRevision} />;
     const listProps = {
       data: adminData,
       onView: openDetail,
@@ -3936,7 +4641,6 @@ function AdminApp({ admin, onSignedOut }) {
     if (activeView === 'interviews') return <InterviewsPage {...listProps} />;
     if (activeView === 'reports') return <ReportsPage {...listProps} />;
     if (activeView === 'agents') return <AgentsPage {...listProps} />;
-    if (activeView === 'connectionLogs') return <ConnectionLogsPage />;
     if (activeView === 'permission') return <PermissionPage data={adminData} />;
     if (activeView === 'settings') return <SettingsPage data={adminData} onSettingsSaved={handleSettingsSaved} />;
     return <Dashboard data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
@@ -3985,7 +4689,7 @@ function AdminApp({ admin, onSignedOut }) {
           </div>
           <div className="topbar-actions">
             {activeView === 'organization' && (
-              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生账号</button>
+              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生注册</button>
             )}
             {searchableViews.has(activeView) && (
               <label className="admin-search">
@@ -3993,6 +4697,12 @@ function AdminApp({ admin, onSignedOut }) {
                 <input value={currentQuery} onChange={(event) => setCurrentQuery(event.target.value)} placeholder={`搜索当前${activeItem?.label || '页面'}`} />
                 {currentQuery && <button type="button" onClick={() => setCurrentQuery('')} aria-label="清空搜索"><X size={14} /></button>}
               </label>
+            )}
+            {activeView === 'organizationConfig' && (
+              <button className="primary-button" type="button" onClick={() => setOrgConfigOpen(true)}><Network size={15} />组织配置</button>
+            )}
+            {activeView === 'settings' && adminData.permissions?.canViewConnectionLogs && (
+              <button className="primary-button" type="button" onClick={() => setConnectionLogsOpen(true)}><Wifi size={15} />连接日志</button>
             )}
             <span className={`topbar-connection ${error ? 'error' : ''}`} title={ADMIN_API_BASE_URL}>
               <i />{error ? '连接异常' : '服务正常'}
@@ -4020,20 +4730,24 @@ function AdminApp({ admin, onSignedOut }) {
       />
 
       {registrationsOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生账号" onClick={() => setRegistrationsOpen(false)}>
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生注册" onClick={() => setRegistrationsOpen(false)}>
           <div className="modal-card resg-modal" onClick={(event) => event.stopPropagation()}>
             <header>
-              <span><UserPlus size={18} />学生账号</span>
+              <span><UserPlus size={18} />学生注册</span>
               <button className="icon-button" type="button" title="关闭" onClick={() => setRegistrationsOpen(false)}><X size={17} /></button>
             </header>
-            <StudentAccountsImportPage
-              candidates={adminData.candidates}
-              canImport={adminData.permissions?.canImportStudentAccounts}
-              onAccountsChanged={refreshSnapshot}
-            />
+            <RegistrationsPage />
           </div>
         </div>
       )}
+
+      {orgConfigOpen && (
+        <OrganizationConfigModal
+          onClose={() => setOrgConfigOpen(false)}
+          onChanged={() => setOrgRevision((current) => current + 1)}
+        />
+      )}
+      {connectionLogsOpen && <ConnectionLogsModal onClose={() => setConnectionLogsOpen(false)} />}
     </main>
   );
 }

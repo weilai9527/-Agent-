@@ -1605,7 +1605,7 @@ const emptyCampusData = {
   summary: { colleges: 0, programs: 0, classes: 0, students: 0, unassigned: 0, focus: 0 },
 };
 
-function OrganizationPage({ onView }) {
+function OrganizationPage({ onView, admin }) {
   const [campus, setCampus] = useState(emptyCampusData);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1613,6 +1613,8 @@ function OrganizationPage({ onView }) {
   const [busy, setBusy] = useState('');
   const [studentQuery, setStudentQuery] = useState('');
   const [studentFilter, setStudentFilter] = useState({ collegeId: '', programId: '', classId: '' });
+  // 下级管理员未分配任何学生数据范围时，筛选区提示并禁用
+  const scopeEmpty = admin?.role !== 'super_admin' && (admin?.student_scope || []).length === 0;
 
   const loadCampus = async () => {
     setLoading(true);
@@ -1715,21 +1717,22 @@ function OrganizationPage({ onView }) {
           <div className="campus-student-toolbar">
             <label className="campus-student-search"><Search size={15} /><input value={studentQuery} onChange={(event) => setStudentQuery(event.target.value)} placeholder="搜索姓名、学号、邮箱或目标岗位" /></label>
             <div className="campus-student-filters">
-              <select value={studentFilter.collegeId} onChange={(event) => updateStudentFilter('collegeId', event.target.value)} aria-label="按学院筛选">
-                <option value="">全部学院</option>
+              <select value={studentFilter.collegeId} onChange={(event) => updateStudentFilter('collegeId', event.target.value)} disabled={scopeEmpty} aria-label="按学院筛选">
+                <option value="">{scopeEmpty ? '无可用学院' : '全部学院'}</option>
                 {campus.colleges.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
               </select>
-              <select value={studentFilter.programId} onChange={(event) => updateStudentFilter('programId', event.target.value)} disabled={!studentFilter.collegeId} aria-label="按专业筛选">
+              <select value={studentFilter.programId} onChange={(event) => updateStudentFilter('programId', event.target.value)} disabled={scopeEmpty || !studentFilter.collegeId} aria-label="按专业筛选">
                 <option value="">{studentFilter.collegeId ? '全部专业' : '请先选学院'}</option>
                 {filterPrograms.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
               </select>
-              <select value={studentFilter.classId} onChange={(event) => updateStudentFilter('classId', event.target.value)} disabled={!studentFilter.programId} aria-label="按班级筛选">
+              <select value={studentFilter.classId} onChange={(event) => updateStudentFilter('classId', event.target.value)} disabled={scopeEmpty || !studentFilter.programId} aria-label="按班级筛选">
                 <option value="">{studentFilter.programId ? '全部班级' : '请先选专业'}</option>
                 {filterClasses.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
               </select>
               <button className="secondary-button" type="button" onClick={clearStudentFilter} disabled={!hasStudentFilter} title="清空学院/专业/班级筛选"><X size={15} />清空筛选</button>
             </div>
           </div>
+          {scopeEmpty && <p className="campus-scope-hint"><AlertCircle size={15} />当前账号未分配学生数据范围，无法筛选或查看学生，请联系超级管理员分配数据范围。</p>}
           <div className="table-wrap campus-student-table">
             <table>
               <thead><tr><th>学生</th><th>目标岗位</th><th>准备度</th><th>训练</th><th>成长状态</th><th>班级归属</th><th aria-label="关注" /></tr></thead>
@@ -2379,6 +2382,7 @@ function JobPostingsPage() {
   const [formState, setFormState] = useState(null);
   const [file, setFile] = useState(null);
   const [activeMatch, setActiveMatch] = useState(null);
+  const [activePosting, setActivePosting] = useState(null);
   const [matchKeyword, setMatchKeyword] = useState('');
   const [submissions, setSubmissions] = useState([]);
   const [submissionNote, setSubmissionNote] = useState('');
@@ -2630,13 +2634,14 @@ function JobPostingsPage() {
           </div>
           {postingNote && <p className="job-scope-note">{postingNote}</p>}
 
-          <div className="table-wrap">
+          <div className="table-wrap job-postings-table">
             <table>
               <thead>
                 <tr>
                   <th>岗位名称</th>
                   <th>公司</th>
-                  <th>类别 / 城市</th>
+                  <th>类别</th>
+                  <th>城市</th>
                   <th>技能要求</th>
                   <th>标准岗位</th>
                   <th>状态</th>
@@ -2644,18 +2649,19 @@ function JobPostingsPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredPostings.length === 0 && <tr><td colSpan={7}><EmptyState text="暂无招聘岗位，可手动新增或导入 Excel" /></td></tr>}
+                {filteredPostings.length === 0 && <tr><td colSpan={8}><EmptyState text="暂无招聘岗位，可手动新增或导入 Excel" /></td></tr>}
                 {filteredPostings.map((posting) => (
-                  <tr key={posting.id} className="data-row">
+                  <tr key={posting.id} className="data-row" onClick={() => setActivePosting(posting)}>
                     <td><strong>{posting.title}</strong>{posting.graduation_year && <small className="job-sub">{posting.graduation_year}</small>}</td>
                     <td>{posting.company || '-'}</td>
-                    <td>{[posting.job_category, posting.city].filter(Boolean).join(' · ') || '-'}</td>
+                    <td>{posting.job_category || '-'}</td>
+                    <td>{posting.city || '-'}</td>
                     <td className="job-skills">{(posting.skillList || []).slice(0, 4).join('、') || '-'}</td>
                     <td>{posting.catalog_job_name || '-'}</td>
                     <td><StatusBadge>{posting.status === 'active' ? '启用' : '停用'}</StatusBadge></td>
                     <td className="row-actions">
-                      <button type="button" onClick={() => openEdit(posting)} aria-label="编辑" title="编辑"><Pencil size={15} /></button>
-                      <button type="button" className="danger" onClick={() => removePosting(posting)} disabled={busy === `delete-${posting.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>
+                      <button type="button" onClick={(event) => { event.stopPropagation(); openEdit(posting); }} aria-label="编辑" title="编辑"><Pencil size={15} /></button>
+                      <button type="button" className="danger" onClick={(event) => { event.stopPropagation(); removePosting(posting); }} disabled={busy === `delete-${posting.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>
                     </td>
                   </tr>
                 ))}
@@ -2851,6 +2857,63 @@ function JobPostingsPage() {
               </footer>
             </form>
           </div>
+        </div>
+      )}
+
+      {activePosting && (
+        <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setActivePosting(null); }}>
+          <section className="detail-drawer" role="dialog" aria-modal="true" aria-label="岗位详情">
+            <header>
+              <div>
+                <span>岗位详情</span>
+                <h2>{activePosting.title || '未命名岗位'}</h2>
+              </div>
+              <button type="button" onClick={() => setActivePosting(null)} aria-label="关闭详情"><X size={18} /></button>
+            </header>
+            <div className="detail-body">
+              <div className="detail-grid">
+                <div><span>公司</span><strong>{activePosting.company || '-'}</strong></div>
+                <div><span>岗位类别</span><strong>{activePosting.job_category || '-'}</strong></div>
+                <div><span>工作地点</span><strong>{activePosting.city || '-'}</strong></div>
+                <div><span>届次</span><strong>{activePosting.graduation_year || '-'}</strong></div>
+                <div><span>招聘类型</span><strong>{activePosting.employment_type || '-'}</strong></div>
+                <div><span>薪资范围</span><strong>{activePosting.salary || '-'}</strong></div>
+                <div><span>学历要求</span><strong>{activePosting.education_requirement || '-'}</strong></div>
+                <div><span>经验要求</span><strong>{activePosting.experience_requirement || '-'}</strong></div>
+                <div><span>招聘人数</span><strong>{activePosting.headcount || '-'}</strong></div>
+                <div><span>截止时间</span><strong>{activePosting.deadline || '-'}</strong></div>
+                <div><span>标准岗位</span><strong>{activePosting.catalog_job_name || '-'}</strong></div>
+                <div><span>状态</span><strong>{activePosting.status === 'active' ? '启用' : '停用'}</strong></div>
+                <div><span>来源</span><strong>{activePosting.source === 'excel' ? 'Excel 导入' : activePosting.source === 'sync' ? '数据源同步' : '手动录入'}</strong></div>
+                <div><span>外部编号</span><strong>{activePosting.source_ref || '-'}</strong></div>
+                <div><span>创建时间</span><strong>{String(activePosting.created_at || '').slice(0, 19) || '-'}</strong></div>
+                <div><span>更新时间</span><strong>{String(activePosting.updated_at || '').slice(0, 19) || '-'}</strong></div>
+              </div>
+
+              <section className="detail-block">
+                <h3>技能要求</h3>
+                <p>{(activePosting.skillList || []).join('、') || '暂无'}</p>
+              </section>
+
+              {(activePosting.tagList || []).length > 0 && (
+                <section className="detail-block"><h3>标签</h3><p>{activePosting.tagList.join('、')}</p></section>
+              )}
+
+              {activePosting.description && (
+                <section className="detail-block"><h3>岗位描述</h3><p>{activePosting.description}</p></section>
+              )}
+
+              {activePosting.requirements && (
+                <section className="detail-block"><h3>任职要求</h3><p>{activePosting.requirements}</p></section>
+              )}
+            </div>
+            <footer className="detail-actions">
+              <span>岗位完整信息如上，可点击右侧按钮进入编辑</span>
+              <div>
+                <button type="button" onClick={() => { const target = activePosting; setActivePosting(null); openEdit(target); }}>编辑该岗位</button>
+              </div>
+            </footer>
+          </section>
         </div>
       )}
 
@@ -3524,6 +3587,13 @@ function PermissionPage({ data }) {
     setRequests(result.requests || []);
   };
 
+  // 选择学生数据范围时自动勾选「学生管理」权限（单向联动：只补充，不自动取消）
+  const linkScopeToManageStudents = (nextScope, permissions, setPermissions) => {
+    if ((nextScope || []).length > 0 && !(permissions || []).includes('manageStudents')) {
+      setPermissions([...(permissions || []), 'manageStudents']);
+    }
+  };
+
   const createAdmin = async (event) => {
     event.preventDefault();
     setAdminSaving(true);
@@ -3706,7 +3776,7 @@ function PermissionPage({ data }) {
             <div className="field-block">
               <span>学生数据范围</span>
               <small className="field-hint">勾选「学生管理」权限时，需指定该管理员可管理的学院 / 专业 / 班级（可多选，跨范围）。</small>
-              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={adminScope} onChange={setAdminScope} />
+              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={adminScope} onChange={(next) => { setAdminScope(next); linkScopeToManageStudents(next, adminPermissions, setAdminPermissions); }} />
             </div>
             {adminMessage && <p className="settings-message success">{adminMessage}</p>}
             {adminError && <p className="settings-message error">{adminError}</p>}
@@ -3781,7 +3851,7 @@ function PermissionPage({ data }) {
             <div className="field-block">
               <span>申请数据范围</span>
               <small className="field-hint">仅当申请「学生管理」相关能力时填写。</small>
-              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={reqScope} onChange={setReqScope} />
+              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={reqScope} onChange={(next) => { setReqScope(next); linkScopeToManageStudents(next, reqPermissions, setReqPermissions); }} />
             </div>
             <label className="field-block">
               <span>申请理由</span>
@@ -3887,7 +3957,7 @@ function PermissionPage({ data }) {
               <div className="field-block">
                 <span>学生数据范围</span>
                 <small className="field-hint">仅当勾选「学生管理」权限时生效。</small>
-                <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={editScope} onChange={setEditScope} />
+                <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={editScope} onChange={(next) => { setEditScope(next); linkScopeToManageStudents(next, editPermissions, setEditPermissions); }} />
               </div>
               {editMessage && <p className="settings-message success">{editMessage}</p>}
               {editError && <p className="settings-message error">{editError}</p>}
@@ -3930,37 +4000,50 @@ const guideFlow = [
     key: 'setup',
     title: '第一步 · 系统初始化',
     icon: 'Lightbulb',
-    desc: '在上线前先把基础配置、组织结构和账号体系准备好，候选人才有可用的登录与训练环境。',
+    desc: '上线前先完成基础配置与权限分配，为后续组织、账号和训练内容打好基础。',
     steps: [
-      { view: 'settings', text: '在「系统管理」中配置报告大模型 / 供应商，以及质检相关规则。' },
-      { view: 'organization', text: '在「组织与学生」中维护学院、专业、班级等组织归属，保证学生归班准确。' },
-      { view: 'organization', text: '在「学生」页点击「学生注册」导入学生名单，候选人端凭学号 + 临时密码登录并改密。' },
+      { view: 'settings', text: '在「系统管理」配置报告大模型 / 供应商，以及质检相关规则。' },
+      { view: 'permission', text: '在「权限管理」创建下级管理员，分配功能权限与数据范围，并按需审核下级权限申请。' },
+    ],
+  },
+  {
+    key: 'students',
+    title: '第二步 · 组织与学生账号',
+    icon: 'UsersRound',
+    desc: '先搭好学院 / 专业 / 班级结构，再导入或补录学生名单并开通账号，学生才能登录候选人端。',
+    steps: [
+      { view: 'organizationConfig', text: '在「组织」点击右上角「组织配置」新增学院、专业、班级，并为班级填写辅导员。' },
+      { view: 'organization', text: '在「学生」点击右上角「学生注册」，导入学生名单，或用「添加学生信息」手动补录（状态为「待激活」）。' },
+      { view: 'organization', text: '在注册窗口用「检测信息」核对学院、学号、姓名、性别、班级、辅导员六项是否齐全，用「检测激活」查看未激活学生。' },
+      { view: 'organization', text: '信息齐全后在注册列表点击「批量开通账号」，学生凭学号 + 临时密码登录候选人端并改密。' },
     ],
   },
   {
     key: 'content',
-    title: '第二步 · 搭建训练内容',
+    title: '第三步 · 搭建训练内容',
     icon: 'BookOpen',
     desc: '训练内容决定学生练什么、AI 以什么角色陪练，是训练质量的基础。',
     steps: [
-      { view: 'catalog', text: '在「岗位与能力」中维护目标岗位、专业方向与能力模型。' },
-      { view: 'agents', text: '在「AI 陪练角色」中查看陪练角色配置与实际使用情况。' },
+      { view: 'catalog', text: '在「岗位知识库」维护目标岗位、专业方向与能力模型。' },
+      { view: 'jobPostings', text: '在「招聘信息库」维护招聘岗位信息、查看对比记录，并审核学生粘贴的岗位描述。' },
+      { view: 'agents', text: '在「面试模型配置」查看 AI 陪练角色及实际使用情况。' },
     ],
   },
   {
     key: 'operation',
-    title: '第三步 · 日常运营',
+    title: '第四步 · 日常运营',
     icon: 'Activity',
     desc: '上线后每天从工作台入口开始，跟进训练进度与报告质量。',
     steps: [
       { view: 'dashboard', text: '在「工作台」集中处理今日待办：待复核报告、进行中的面试。' },
       { view: 'interviews', text: '在「训练记录」查看学生模拟训练进度与 AI 陪练运行情况。' },
       { view: 'reports', text: '在「报告质检」抽检成长报告的准确性与建议质量。' },
+      { view: 'organization', text: '在「学生」维护学生列表：按学院 / 专业 / 班级级联筛选，处理未激活、名单已删除等异常学生。' },
     ],
   },
   {
     key: 'maintain',
-    title: '第四步 · 系统维护',
+    title: '第五步 · 系统维护',
     icon: 'Wifi',
     desc: '出现链路异常或需要审计时，在系统模块定位和排查问题。',
     steps: [
@@ -3970,6 +4053,8 @@ const guideFlow = [
   },
 ];
 
+const guidePhaseIcons = { Lightbulb, BookOpen, Activity, Wifi, UsersRound };
+
 function GuidePage({ onNavigate, admin }) {
   return (
     <div className="guide-page">
@@ -3977,14 +4062,14 @@ function GuidePage({ onNavigate, admin }) {
         <div>
           <span><ListOrdered size={16} /> 使用流程指引</span>
           <h2>管理端完整使用流程</h2>
-          <p>从系统初始化到日常运营，按步骤完成即可顺畅运行 AI 面试陪练平台。{roleCapabilityHints[admin?.role] || ''}</p>
+          <p>从系统初始化、学生账号到日常运营与维护，按步骤完成即可顺畅运行 AI 面试陪练平台。{roleCapabilityHints[admin?.role] || ''}</p>
         </div>
         <span className="connection-pill"><i /> 流程概览</span>
       </section>
 
       <div className="guide-flow">
         {guideFlow.map((phase) => {
-          const Icon = phase.icon === 'Lightbulb' ? Lightbulb : phase.icon === 'BookOpen' ? BookOpen : phase.icon === 'Activity' ? Activity : Wifi;
+          const Icon = guidePhaseIcons[phase.icon] || Lightbulb;
           return (
             <section className="guide-phase" key={phase.key}>
               <header className="guide-phase-header">
@@ -4806,7 +4891,7 @@ function AdminApp({ admin, onSignedOut }) {
     if (activeView === 'guide') return <GuidePage onNavigate={navigateTo} admin={admin} />;
     if (activeView === 'catalog') return <CatalogPage permissions={adminData.permissions || {}} />;
     if (activeView === 'jobPostings') return <JobPostingsPage />;
-    if (activeView === 'organization') return <OrganizationPage onView={openDetail} />;
+    if (activeView === 'organization') return <OrganizationPage onView={openDetail} admin={admin} />;
     if (activeView === 'organizationConfig') return <OrganizationConfigPage onNavigate={navigateTo} revision={orgRevision} />;
     const listProps = {
       data: adminData,

@@ -139,11 +139,27 @@ def test_scoped_student_access_and_fresh_admin_database(tmp_path):
         empty_export = empty.get("/api/admin/student-accounts/export")
         assert empty_export.status_code == 200
         assert load_workbook(BytesIO(empty_export.content)).active.max_row == 1
-        assert root.get("/api/admin/student-registrations").status_code == 410
-        assert root.post(
+        listing = root.get("/api/admin/student-registrations")
+        assert listing.status_code == 200, listing.text
+        assert listing.json()["registrations"] == []
+        imported = root.post(
             "/api/admin/student-registrations/import", headers=origin,
-            files={"file": ("old.csv", b"student_no,name", "text/csv")},
-        ).status_code == 410
+            files={
+                "file": (
+                    "students.csv",
+                    b"student_no,name,college,gender,class_name,counselor\\n"
+                    b"20260003,Scope New,Scope college,female,2301CP,Ms. Wang\\n",
+                    "text/csv",
+                )
+            },
+        )
+        assert imported.status_code == 200, imported.text
+        assert imported.json()["imported"] == 1
+        assert imported.json()["activated"] == 1
+        listing = root.get("/api/admin/student-registrations")
+        assert listing.status_code == 200, listing.text
+        assert listing.json()["registrations"][0]["studentNo"] == "20260003"
+        assert listing.json()["registrations"][0]["activated"] is True
         assert root.post(
             "/api/admin/organization/import", headers=origin,
             files={"file": ("old.csv", b"student_no,name", "text/csv")},

@@ -175,3 +175,87 @@ def test_scoped_student_access_and_fresh_admin_database(tmp_path):
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_campus_overview_includes_all_students_before_scope_filtering(tmp_path):
+    environment = {
+        **os.environ,
+        "DB_ENGINE": "sqlite",
+        "SQLITE_PATH": str(tmp_path / "campus-overview.sqlite"),
+    }
+    script = textwrap.dedent(
+        """
+        import admin_backend.src.main as main
+
+        main.db.execute(
+            "INSERT INTO campus_colleges (id, code, name) VALUES (?, ?, ?)",
+            ("college", "FULL", "Full college"),
+        )
+        main.db.execute(
+            "INSERT INTO campus_programs (id, college_id, name) VALUES (?, ?, ?)",
+            ("program", "college", "Full program"),
+        )
+        for class_id in ("outside", "allowed"):
+            main.db.execute(
+                "INSERT INTO campus_classes (id, program_id, name, invite_code) VALUES (?, ?, ?, ?)",
+                (class_id, "program", class_id, class_id),
+            )
+        # The allowed class sorts after the first 500 students. A global limit
+        # would both undercount the overview and hide the scoped class entirely.
+        for index in range(504):
+            user_id = f"student-{index}"
+            student_no = f"2026{index:04d}"
+            main.db.execute(
+                "INSERT INTO users (id, email, password_hash, name, student_no) VALUES (?, ?, ?, ?, ?)",
+                (user_id, f"{user_id}@example.com", "unused", user_id, student_no),
+            )
+            main.db.execute(
+                "INSERT INTO student_enrollments (id, user_id, class_id, student_no, focus_flag) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, user_id, "outside" if index < 500 else "allowed", student_no, int(index < 500)),
+            )
+            if index != 503:  # An unregistered account must remain excluded.
+                main.db.execute(
+                    "INSERT INTO student_registrations (id, student_no, name, user_id, deleted_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (user_id, student_no, user_id, user_id, "2026-01-01" if index == 502 else None),
+                )
+        main.db.commit()
+
+        overview = main.campus_overview_data()
+        assert {item["id"] for item in overview["students"]} == {
+            f"student-{index}" for index in range(502)
+        }, f"Expected 502 students, got {len(overview['students'])}"
+        assert overview["summary"]["students"] == 502
+        assert overview["summary"]["focus"] == 500
+        assert overview["summary"]["unassigned"] == 0
+        assert overview["colleges"][0]["studentCount"] == 502
+        assert overview["programs"][0]["studentCount"] == 502
+        assert {item["id"]: item["studentCount"] for item in overview["classes"]} == {
+            "outside": 500, "allowed": 2,
+        }
+
+        scoped = main.campus_overview_data(
+            scope=[{"college": "college", "program": "program", "class": "allowed"}],
+        )
+        assert {item["id"] for item in scoped["students"]} == {"student-500", "student-501"}
+        assert scoped["summary"]["students"] == 2
+        assert scoped["summary"]["focus"] == 0
+        assert scoped["colleges"][0]["studentCount"] == 2
+        assert scoped["programs"][0]["studentCount"] == 2
+        assert {item["id"]: item["studentCount"] for item in scoped["classes"]} == {
+            "outside": 0, "allowed": 2,
+        }
+        assert main.campus_overview_data(scope=[])["summary"]["students"] == 0
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

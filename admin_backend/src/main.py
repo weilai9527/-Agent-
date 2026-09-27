@@ -763,6 +763,9 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
                 if login_status != "normal":
                     cursor = db.execute("DELETE FROM sessions WHERE user_id = ?", (existing["id"],))
                     cursor.close()
+                assign_registration_to_class(
+                    existing["id"], student_no, values.get("college"), values.get("class_name"),
+                )
                 updated += 1
                 continue
 
@@ -818,6 +821,9 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
                             (str(uuid4()), legacy_user["id"], name),
                         )
                     cursor.close()
+                    assign_registration_to_class(
+                        legacy_user["id"], student_no, values.get("college"), values.get("class_name"),
+                    )
                     migrated += 1
                     continue
 
@@ -851,6 +857,7 @@ def import_student_accounts_from_workbook(content: bytes) -> dict[str, Any]:
                 (str(uuid4()), user_id, name),
             )
             cursor.close()
+            assign_registration_to_class(user_id, student_no, values.get("college"), values.get("class_name"))
             created += 1
         db.commit()
     except Exception:
@@ -1336,6 +1343,7 @@ def _student_growth_status(row: dict[str, Any]) -> str:
 
 
 def list_campus_students() -> list[dict[str, Any]]:
+    # The overview filters permissions and calculates totals from this full list.
     rows = all_rows(
         """
         SELECT users.id, users.email, users.name, users.status, users.last_login_at,
@@ -1374,7 +1382,6 @@ def list_campus_students() -> list[dict[str, Any]]:
           WHERE deleted_at IS NULL AND user_id IS NOT NULL AND user_id != ''
         )
         ORDER BY enrollments.focus_flag DESC, users.updated_at DESC, users.created_at DESC
-        LIMIT 500
         """
     )
     result = []
@@ -1568,6 +1575,7 @@ def upsert_student_enrollment(
     status: str = "active",
     focus_flag: bool = False,
     note: str = "",
+    commit: bool = True,
 ) -> dict[str, Any]:
     if not one("SELECT id FROM users WHERE id = ?", (user_id,)):
         raise error(404, "学生账号不存在。")
@@ -1591,7 +1599,8 @@ def upsert_student_enrollment(
             """,
             (str(uuid4()), user_id, class_id, student_no[:80] or None, status, 1 if focus_flag else 0, note[:1000] or None),
         )
-    db.commit()
+    if commit:
+        db.commit()
     return one("SELECT * FROM student_enrollments WHERE user_id = ?", (user_id,)) or {}
 
 
@@ -2187,7 +2196,7 @@ def _read_registration_rows(filename: str, content: bytes, all_sheets: bool = Fa
 def split_registration_class_name(class_name: str) -> tuple[str | None, str]:
     """按固定格式「编号+专业+班」解析班级名，返回 (专业名, 编号) 或 (None, 原样)。
 
-    例：2301软件工程班 -> ("软件工程", "2301")；1计算机1班 -> ("计算机", "1")。
+    例：2301软件工程班 -> ("软件工程", "2301")；G22计算机应用技术1班 -> ("计算机应用技术", "G22")。
     当班级名不以「班」结尾、编号缺失，或中间段不含可识别专业名时返回 (None, 原样)。
     """
     raw = (class_name or "").strip()
@@ -2198,6 +2207,8 @@ def split_registration_class_name(class_name: str) -> tuple[str | None, str]:
     if not match:
         return None, raw
     program = body[match.end():].strip("-_ ")
+    # The final number identifies the class, not the academic program.
+    program = re.sub(r"\d+\s*$", "", program).strip("-_ ")
     if not program or re.search(r"[0-9]", program) or re.fullmatch(r"[0-9A-Za-z_-]+", program):
         return None, raw
     return program, match.group(0)
@@ -2210,12 +2221,15 @@ def assign_registration_to_class(user_id: str, student_no: str, college: str | N
     不解析、不新建任何组织数据；仅当匹配不到（例如 Excel 导入的自由文本）才回退到
     原有的「编号+专业+班」解析规则，并可能补建组织节点。
     """
+    college = (college or "").strip()
+    class_name = (class_name or "").strip()
     if not college or not class_name:
         return
-    if one("SELECT id FROM student_enrollments WHERE user_id = ?", (user_id,)):
+    enrollment = one("SELECT * FROM student_enrollments WHERE user_id = ?", (user_id,)) or {}
+    if enrollment.get("class_id") and one("SELECT id FROM campus_classes WHERE id = ?", (enrollment["class_id"],)):
         return
 
-    matched = one(
+    matches = all_rows(
         """
         SELECT classes.id AS class_id
         FROM campus_classes AS classes
@@ -2225,14 +2239,17 @@ def assign_registration_to_class(user_id: str, student_no: str, college: str | N
         """,
         (college, class_name),
     )
-    if matched:
+    if len(matches) > 1:
+        return  # A repeated class name across programs needs an explicit choice.
+    if matches:
         upsert_student_enrollment(
             user_id,
-            class_id=matched["class_id"],
+            class_id=matches[0]["class_id"],
             student_no=student_no,
-            status="active",
-            focus_flag=False,
-            note="",
+            status=enrollment.get("status") or "active",
+            focus_flag=bool(enrollment.get("focus_flag")),
+            note=enrollment.get("note") or "",
+            commit=False,
         )
         return
 
@@ -2274,9 +2291,10 @@ def assign_registration_to_class(user_id: str, student_no: str, college: str | N
         user_id,
         class_id=class_id,
         student_no=student_no,
-        status="active",
-        focus_flag=False,
-        note="",
+        status=enrollment.get("status") or "active",
+        focus_flag=bool(enrollment.get("focus_flag")),
+        note=enrollment.get("note") or "",
+        commit=False,
     )
 
 

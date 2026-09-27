@@ -224,6 +224,43 @@ def scope_allows(scope: list[dict[str, str]] | None, college_id: str | None, pro
     return False
 
 
+def filter_structure_by_scope(
+    scope: list[dict[str, str]],
+    colleges: list[dict[str, Any]],
+    programs: list[dict[str, Any]],
+    classes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """按学生数据范围裁剪学院 / 专业 / 班级，供学生页筛选下拉使用。
+
+    范围条目中未指定的下级层级视为包含其下全部：只填学院表示整个学院，
+    只填学院 + 专业表示该专业下的全部班级。范围外的节点不会返回，
+    因此下级管理员的下拉里只会出现其可管理范围内的组织结构。
+    """
+    def college_allowed(college_id: str) -> bool:
+        return any(entry.get("college") == college_id for entry in scope)
+
+    def program_allowed(college_id: str, program_id: str) -> bool:
+        return any(
+            entry.get("college") == college_id and (not entry.get("program") or entry.get("program") == program_id)
+            for entry in scope
+        )
+
+    def class_allowed(college_id: str, program_id: str, class_id: str) -> bool:
+        return any(
+            entry.get("college") == college_id
+            and (not entry.get("program") or entry.get("program") == program_id)
+            and (not entry.get("class") or entry.get("class") == class_id)
+            for entry in scope
+        )
+
+    return (
+        [college for college in colleges if college_allowed(college["id"])],
+        [program for program in programs if program_allowed(program["college_id"], program["id"])],
+        [class_item for class_item in classes
+         if class_allowed(class_item["college_id"], class_item["program_id"], class_item["id"])],
+    )
+
+
 def _ensure_class_in_scope(admin: dict, class_id: str) -> None:
     """超级管理员不受限；普通管理员操作的班级必须落在其数据范围内。"""
     scope = admin_student_scope(admin)
@@ -1374,7 +1411,6 @@ def list_campus_students() -> list[dict[str, Any]]:
           WHERE deleted_at IS NULL AND user_id IS NOT NULL AND user_id != ''
         )
         ORDER BY enrollments.focus_flag DESC, users.updated_at DESC, users.created_at DESC
-        LIMIT 500
         """
     )
     result = []
@@ -1496,6 +1532,8 @@ def campus_overview_data(scope: list[dict[str, str]] | None = None) -> dict[str,
         ORDER BY classes.graduation_year DESC, classes.name
         """
     )
+    if scope is not None:
+        colleges, programs, classes = filter_structure_by_scope(scope, colleges, programs, classes)
     mappings = all_rows(
         """
         SELECT mappings.program_id, mappings.job_role_id, mappings.priority, jobs.name AS job_name
@@ -2769,7 +2807,8 @@ JOB_POSTING_IMPORT_ALIASES = {
     "岗位名称": "title", "岗位": "title", "招聘岗位": "title", "职位名称": "title", "职位": "title",
     "公司": "company", "公司名称": "company", "企业名称": "company", "招聘公司": "company",
     "岗位类别": "job_category", "职位类别": "job_category", "岗位方向": "job_category",
-    "工作地点": "city", "城市": "city", "地点": "city",
+    "类别": "job_category", "岗位分类": "job_category", "职业类别": "job_category", "职位分类": "job_category",
+    "工作地点": "city", "城市": "city", "地点": "city", "工作城市": "city", "所在城市": "city", "地区": "city",
     "届次": "graduation_year", "毕业届次": "graduation_year", "招聘届次": "graduation_year",
     "招聘类型": "employment_type", "用工类型": "employment_type", "职位类型": "employment_type",
     "薪资": "salary", "薪资范围": "salary", "月薪": "salary", "待遇": "salary",
@@ -2785,6 +2824,11 @@ JOB_POSTING_IMPORT_ALIASES = {
     "状态": "status",
     "外部编号": "source_ref", "编号": "source_ref", "岗位编号": "source_ref",
 }
+
+
+def _normalize_import_label(label: str) -> str:
+    """去掉表头中的空白与不可见字符，避免 Excel 里看不见的字符导致列识别失败。"""
+    return re.sub(r"[\s\u200b\u200c\u200d\ufeff\u00a0]+", "", str(label or ""))
 
 
 def _published_job_role_map() -> dict[str, dict]:
@@ -2873,7 +2917,7 @@ def evaluate_job_posting_import(content: bytes) -> dict[str, Any]:
     field_by_index: dict[int, str] = {}
     for index, cell in enumerate(header_row or []):
         label = str(cell or "").strip()
-        field = JOB_POSTING_IMPORT_ALIASES.get(label)
+        field = JOB_POSTING_IMPORT_ALIASES.get(label) or JOB_POSTING_IMPORT_ALIASES.get(_normalize_import_label(label))
         if field:
             field_by_index[index] = field
     if "title" not in field_by_index.values():

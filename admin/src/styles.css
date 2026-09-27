@@ -2761,6 +2761,19 @@ td {
   cursor: not-allowed;
 }
 
+.campus-scope-hint {
+  align-items: center;
+  background: #fff8ec;
+  border: 1px solid #f5d9a8;
+  border-radius: 9px;
+  color: #8a5a12;
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+}
+
 .campus-student-toolbar input {
   background: transparent;
   border: 0;
@@ -4725,6 +4738,40 @@ td {
   max-width: 220px;
   color: #475569;
   font-size: 13px;
+}
+
+/* 岗位表格：固定列宽，避免长文本挤压导致列之间文字重叠 */
+.job-postings-table table {
+  table-layout: fixed;
+  min-width: 1100px;
+}
+
+.job-postings-table th,
+.job-postings-table td {
+  padding: 12px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+
+.job-postings-table tbody tr.data-row {
+  cursor: pointer;
+}
+
+.job-postings-table th:nth-child(1) { width: 17%; }
+.job-postings-table th:nth-child(2) { width: 14%; }
+.job-postings-table th:nth-child(3) { width: 9%; }
+.job-postings-table th:nth-child(4) { width: 8%; }
+.job-postings-table th:nth-child(5) { width: 24%; }
+.job-postings-table th:nth-child(6) { width: 11%; }
+.job-postings-table th:nth-child(7) { width: 7%; }
+.job-postings-table th:nth-child(8) { width: 10%; }
+
+.job-postings-table td.job-skills {
+  max-width: none;
+  line-height: 1.6;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .jd-preview {

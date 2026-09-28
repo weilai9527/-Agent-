@@ -47,6 +47,8 @@ import {
   X,
 } from 'lucide-react';
 import './styles.css';
+import SecurityLogsModal from './SecurityLogsModal.jsx';
+import { resolveRegistrationCounselor } from './registrationCounselor.js';
 
 const ADMIN_API_BASE_URL = import.meta.env.VITE_ADMIN_API_BASE_URL || (import.meta.env.DEV ? 'http://127.0.0.1:3002' : '');
 
@@ -113,6 +115,7 @@ async function adminRequest(path, options = {}) {
   if (!response.ok) {
     const requestError = new Error(data.error || data.detail || '管理端后端请求失败。');
     requestError.status = response.status;
+    requestError.requestId = response.headers.get('X-Request-ID');
     throw requestError;
   }
   return data;
@@ -911,10 +914,11 @@ function RegistrationsPage() {
     field === 'collegeId' ? { ...current, collegeId: value, classId: '' } : { ...current, [field]: value }
   ));
 
-  // 班级只列所选学院下的班级；辅导员由所选班级自动带出，不可手填。
+  // 优先读取班级配置，缺失时从同学院、同班级的注册名单识别辅导员。
   const addClasses = addStructure.classes.filter((item) => item.college_id === addForm.collegeId);
   const addSelectedClass = addStructure.classes.find((item) => item.id === addForm.classId) || null;
   const addSelectedCollege = addStructure.colleges.find((item) => item.id === addForm.collegeId) || null;
+  const addCounselor = resolveRegistrationCounselor(addSelectedCollege, addSelectedClass, addStructure.classes, registrations);
 
   const handleAddStudent = async (event) => {
     event.preventDefault();
@@ -922,14 +926,14 @@ function RegistrationsPage() {
       setAddError('请先选择学院与班级。');
       return;
     }
-    if (!addSelectedClass.advisor) {
-      setAddError(`班级「${addSelectedClass.name}」在组织配置中未填写辅导员，请先到组织配置补充后再添加。`);
+    if (!addCounselor.counselor) {
+      setAddError(addCounselor.error);
       return;
     }
     const payload = {
       college: addSelectedCollege.name,
       className: addSelectedClass.name,
-      counselor: addSelectedClass.advisor,
+      counselor: addCounselor.counselor,
       studentNo: addForm.studentNo.trim(),
       name: addForm.name.trim(),
       gender: addForm.gender.trim(),
@@ -1327,7 +1331,7 @@ function RegistrationsPage() {
                     </label>
                     <label className="field-block">
                       <span>辅导员 *</span>
-                      <input value={addSelectedClass?.advisor || ''} placeholder="选择班级后自动带出" readOnly disabled />
+                      <input value={addCounselor.counselor} placeholder="选择班级后自动带出" readOnly disabled />
                     </label>
                     <label className="field-block">
                       <span>学号 *</span>
@@ -1349,8 +1353,11 @@ function RegistrationsPage() {
                   {addForm.collegeId && addClasses.length === 0 && (
                     <p className="form-hint">该学院下还没有班级，请先到「组织配置」为该学院添加专业与班级。</p>
                   )}
-                  {addSelectedClass && !addSelectedClass.advisor && (
-                    <p className="form-hint error-hint">班级「{addSelectedClass.name}」在组织配置中未填写辅导员，请先补充后再添加学生。</p>
+                  {addCounselor.source === 'registrations' && (
+                    <p className="form-hint">辅导员已从该学院、该班级的学生名单中自动识别。</p>
+                  )}
+                  {addCounselor.error && (
+                    <p className="form-hint error-hint">{addCounselor.error}</p>
                   )}
                 </>
               )}
@@ -1358,7 +1365,7 @@ function RegistrationsPage() {
               <p className="form-hint">填写完成后加入下方学生信息列表，状态为「待激活」。需要开通候选人端账号时，请在列表中点击「批量开通账号」；学号已存在时按补录更新该学生的六项信息。</p>
               <footer>
                 <button type="button" className="secondary-button" onClick={closeAddStudent} disabled={addSaving}>取消</button>
-                <button type="submit" className="primary-button" disabled={addSaving || addStructureLoading || !addForm.collegeId || !addForm.classId}>{addSaving ? '添加中…' : '确认添加'}</button>
+                <button type="submit" className="primary-button" disabled={addSaving || addStructureLoading || !addForm.collegeId || !addForm.classId || !addCounselor.counselor}>{addSaving ? '添加中…' : '确认添加'}</button>
               </footer>
             </form>
           </div>
@@ -4675,6 +4682,7 @@ function AdminApp({ admin, onSignedOut }) {
   const [registrationsOpen, setRegistrationsOpen] = useState(false);
   const [orgConfigOpen, setOrgConfigOpen] = useState(false);
   const [connectionLogsOpen, setConnectionLogsOpen] = useState(false);
+  const [securityLogsOpen, setSecurityLogsOpen] = useState(false);
   const [orgRevision, setOrgRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -4967,6 +4975,9 @@ function AdminApp({ admin, onSignedOut }) {
             {activeView === 'settings' && adminData.permissions?.canViewConnectionLogs && (
               <button className="primary-button" type="button" onClick={() => setConnectionLogsOpen(true)}><Wifi size={15} />连接日志</button>
             )}
+            {activeView === 'settings' && adminData.permissions?.canViewAudit && (
+              <button className="primary-button" type="button" onClick={() => setSecurityLogsOpen(true)}><ShieldCheck size={15} />安全审计</button>
+            )}
             <span className={`topbar-connection ${error ? 'error' : ''}`} title={ADMIN_API_BASE_URL}>
               <i />{error ? '连接异常' : '服务正常'}
             </span>
@@ -5011,6 +5022,7 @@ function AdminApp({ admin, onSignedOut }) {
         />
       )}
       {connectionLogsOpen && <ConnectionLogsModal onClose={() => setConnectionLogsOpen(false)} />}
+      {securityLogsOpen && <SecurityLogsModal request={adminRequest} onClose={() => setSecurityLogsOpen(false)} />}
     </main>
   );
 }

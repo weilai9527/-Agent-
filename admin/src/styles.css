@@ -5584,3 +5584,10 @@ td {
     border-bottom: 1px solid #eef2f7;
   }
 }
+.security-logs-content { padding: 20px; }
+.security-log-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; margin-bottom: 18px; }
+.security-log-pagination { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+.security-log-detail { margin-top: 20px; padding: 16px; background: #f5f7fb; border-radius: 12px; }
+.security-log-detail dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.security-log-detail dt { color: #64748b; font-size: 12px; }
+.security-log-detail dd { margin: 4px 0 0; overflow-wrap: anywhere; }

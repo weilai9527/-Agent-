@@ -19,6 +19,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from .database import DB_ENGINE, all_rows, db, ensure_admin_schema, get_database_path, one
+from . import database as database_module
+from shared.security_logging import (
+    RequestLoggingMiddleware, SecurityAuditStore, audit_context, bind_actor, list_security_events,
+)
 from .security import (
     create_token,
     decrypt_temporary_password,
@@ -66,6 +70,7 @@ from shared.recruitment import (
 
 
 app = FastAPI(title="Multi Agent Interview Admin API")
+app.add_middleware(RequestLoggingMiddleware, service="admin-api", audit_store=SecurityAuditStore(database_module))
 logger = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 USER_BACKEND_ENV_PATH = PROJECT_DIR / "backend" / ".env"
@@ -120,6 +125,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
+    expose_headers=["X-Request-ID"],
 )
 
 
@@ -146,6 +152,7 @@ def request_ip(request: Request) -> str:
 def validate_admin_origin(request: Request) -> None:
     origin = (request.headers.get("origin") or "").strip()
     if origin and origin not in allowed_origins:
+        audit_context(request, reason="untrusted_origin")
         raise error(403, "管理端请求来源不受信任。")
 
 
@@ -171,6 +178,7 @@ def require_admin(request: Request) -> dict:
     admin = find_admin_by_session(request)
     if not admin:
         raise error(401, "管理员登录已失效，请重新登录。")
+    bind_actor(request, admin, "admin")
     return admin
 
 
@@ -313,8 +321,9 @@ def require_permission(*perms: str):
     """依赖注入：超级管理员放行；普通管理员需持有任意一个权限点。"""
     allowed = set(perms)
 
-    def dependency(admin: dict = Depends(require_admin)) -> dict:
+    def dependency(request: Request, admin: dict = Depends(require_admin)) -> dict:
         if not is_super_admin(admin) and (not allowed or admin_permissions(admin).isdisjoint(allowed)):
+            audit_context(request, reason="missing_permission")
             raise error(403, "当前管理员没有执行该操作的权限。")
         return admin
 
@@ -384,6 +393,9 @@ def record_audit(
     summary: str = "",
     success: bool = True,
 ) -> None:
+    audit_context(request, action=action, target_type=target_type, target_id=target_id)
+    if success:
+        bind_actor(request, admin, "admin")
     db.execute(
         """
         INSERT INTO admin_audit_logs (
@@ -3627,8 +3639,11 @@ async def admin_login(request: Request, response: Response):
     email = normalize_email(body.get("email"))
     password = str(body.get("password") or "")
     if not is_valid_email(email) or not password:
+        audit_context(request, reason="invalid_login_input")
         raise error(400, "请输入有效的管理员邮箱和密码。")
+    audit_context(request, attempted_account=email)
     if is_login_limited(request, email):
+        audit_context(request, reason="login_rate_limited")
         raise error(429, "登录尝试过于频繁，请稍后再试。")
     if email == MASTER_ADMIN_EMAIL:
         bootstrap_master_admin()  # 代码定义的主管理员账号始终可用
@@ -3640,6 +3655,7 @@ async def admin_login(request: Request, response: Response):
         (email,),
     )
     if not admin or admin.get("status") != "normal" or not verify_password(password, admin.get("password_hash") or ""):
+        audit_context(request, reason="invalid_credentials_or_disabled")
         record_failed_login(request, email)
         record_audit(
             request,
@@ -3651,6 +3667,7 @@ async def admin_login(request: Request, response: Response):
             success=False,
         )
         raise error(401, "管理员邮箱或密码不正确。")
+    bind_actor(request, admin, "admin")
     clear_failed_logins(request, email)
     db.execute("UPDATE admin_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", (admin["id"],))
     db.commit()
@@ -3703,6 +3720,35 @@ def admin_connection_logs(
         "summary": connection_log_summary(),
         "retentionDays": WEBRTC_DIAGNOSTIC_RETENTION_DAYS,
     }
+
+
+@app.get("/api/admin/security-logs")
+def security_logs(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1000000),
+    request_id: str = Query("", max_length=32),
+    actor_id: str = Query("", max_length=80),
+    event_type: str = Query("", max_length=80),
+    since: datetime | None = None,
+    until: datetime | None = None,
+    _admin: dict = Depends(require_super_admin),
+):
+    def normalized(value: datetime | None) -> str:
+        if value is None:
+            return ""
+        if value.tzinfo is None:
+            raise error(400, "时间筛选必须包含时区。")
+        return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    start, end = normalized(since), normalized(until)
+    if start and end and start > end:
+        raise error(400, "开始时间不能晚于结束时间。")
+    audit_context(request, action="security.logs_view")
+    return list_security_events(
+        db, limit=limit, offset=offset, request_id=request_id, actor_id=actor_id,
+        event_type=event_type, since=start, until=end,
+    )
 
 
 @app.get("/api/admin/snapshot")

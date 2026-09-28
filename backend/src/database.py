@@ -1120,6 +1120,10 @@ def get_database_path() -> str:
 
 init_db()
 
+from shared.security_logging import ensure_security_schema
+
+ensure_security_schema(db, DB_ENGINE)
+
 # The career catalog is shared by the candidate and administration services.
 # Keeping its schema service independent avoids coupling catalog growth to resume
 # or interview tables.

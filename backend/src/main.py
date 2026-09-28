@@ -29,6 +29,8 @@ load_env_file()
 normalize_certificate_env()
 
 from .database import DB_ENGINE, all_rows, db, get_database_path, one
+from . import database as database_module
+from shared.security_logging import RequestLoggingMiddleware, SecurityAuditStore, audit_context, bind_actor
 from .ai_evaluation import (
     AiEvaluationError,
     DIMENSIONS,
@@ -98,6 +100,7 @@ async def app_lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Multi Agent Interview API", lifespan=app_lifespan)
+app.add_middleware(RequestLoggingMiddleware, service="candidate-api", audit_store=SecurityAuditStore(database_module))
 
 allowed_origins = [
     origin.strip()
@@ -110,6 +113,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
+    expose_headers=["X-Request-ID"],
 )
 
 SESSION_COOKIE_NAME = "interview_session"
@@ -533,7 +537,7 @@ def find_user_by_session(request: Request) -> dict | None:
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
         return None
-    return one(
+    user = one(
         """
         SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
                users.counselor, users.student_status, users.must_change_password,
@@ -546,6 +550,8 @@ def find_user_by_session(request: Request) -> dict | None:
         """,
         (hash_token(token), now_iso_after(0)),
     )
+    bind_actor(request, user, "student")
+    return user
 
 
 def find_user_by_session_token(token: str | None) -> dict | None:
@@ -571,6 +577,7 @@ def require_auth(request: Request) -> dict:
     if not user:
         raise error(401, "请先登录。")
     if bool(user.get("must_change_password")):
+        audit_context(request, reason="initial_password_change_required")
         raise error(403, "首次登录必须先修改临时密码。")
     return user
 
@@ -2136,8 +2143,11 @@ async def auth_login(request: Request, response: Response, body: dict | None = N
     student_no = normalize_student_no(body.get("student_no") or body.get("studentNo"))
     password = str(body.get("password") or "")
     if not is_valid_student_no(student_no) or not password:
+        audit_context(request, reason="invalid_login_input")
         raise error(400, "请输入正确的学号和密码。")
+    audit_context(request, attempted_account=student_no)
     if is_login_limited(request, student_no):
+        audit_context(request, reason="login_rate_limited")
         raise error(429, "登录尝试过于频繁，请稍后再试。")
 
     user = one(
@@ -2150,8 +2160,10 @@ async def auth_login(request: Request, response: Response, body: dict | None = N
     )
     if not user or user["status"] != "normal" or not verify_password(password, user["password_hash"]):
         record_failed_login(request, student_no)
+        audit_context(request, reason="invalid_credentials_or_disabled")
         raise error(401, "学号或密码不正确，或账号已被停用。")
 
+    bind_actor(request, user, "student")
     clear_failed_logins(request, student_no)
     db.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (user["id"],))
     db.commit()
@@ -2210,6 +2222,7 @@ def change_initial_password(request: Request, response: Response, body: dict | N
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request, response: Response):
+    find_user_by_session(request)  # Capture identity before deleting the session.
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if token:
         db.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(token),))
@@ -2224,6 +2237,8 @@ async def password_reset_request(request: Request, body: dict | None = None):
         raise error(503, "密码找回暂未开放，请联系管理员处理。")
     body = json_body(body)
     email = normalize_email(body.get("email"))
+    if is_valid_email(email):
+        audit_context(request, attempted_account=email)
     if record_password_reset_attempt(request, email):
         raise error(429, "密码重置申请过于频繁，请稍后再试。")
     user = one("SELECT id FROM users WHERE email = ? AND status = ?", (email, "normal")) if is_valid_email(email) else None
@@ -2240,10 +2255,12 @@ async def password_reset_request(request: Request, body: dict | None = None):
                 (str(uuid4()), user["id"], hash_token(token), now_iso_after(RESET_MAX_AGE_SECONDS)),
             ).close()
         try:
-            await run_in_threadpool(send_password_reset_email, email, token)
+            sent = await run_in_threadpool(send_password_reset_email, email, token)
+            if not sent:
+                audit_context(request, reason="reset_mail_not_configured", outcome="failed")
         except Exception:
             # The response remains generic so account existence and mail-provider state are not exposed.
-            pass
+            audit_context(request, reason="reset_mail_delivery_failed", outcome="failed")
         if os.environ.get("APP_ENV", "development").strip().lower() != "production":
             dev_reset_token = token
     return {"ok": True, "message": "如果邮箱存在，我们会发送密码重置链接。", "devResetToken": dev_reset_token}
@@ -2263,7 +2280,7 @@ def password_reset_verify(body: dict | None = None):
 
 
 @app.post("/api/auth/password-reset/confirm")
-def password_reset_confirm(response: Response, body: dict | None = None):
+def password_reset_confirm(request: Request, response: Response, body: dict | None = None):
     if not PASSWORD_RESET_ENABLED:
         raise error(503, "密码找回暂未开放，请联系管理员处理。")
     payload = json_body(body)
@@ -2279,6 +2296,7 @@ def password_reset_confirm(response: Response, body: dict | None = None):
     now = now_iso_after(0)
     if not consume_reset_token(db, hash_token(token), reset["user_id"], hash_password(password), now):
         raise error(400, "密码重置链接无效或已过期。")
+    bind_actor(request, {"id": reset["user_id"]}, "student")
     clear_session(response)
     return {"ok": True, "message": "密码已重置，请使用新密码登录。"}
 

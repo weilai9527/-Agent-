@@ -244,9 +244,11 @@ def test_campus_overview_includes_all_students_before_scope_filtering(tmp_path):
         assert scoped["colleges"][0]["studentCount"] == 2
         assert scoped["programs"][0]["studentCount"] == 2
         assert {item["id"]: item["studentCount"] for item in scoped["classes"]} == {
-            "outside": 0, "allowed": 2,
+            "allowed": 2,
         }
-        assert main.campus_overview_data(scope=[])["summary"]["students"] == 0
+        empty = main.campus_overview_data(scope=[])
+        assert empty["summary"]["students"] == 0
+        assert empty["colleges"] == empty["programs"] == empty["classes"] == []
         """
     )
     completed = subprocess.run(

@@ -229,6 +229,15 @@ class AdminAuthTests(unittest.TestCase):
         second_id = str(uuid4())
         self.insert_candidate_user(first_id, "campus-student-1@example.com", "Campus Student One")
         self.insert_candidate_user(second_id, "campus-student-2@example.com", "Campus Student Two")
+        # The student overview includes only accounts linked to an active registration.
+        for user_id, student_no, name in (
+            (first_id, "20270001", "Campus Student One"),
+            (second_id, "20270002", "Campus Student Two"),
+        ):
+            admin_main.db.execute(
+                "INSERT INTO student_registrations (id, student_no, name, user_id) VALUES (?, ?, ?, ?)",
+                (str(uuid4()), student_no, name, user_id),
+            ).close()
         admin_main.db.commit()
 
         assigned = self.client.patch(

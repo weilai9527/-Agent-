@@ -103,7 +103,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .v4-home-side { display: grid; grid-template-rows: 1fr 1fr; gap: 20px; }
 .v4-me-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin-top: 12px; }
 .v4-me-grid .v4-feature { min-height: 285px; }
-.v4-feature { position: relative; display: flex; flex-direction: column; align-items: start; justify-content: end; min-height: 220px; padding: 27px; border: 1px solid var(--v4-line); border-radius: 11px; background: #fbfcf8; color: var(--v4-ink); text-align: left; cursor: pointer; }
+.v4-feature { position: relative; display: flex; flex-direction: column; align-items: start; justify-content: end; min-height: 220px; padding: 27px; border: 1px solid var(--v4-line); border-radius: 11px; background: #fbfcf8; color: var(--v4-ink); text-align: left; text-decoration: none; cursor: pointer; }
 .v4-feature:hover { border-color: #a2b094; transform: translateY(-2px); box-shadow: 0 12px 25px #2e45200b; }
 .v4-feature .v4-eyebrow { position: absolute; top: 25px; left: 27px; }
 .v4-feature > svg { position: absolute; top: 45px; right: 28px; color: #a9bba2; }

@@ -7005,6 +7005,7 @@ function V4MePage({ onNavigate }) {
         <button type="button" className="v4-feature" onClick={() => onNavigate('resume')}><span className="v4-eyebrow">01 / RESUME</span><FileText size={36} /><h2>我的简历</h2><p>管理简历，查看真实分析结果与就业方向。</p><strong>进入查看 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('report')}><span className="v4-eyebrow">02 / HISTORY</span><Phone size={36} /><h2>我的历史</h2><p>回顾面试记录与真实复盘报告。</p><strong>进入查看 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('jobcompare')}><span className="v4-eyebrow">03 / CAREER</span><BriefcaseBusiness size={36} /><h2>招聘对比</h2><p>将简历与招聘岗位对比，查看匹配情况和改进建议。</p><strong>开始对比 ↗</strong></button>
+        <a className="v4-feature" href="https://xz.chsi.com.cn/survey/index.action" target="_blank" rel="noopener noreferrer"><span className="v4-eyebrow">04 / ASSESSMENT</span><Target size={36} /><h2>职业测评</h2><p>前往学职平台，探索职业兴趣与能力方向。</p><strong>前往测评 ↗</strong></a>
       </div>
     </section>
   );

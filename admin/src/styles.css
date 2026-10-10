@@ -2312,6 +2312,8 @@ td {
 .detail-drawer .detail-actions > div {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .detail-drawer .detail-actions button {
@@ -5591,3 +5593,19 @@ td {
 .security-log-detail dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
 .security-log-detail dt { color: #64748b; font-size: 12px; }
 .security-log-detail dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+
+/* Brand symbol is displayed from the top of the supplied transparent lockup. */
+.admin-logo { position: relative; display: block; width: 40px; height: 40px; flex: none; overflow: hidden; }
+.admin-logo img { position: absolute; top: 0; left: 50%; width: 120%; height: auto; max-width: none; transform: translateX(-50%); }
+.admin-login-brand { width: 58px; height: 58px; background: #eef4fc; }
+.admin-login-brand .admin-logo { width: 45px; height: 45px; }
+.admin-sidebar { grid-template-rows: auto auto 1fr; }
+.admin-brand { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 2px 8px 4px; color: #084e96; }
+.admin-brand strong { font-size: 19px; line-height: 1.15; }
+.admin-brand small { display: block; margin-top: 3px; color: #64748b; font-size: 11px; font-weight: 500; }
+@media (max-width: 980px) {
+  .admin-sidebar { grid-template-rows: auto auto auto; }
+  .admin-brand { grid-column: 1 / -1; grid-row: 1; }
+  .admin-user { grid-row: 2; }
+  .admin-nav { grid-row: 3; }
+}

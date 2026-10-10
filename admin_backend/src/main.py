@@ -1073,7 +1073,8 @@ def list_interviews() -> list[dict[str, Any]]:
         SELECT interviews.id, interviews.target_role, interviews.interview_type, interviews.status,
                interviews.updated_at, users.name AS candidate,
                COALESCE(agent_counts.agent_count, 0) AS agent_count,
-               COALESCE(message_counts.message_count, 0) AS message_count
+               COALESCE(message_counts.message_count, 0) AS message_count,
+               COALESCE(message_counts.answer_count, 0) AS answer_count
         FROM interview_sessions AS interviews
         JOIN users ON users.id = interviews.user_id
         LEFT JOIN (
@@ -1082,7 +1083,8 @@ def list_interviews() -> list[dict[str, Any]]:
           GROUP BY interview_id
         ) AS agent_counts ON agent_counts.interview_id = interviews.id
         LEFT JOIN (
-          SELECT interview_id, COUNT(*) AS message_count
+          SELECT interview_id, COUNT(*) AS message_count,
+                 SUM(CASE WHEN sender_type = 'candidate' AND message_type IN ('answer', 'transcript') THEN 1 ELSE 0 END) AS answer_count
           FROM interview_messages
           GROUP BY interview_id
         ) AS message_counts ON message_counts.interview_id = interviews.id
@@ -1099,6 +1101,7 @@ def list_interviews() -> list[dict[str, Any]]:
             "status": status_label(row.get("status")),
             "agents": f"{int(row.get('agent_count') or 0)}/3",
             "messages": int(row.get("message_count") or 0),
+            "qaCount": int(row.get("answer_count") or 0),
             "updatedAt": str(row.get("updated_at") or "-"),
         }
         for row in rows
@@ -1238,7 +1241,6 @@ def get_interview_detail(interview_id: str) -> dict[str, Any]:
         LEFT JOIN interview_agents AS agents ON agents.id = messages.agent_id
         WHERE messages.interview_id = ?
         ORDER BY messages.order_index ASC, messages.created_at ASC
-        LIMIT 80
         """,
         (interview_id,),
     )
@@ -3983,6 +3985,15 @@ def candidate_detail(request: Request, candidate_id: str, admin: dict = Depends(
 @app.get("/api/admin/interviews/{interview_id}")
 def interview_detail(request: Request, interview_id: str, admin: dict = Depends(require_permission("viewInterviews"))):
     result = get_interview_detail(interview_id)
+    if is_super_admin(admin) or "viewReports" in admin_permissions(admin):
+        result["reviewReport"] = one(
+            """SELECT id, review_status
+               FROM interview_reports
+               WHERE interview_id = ?
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1""",
+            (interview_id,),
+        )
     record_audit(request, admin, "interview.view", target_type="interview", target_id=interview_id, summary="查看面试详情")
     return result
 

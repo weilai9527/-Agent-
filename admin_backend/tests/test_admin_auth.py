@@ -35,6 +35,53 @@ class AdminAuthTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
+    def test_interview_detail_returns_complete_transcript_and_review_target(self):
+        self.login_super_admin()
+        suffix = uuid4().hex
+        user_id = f"review-user-{suffix}"
+        interview_id = f"review-interview-{suffix}"
+        report_id = f"review-report-{suffix}"
+        self.insert_candidate_user(user_id, f"{suffix}@example.com", "Review Student")
+        admin_main.db.execute(
+            "INSERT INTO interview_sessions (id, user_id, target_role, status) VALUES (?, ?, ?, ?)",
+            (interview_id, user_id, "Backend Engineer", "completed"),
+        ).close()
+        for index in range(91):
+            sender = "candidate" if index % 2 else "agent"
+            admin_main.db.execute(
+                """INSERT INTO interview_messages
+                   (id, interview_id, sender_type, message_type, content, order_index)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (f"message-{suffix}-{index}", interview_id, sender,
+                 "answer" if sender == "candidate" else "question", f"message {index}", index),
+            ).close()
+        admin_main.db.execute(
+            """INSERT INTO interview_reports
+               (id, user_id, interview_id, total_score, grade, pass_recommendation,
+                ability_radar, agent_feedback, timeline_review, summary, suggestions)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (report_id, user_id, interview_id, 80, "B", "pass", "{}", "[]", "[]", "summary", "suggestions"),
+        ).close()
+        admin_main.db.commit()
+
+        response = self.client.get(f"/api/admin/interviews/{interview_id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()["messages"]), 91)
+        self.assertEqual(response.json()["messages"][-1]["content"], "message 90")
+        self.assertEqual(response.json()["reviewReport"]["id"], report_id)
+        listed = next(item for item in admin_main.list_interviews() if item["id"] == interview_id)
+        self.assertEqual(listed["qaCount"], 45)
+
+        review = self.client.patch(
+            f"/api/admin/reports/{report_id}/review",
+            headers={"Origin": TRUSTED_ORIGIN}, json={"status": "approved"},
+        )
+        self.assertEqual(review.status_code, 200, review.text)
+        self.assertEqual(
+            self.client.get(f"/api/admin/interviews/{interview_id}").json()["reviewReport"]["review_status"],
+            "approved",
+        )
+
     def insert_candidate_user(self, user_id: str, email: str, name: str) -> None:
         """Keep admin tests independent from candidate-backend import order."""
         columns = {

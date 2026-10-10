@@ -51,6 +51,7 @@ import {
   shouldPersistAliyunAgentTurn,
 } from './aliyunRtc';
 import { V4Brand, V4Logo, V4PageHeading } from './V4Shell';
+import { brand } from '../../shared/branding.js';
 import { uploadResume } from './resumeUpload';
 import {
   abilitySampleStatus,
@@ -1519,13 +1520,15 @@ function LoginPage({ onAuthenticated }) {
       <section className="auth-page">
         <div className="auth-brand-panel">
           <V4Brand />
-          <div className="v4-auth-orbit"><div className="v4-orbit v4-orbit-one" /><div className="v4-orbit v4-orbit-two" /><V4Logo /></div>
-          <div className="auth-copy">
-            <p className="eyebrow">THE NEXT CHAPTER STARTS HERE</p>
-            <h1>准备充分，<br />自信发生。</h1>
-            <p>你的专属 AI 面试空间</p>
+          <div className="v4-auth-hero">
+            <div className="v4-auth-orbit"><V4Logo /></div>
+            <div className="auth-copy">
+              <p className="eyebrow">THE NEXT CHAPTER STARTS HERE</p>
+              <h1>准备充分，<br />自信发生。</h1>
+              <p>你的专属 AI 面试空间</p>
+            </div>
           </div>
-          <small className="v4-auth-credit">ASTRAINTERVIEW © 2026</small>
+          <small className="v4-auth-credit">{brand.name} © 2026</small>
         </div>
 
         <form className="auth-card" onSubmit={handleSubmit}>
@@ -1642,13 +1645,15 @@ function InitialPasswordChangePage({ user, onChanged, onLogout }) {
       <section className="auth-page">
         <div className="auth-brand-panel">
           <V4Brand />
-          <div className="v4-auth-orbit"><div className="v4-orbit v4-orbit-one" /><div className="v4-orbit v4-orbit-two" /><V4Logo /></div>
-          <div className="auth-copy">
-            <p className="eyebrow">FIRST LOGIN SECURITY</p>
-            <h1>从这里，<br />开始新的旅程。</h1>
-            <p>临时密码仅用于首次身份确认。完成改密后，管理员将无法再查看原临时密码。</p>
+          <div className="v4-auth-hero">
+            <div className="v4-auth-orbit"><V4Logo /></div>
+            <div className="auth-copy">
+              <p className="eyebrow">FIRST LOGIN SECURITY</p>
+              <h1>从这里，<br />开始新的旅程。</h1>
+              <p>临时密码仅用于首次身份确认。完成改密后，管理员将无法再查看原临时密码。</p>
+            </div>
           </div>
-          <small className="v4-auth-credit">ASTRAINTERVIEW © 2026</small>
+          <small className="v4-auth-credit">{brand.name} © 2026</small>
         </div>
         <form className="auth-card" onSubmit={handleSubmit}>
           <V4Brand />
@@ -3015,7 +3020,7 @@ function JobMatchHistoryPage() {
   );
 }
 
-function ResumeAnalysisPage() {
+function ResumeAnalysisPage({ onStartInterview }) {
   const [resumeText, setResumeText] = useState('');
   const [fileName, setFileName] = useState('');
   const [analysis, setAnalysis] = useState(() => buildResumeAnalysis(resumeText));
@@ -3028,7 +3033,9 @@ function ResumeAnalysisPage() {
   const [error, setError] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [form, setForm] = useState(EMPTY_RESUME_FORM);
+  const [formDirty, setFormDirty] = useState(false);
   const [collegeOptions, setCollegeOptions] = useState([]);
+  const [majorOptionsStatus, setMajorOptionsStatus] = useState('loading');
   const [studentInfo, setStudentInfo] = useState({ name: '', studentNo: '', college: '' });
   const [savingForm, setSavingForm] = useState(false);
   const [editorMode, setEditorMode] = useState('document');
@@ -3083,9 +3090,12 @@ function ResumeAnalysisPage() {
 
     apiRequest('/api/resume-form/settings')
       .then((data) => {
-        if (mounted) setCollegeOptions(data.colleges || []);
+        if (mounted) {
+          setCollegeOptions(data.colleges || []);
+          setMajorOptionsStatus('ready');
+        }
       })
-      .catch(() => {});
+      .catch(() => { if (mounted) setMajorOptionsStatus('error'); });
 
     apiRequest('/api/resume-form')
       .then((data) => {
@@ -3106,6 +3116,7 @@ function ResumeAnalysisPage() {
 
   const handleFormChange = (field, value) => {
     invalidateAnalysis();
+    setFormDirty(true);
     setForm((current) => {
       if (field === 'college') {
         const next = { ...current, college: value, major: '' };
@@ -3130,6 +3141,7 @@ function ResumeAnalysisPage() {
       });
       const savedForm = data.form || form;
       setForm(savedForm);
+      setFormDirty(false);
       const nextText = data.resume_text || resumeText;
       setResumeText(nextText);
       setFileName('');
@@ -3183,15 +3195,30 @@ function ResumeAnalysisPage() {
       });
       setProfile({ ...defaultProfile, ...data.profile });
       setMessage('简历内容已保存。');
+      return true;
     } catch (requestError) {
       setError(requestError.message);
+      return false;
     } finally {
       setSavingText(false);
     }
   };
 
-  const selectedCollege = collegeOptions.find((item) => item.name === form.college);
+  const handleStartInterview = async () => {
+    if (editorMode === 'form' && formDirty) {
+      if (await handleSaveForm() === null) return;
+    } else if (resumeText !== (profile?.resume_text || '')) {
+      if (!await handleSaveText()) return;
+    }
+    onStartInterview();
+  };
+
+  const selectedCollege = collegeOptions.find((item) => item.name?.trim() === form.college?.trim());
   const majorOptions = selectedCollege?.majors || [];
+  const majorPlaceholder = !form.college ? '请先选择学院'
+    : majorOptionsStatus === 'loading' ? '专业加载中…'
+      : majorOptionsStatus === 'error' ? '专业加载失败，请刷新页面'
+        : majorOptions.length ? '请选择专业' : '该学院暂无可选专业';
 
   const handleAnalyze = async () => {
     setAnalyzing(true);
@@ -3327,9 +3354,12 @@ function ResumeAnalysisPage() {
                 <select
                   value={form.major || ''}
                   onChange={(event) => handleFormChange('major', event.target.value)}
-                  disabled={!form.college}
+                  disabled={!form.college || majorOptionsStatus !== 'ready' || !majorOptions.length}
                 >
-                  <option value="">{form.college ? '请选择专业' : '请先选择学院'}</option>
+                  <option value="">{majorPlaceholder}</option>
+                  {form.major && !majorOptions.some((major) => major.name === form.major) && (
+                    <option value={form.major}>{form.major}（已保存）</option>
+                  )}
                   {majorOptions.map((major) => (
                     <option key={major.id || major.name} value={major.name}>{major.name}</option>
                   ))}
@@ -3449,6 +3479,16 @@ function ResumeAnalysisPage() {
       </section>
 
       {!analyzed && !!resumeText && <div className="resume-draft-note">简历内容已更新，点击“开始分析”刷新分析结果。</div>}
+      <div className="v4-setup-launch resume-start-interview">
+        <div>
+          <span className="v4-eyebrow">READY FOR YOUR SESSION</span>
+          <strong>{profile?.target_role || '准备开始面试'}</strong>
+          <small>下一步选择面试难度与方式</small>
+        </div>
+        <button type="button" className="primary-action" onClick={handleStartInterview} disabled={busy}>
+          <Phone size={17} />开始电话面试 ↗
+        </button>
+      </div>
     </section>
   );
 }
@@ -3731,11 +3771,6 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
             )}
           </div>
         </Card>
-
-        <button className="primary-action start-interview" onClick={handleStart} disabled={starting || loadingProfile}>
-          <Phone size={17} />
-          {starting ? '创建中' : '开始电话面试'}
-        </button>
 
       </section>
       <div className="v4-setup-launch">
@@ -6935,19 +6970,26 @@ function V4HomePage({ user, onNavigate, onOpenReport }) {
   return (
     <section className="v4-home">
       <div className="v4-home-heading">
-        <div><span className="v4-eyebrow">ASTRAINTERVIEW / PERSONAL STUDIO</span><h1>准备，从这里开始。</h1><p>{user.name}，把每一次对话，变成下一次的底气。</p></div>
+        <div><span className="v4-eyebrow">{brand.name} / 个人空间</span><h1>准备，从这里开始。</h1><p>{user.name}，把每一次对话，变成下一次的底气。</p></div>
         <span className="v4-edition">04 <small>FOURTH EDITION</small></span>
       </div>
       <div className="v4-home-grid">
         <section className="v4-stage">
-          <div className="v4-stage-top"><span>◉ TELEPHONE INTERVIEW</span><span>01 — PRACTICE</span></div>
-          <div className="v4-stage-art"><div className="v4-orbit v4-orbit-one" /><div className="v4-orbit v4-orbit-two" /><V4Logo /></div>
-          <div className="v4-stage-copy"><span className="v4-eyebrow">你的下一场，值得认真准备</span><h2>进入状态。<br />让实力被听见。</h2><p>从第一句自我介绍，到最后一次深度追问。<br />在真实场景中练习属于你的表达。</p><button className="v4-primary" type="button" onClick={() => onNavigate('phone-choice')}>开始电话面试 <span>↗</span></button></div>
-          <div className="v4-stage-bottom"><span>场景定制 / 多维复盘 / 持续进阶</span><span>AI INTERVIEW STUDIO</span></div>
+          <div className="v4-stage-top"><span className="v4-stage-tag">电话面试练习</span><span>01 / PRACTICE</span></div>
+          <div className="v4-stage-main">
+            <div className="v4-stage-copy"><span className="v4-eyebrow">为下一次机会做好准备</span><h2>练好表达，<br />从容面对机会。</h2><p>选择目标岗位与难度，开始贴近真实场景的练习。结束后查看反馈，让每一次回答都有进步。</p><button className="v4-primary" type="button" onClick={() => onNavigate('phone-choice')}>开始电话面试 <span>↗</span></button></div>
+            <div className="v4-stage-art" aria-hidden="true">
+              <span className="v4-stage-art-ring" /><span className="v4-stage-art-ring" />
+              <svg className="v4-stage-tie" viewBox="0 0 64 100" fill="currentColor" focusable="false">
+                <path d="M13 12C13 0 51 0 51 12L47 21C40 14 24 14 17 21ZM10 14 23 33 15 39 3 25ZM54 14 41 33 49 39 61 25ZM25 35H39L47 41 40 53H24L17 41ZM24 56H40L51 86 32 100 13 86Z" />
+              </svg>
+            </div>
+          </div>
+          <div className="v4-stage-bottom"><span>选择方向</span><span aria-hidden="true">→</span><span>对话练习</span><span aria-hidden="true">→</span><span>查看复盘</span></div>
         </section>
         <div className="v4-home-side">
-          <button className="v4-feature" type="button" onClick={() => onNavigate('stats')}><span className="v4-eyebrow">02 / INSIGHTS</span><BarChart3 size={36} /><h2>看见你的能力轮廓</h2><p>优势与短板，都有迹可循。</p><strong>探索能力画像 ↗</strong></button>
-          <button className="v4-feature" type="button" onClick={() => onNavigate('me')}><span className="v4-eyebrow">03 / ARCHIVE</span><UserRound size={36} /><h2>积累，属于你的答案</h2><p>一份简历，每一场练习。</p><strong>进入我的空间 ↗</strong></button>
+          <button className="v4-feature" type="button" onClick={() => onNavigate('me')}><span className="v4-eyebrow">02 / ARCHIVE</span><UserRound size={36} /><h2>积累，属于你的答案</h2><p>一份简历，每一场练习。</p><strong>进入我的空间 ↗</strong></button>
+          <a className="v4-feature" href="https://xz.chsi.com.cn/survey/index.action" target="_blank" rel="noopener noreferrer"><span className="v4-eyebrow">03 / ASSESSMENT</span><Target size={36} /><h2>职业测评</h2><p>前往学职平台，探索职业兴趣与能力方向。</p><strong>前往测评 ↗</strong></a>
         </div>
       </div>
       <div className="v4-recent-heading"><h2>最近练习</h2><button type="button" onClick={() => onNavigate('report')}>全部记录 ↗</button></div>
@@ -7005,7 +7047,7 @@ function V4MePage({ onNavigate }) {
         <button type="button" className="v4-feature" onClick={() => onNavigate('resume')}><span className="v4-eyebrow">01 / RESUME</span><FileText size={36} /><h2>我的简历</h2><p>管理简历，查看真实分析结果与就业方向。</p><strong>进入查看 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('report')}><span className="v4-eyebrow">02 / HISTORY</span><Phone size={36} /><h2>我的历史</h2><p>回顾面试记录与真实复盘报告。</p><strong>进入查看 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('jobcompare')}><span className="v4-eyebrow">03 / CAREER</span><BriefcaseBusiness size={36} /><h2>招聘对比</h2><p>将简历与招聘岗位对比，查看匹配情况和改进建议。</p><strong>开始对比 ↗</strong></button>
-        <a className="v4-feature" href="https://xz.chsi.com.cn/survey/index.action" target="_blank" rel="noopener noreferrer"><span className="v4-eyebrow">04 / ASSESSMENT</span><Target size={36} /><h2>职业测评</h2><p>前往学职平台，探索职业兴趣与能力方向。</p><strong>前往测评 ↗</strong></a>
+        <button type="button" className="v4-feature" onClick={() => onNavigate('stats')}><span className="v4-eyebrow">04 / INSIGHTS</span><BarChart3 size={36} /><h2>看见你的能力轮廓</h2><p>优势与短板，都有迹可循。</p><strong>探索能力画像 ↗</strong></button>
       </div>
     </section>
   );
@@ -7121,8 +7163,7 @@ function App() {
       <div className="workspace-page v4-workspace">
         <div className="topbar">
           <button type="button" className="v4-brand-button" onClick={() => handleViewChange('home')} aria-label="返回面试空间"><V4Brand /></button>
-          <span className="v4-breadcrumb">Astrainterview <span>/</span> <b>{({ home: '面试空间', me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', phone: '正在面试', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告', stats: '能力画像' })[view]}</b></span>
-          <span className="v4-header-note"><i />专注于你的下一次成长</span>
+          <span className="v4-breadcrumb"><b>{({ home: '面试空间', me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', phone: '正在面试', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告', stats: '能力画像' })[view]}</b></span>
           {runningInterviewId && view !== 'phone' && <button className="v4-continue-link" type="button" onClick={() => handleViewChange('phone')}>继续面试 ↗</button>}
           <button className="topbar-account" type="button" onClick={() => handleViewChange('me')} aria-label="打开我的空间">
             <span>{user.name}</span>
@@ -7130,13 +7171,13 @@ function App() {
           <button className="v4-logout" aria-label="退出登录" onClick={handleLogout}>退出登录 ↗</button>
         </div>
 
-        {view !== 'home' && view !== 'phone' && <div className="v4-page-toolbar"><button type="button" onClick={() => handleViewChange(({ me: 'home', 'phone-choice': 'home', setup: 'phone-choice', stats: 'home', resume: 'me', jobcompare: 'me', profile: 'me', report: 'me' })[view] || 'home')}>← 返回{({ me: '面试空间', 'phone-choice': '面试空间', setup: '难度选择', stats: '面试空间', resume: '我的', jobcompare: '我的', profile: '我的', report: '我的' })[view]}</button><span>面试空间 / {({ me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', stats: '能力画像', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告' })[view]}</span></div>}
+        {view !== 'home' && view !== 'phone' && <div className="v4-page-toolbar"><button type="button" onClick={() => handleViewChange(({ me: 'home', 'phone-choice': 'home', setup: 'phone-choice', stats: 'me', resume: 'me', jobcompare: 'me', profile: 'me', report: 'me' })[view] || 'home')}>← 返回{({ me: '面试空间', 'phone-choice': '面试空间', setup: '难度选择', stats: '我的', resume: '我的', jobcompare: '我的', profile: '我的', report: '我的' })[view]}</button><span>{view === 'stats' ? '我的' : '面试空间'} / {({ me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', stats: '能力画像', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告' })[view]}</span></div>}
 
         {view === 'home' && <V4HomePage user={user} onNavigate={handleViewChange} onOpenReport={handleOpenReport} />}
         {view === 'phone-choice' && <V4PhoneChoicePage onSelect={handleSelectSetup} />}
         {view === 'me' && <V4MePage onNavigate={handleViewChange} />}
         {view === 'setup' && <SetupPage key={`${setupMode}-${setupPresetKey}`} mode={setupMode} presetKey={setupPresetKey} onStart={handleStartInterview} />}
-        {view === 'resume' && <ResumeAnalysisPage />}
+        {view === 'resume' && <ResumeAnalysisPage onStartInterview={() => handleViewChange('phone-choice')} />}
         {view === 'jobcompare' && <JobComparePage />}
         {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
         {view === 'phone' && (
@@ -7180,13 +7221,14 @@ function App() {
           </section>
         )}
         {view === 'stats' && <StatsPage onStartTraining={() => setView('phone-choice')} onOpenReport={handleOpenReport} />}
-        <footer className="v4-footer"><span>© 2026 ASTRAINTERVIEW · 为每一次机会，做好准备</span><span>面试记录与报告来自你的真实账号</span></footer>
+        <footer className="v4-footer"><span>© 2026 {brand.name} · 为每一次机会，做好准备</span><span>面试记录与报告来自你的真实账号</span></footer>
       </div>
     </main>
   );
 }
 
 const rootElement = document.getElementById('root');
+document.title = `${brand.name} · 面试空间`;
 const appRoot = rootElement.__appRoot || createRoot(rootElement);
 rootElement.__appRoot = appRoot;
 appRoot.render(<App />);

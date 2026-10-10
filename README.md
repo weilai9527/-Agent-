@@ -112,6 +112,12 @@ AI Interview Agent 是一个面向招聘与人才评估场景的智能面试平�
 
 ## Cloudflare 前端部署
 
+### 双品牌入口
+
+候选人端和管理端共用同一套功能代码、接口和数据。默认入口显示“乐业通”；访问路径中包含 `/xinghe/` 时显示“星河面试”。两版使用相同的标志、页面和功能，仅展示名称不同。后续功能更新在现有代码中完成，两版会同时获得更新。
+
+本地预览地址：候选人端 `http://127.0.0.1:5173/` 与 `http://127.0.0.1:5173/xinghe/`；管理端 `http://127.0.0.1:5174/` 与 `http://127.0.0.1:5174/xinghe/`。部署时需让 `/xinghe/` 路径回退到对应前端的 `index.html`。
+
 根目录的 `wrangler.jsonc` 将 `npm run build` 生成的 `frontend/dist` 作为静态资源部署到名为 `agent` 的 Worker，并为前端单页路由返回 `index.html`。这个部署不包含两个 Python API 服务或数据库。
 
 正式使用前，请单独部署业务后端，并为前端构建设置 `VITE_API_BASE_URL`，同时把前端域名加入后端的 `FRONTEND_ORIGIN`。当前登录 Cookie 使用 `SameSite=Lax`，前端与 API 应使用同站点域名；仅部署静态页面时，登录和面试接口无法使用。

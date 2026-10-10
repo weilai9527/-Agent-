@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import cascLogo from './assets/casc-composite.png';
+import { brand } from '../../shared/branding.js';
 import {
   Activity,
   AlertCircle,
@@ -208,9 +210,9 @@ function AdminLogin({ onAuthenticated }) {
   return (
     <main className="admin-login-page">
       <form className="admin-login-card" onSubmit={handleSubmit}>
-        <div className="admin-login-brand"><ShieldCheck size={28} /></div>
+        <div className="admin-login-brand"><span className="admin-logo" aria-hidden="true"><img src={cascLogo} alt="" /></span></div>
         <header>
-          <span>Management Console</span>
+          <span>{brand.name} · 管理端</span>
           <h1>管理员登录</h1>
           <p>登录后可以查看学生成长、训练报告和系统配置。</p>
         </header>
@@ -361,6 +363,7 @@ function DataWorkspace({
   onQueryChange,
   filterKey,
   filterLabel = '全部状态',
+  statusOptions,
   presetFilter = '',
 }) {
   const [filterValue, setFilterValue] = useState(presetFilter);
@@ -374,8 +377,8 @@ function DataWorkspace({
   }, [presetFilter]);
 
   const filterOptions = useMemo(
-    () => [...new Set(rows.map((row) => row[filterKey]).filter(Boolean))],
-    [rows, filterKey],
+    () => statusOptions || [...new Set(rows.map((row) => row[filterKey]).filter(Boolean))],
+    [rows, filterKey, statusOptions],
   );
 
   const filteredRows = useMemo(() => {
@@ -461,6 +464,11 @@ function DataWorkspace({
 
 function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, onMove, position, onRevealTemporaryPassword, onResetStudentPassword }) {
   const isOpen = Boolean(detail || loading || error);
+  const [showTranscript, setShowTranscript] = useState(false);
+
+  useEffect(() => {
+    setShowTranscript(false);
+  }, [detail?.id]);
 
   useEffect(() => {
     if (!isOpen) return undefined;
@@ -477,9 +485,13 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
-  const title = detail?.title || '详情';
+  const title = showTranscript && detail?.type === 'interview'
+    ? (canReview && detail.reviewReport ? '问答复核' : '完整问答')
+    : detail?.title || '详情';
   const rows = detail?.rows || [];
   const blocks = detail?.blocks || [];
+  const transcriptMessages = (detail?.messages || []).filter((message) =>
+    message.sender_type === 'candidate' || (message.sender_type === 'agent' && message.message_type !== 'system'));
   return (
     <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="detail-drawer" role="dialog" aria-modal="true" aria-label={title}>
@@ -503,6 +515,22 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
         {error && <div className="page-message error">{error}</div>}
         {!loading && !error && (
           <div className="detail-body">
+            {showTranscript && detail?.type === 'interview' ? (
+              <section className="detail-block transcript-review">
+                <h3>完整问答记录 · {transcriptMessages.length} 条</h3>
+                {transcriptMessages.length > 0 ? (
+                  <div className="detail-list">
+                    {transcriptMessages.map((message, index) => (
+                      <article key={message.id || index}>
+                        <strong>{message.sender_type === 'candidate' ? '候选人' : message.agent_name || '面试官'} · {index + 1}</strong>
+                        <span>{({ question: '提问', follow_up: '追问', answer: '回答', transcript: '回答' })[message.message_type] || '消息'} · {message.created_at || '-'}</span>
+                        <p>{message.transcript_text || message.content || '无文本内容'}</p>
+                      </article>
+                    ))}
+                  </div>
+                ) : <p>这场训练暂无问答记录。</p>}
+              </section>
+            ) : <>
             <div className="detail-grid">
               {rows.map((item) => (
                 <div key={item.label}>
@@ -527,7 +555,23 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
                 ) : <p>{block.text || '暂无内容'}</p>}
               </section>
             ))}
+            </>}
           </div>
+        )}
+        {detail?.type === 'interview' && !error && (
+          <footer className="detail-actions">
+            <span>{showTranscript
+              ? (detail.reviewReport ? `报告复核状态：${({ approved: '已复核', rejected: '复核未通过', pending: '待复核' })[detail.reviewReport.review_status] || '待复核'}` : '暂无关联报告，暂不能提交复核')
+              : '查看本场训练的完整问答记录'}</span>
+            <div>
+              {showTranscript ? <button type="button" disabled={loading} onClick={() => setShowTranscript(false)}>返回训练详情</button>
+                : <button type="button" disabled={loading} onClick={() => setShowTranscript(true)}>{canReview && detail.reviewReport ? '复核质检' : '查看完整问答'}</button>}
+              {showTranscript && canReview && detail.reviewReport && <>
+                <button type="button" className="danger" disabled={loading} onClick={() => onReview('rejected')}>标记未通过</button>
+                <button type="button" disabled={loading} onClick={() => onReview('approved')}>通过复核</button>
+              </>}
+            </div>
+          </footer>
         )}
         {detail?.type === 'report' && canReview && !error && (
           <footer className="detail-actions">
@@ -600,6 +644,8 @@ function formatDetail(type, payload, fallbackRow) {
       type: 'interview',
       id: interview.id || fallbackRow.id,
       title: `训练 · ${interview.target_role || fallbackRow.role}`,
+      messages: payload.messages || [],
+      reviewReport: payload.reviewReport || null,
       rows: [
         { label: '候选人', value: interview.candidate },
         { label: '邮箱', value: interview.candidate_email },
@@ -621,10 +667,12 @@ function formatDetail(type, payload, fallbackRow) {
           })),
         },
         {
-          title: '最近消息',
-          items: (payload.messages || []).slice(-10).map((message) => ({
+          title: '问答摘要',
+          items: (payload.messages || [])
+            .filter((message) => message.sender_type === 'candidate' || (message.sender_type === 'agent' && message.message_type !== 'system'))
+            .slice(-10).map((message) => ({
             id: message.id,
-            title: message.agent_name || message.sender_type,
+            title: message.sender_type === 'candidate' ? '候选人' : message.agent_name || '面试官',
             meta: `${message.message_type} · ${message.created_at}`,
             text: compactText(message.content, 260),
           })),
@@ -775,10 +823,10 @@ function InterviewsPage({ data, onView, query, onQueryChange, presetFilter }) {
     { key: 'type', label: '训练类型' },
     { key: 'status', label: '状态', render: (row) => <StatusBadge>{row.status}</StatusBadge> },
     { key: 'agents', label: 'Agent' },
-    { key: 'messages', label: '消息数' },
+    { key: 'qaCount', label: '问答数' },
     { key: 'updatedAt', label: '更新时间' },
   ];
-  return <DataWorkspace title="模拟训练记录" icon={<ClipboardList size={18} />} columns={columns} rows={data.interviews} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部训练状态" presetFilter={presetFilter} onView={(row, rows) => onView('interview', row, rows)} />;
+  return <DataWorkspace title="模拟训练记录" icon={<ClipboardList size={18} />} columns={columns} rows={data.interviews} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部状态" statusOptions={['进行中', '已完成']} presetFilter={presetFilter} onView={(row, rows) => onView('interview', row, rows)} />;
 }
 
 function ReportsPage({ data, onView, query, onQueryChange, presetFilter }) {
@@ -1641,8 +1689,7 @@ function OrganizationPage({ onView, admin }) {
   }, []);
 
   const allStudents = useMemo(() => {
-    const activated = (campus.students || []).filter((item) => item.infoComplete);
-    return [...activated, ...(campus.pendingStudents || [])];
+    return [...(campus.students || []), ...(campus.pendingStudents || [])];
   }, [campus.students, campus.pendingStudents]);
 
   const filterPrograms = useMemo(
@@ -1742,9 +1789,9 @@ function OrganizationPage({ onView, admin }) {
           {scopeEmpty && <p className="campus-scope-hint"><AlertCircle size={15} />当前账号未分配学生数据范围，无法筛选或查看学生，请联系超级管理员分配数据范围。</p>}
           <div className="table-wrap campus-student-table">
             <table>
-              <thead><tr><th>学生</th><th>目标岗位</th><th>准备度</th><th>训练</th><th>成长状态</th><th>班级归属</th><th aria-label="关注" /></tr></thead>
+              <thead><tr><th>学生</th><th>目标岗位</th><th>准备度</th><th>训练</th><th>成长状态</th><th>班级</th><th>学院</th><th aria-label="关注" /></tr></thead>
               <tbody>
-                {filteredStudents.length === 0 && <tr><td colSpan="7"><EmptyState text="当前范围没有学生" /></td></tr>}
+                {filteredStudents.length === 0 && <tr><td colSpan="8"><EmptyState text="当前范围没有学生" /></td></tr>}
                 {filteredStudents.map((student) => (
                   <tr key={student.id} className="data-row" onClick={() => openStudent(student)}>
                     <td><div className="student-identity"><span className="student-identity-name"><strong>{student.name}</strong>{student.registrationRemoved && <em className="student-removed-tag">名单已删除</em>}{student.pending && <em className="student-pending-tag">未激活</em>}</span><span>{student.studentNo !== '-' ? student.studentNo : student.email}</span></div></td>
@@ -1753,6 +1800,7 @@ function OrganizationPage({ onView, admin }) {
                     <td>{student.interviews} 次</td>
                     <td><StatusBadge>{student.growthStatus}</StatusBadge></td>
                     <td className={student.className === '未归班' ? 'cell-unassigned' : ''}>{student.className}</td>
+                    <td>{student.college}</td>
                     <td onClick={(event) => event.stopPropagation()}>
                       {student.pending
                         ? <span className="student-pending-hint">未激活</span>
@@ -4687,6 +4735,7 @@ function AdminApp({ admin, onSignedOut }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [connectionStatus, setConnectionStatus] = useState('checking');
   const [lastUpdated, setLastUpdated] = useState(null);
   const [searchByView, setSearchByView] = useState({});
   const [viewPreset, setViewPreset] = useState({ view: '', value: '' });
@@ -4722,6 +4771,7 @@ function AdminApp({ admin, onSignedOut }) {
         if (mounted) {
           setAdminData({ ...emptyAdminData, ...data });
           setError('');
+          setConnectionStatus('connected');
           setLastUpdated(new Date());
         }
       })
@@ -4732,6 +4782,7 @@ function AdminApp({ admin, onSignedOut }) {
           return;
         }
         setError(requestError.message);
+        setConnectionStatus('disconnected');
       })
       .finally(() => {
         if (mounted) setLoading(false);
@@ -4740,6 +4791,23 @@ function AdminApp({ admin, onSignedOut }) {
       mounted = false;
     };
   }, [onSignedOut]);
+
+  useEffect(() => {
+    let active = true;
+    const checkConnection = async () => {
+      try {
+        await adminRequest('/api/admin/health');
+        if (active) setConnectionStatus('connected');
+      } catch {
+        if (active) setConnectionStatus('disconnected');
+      }
+    };
+    const timer = window.setInterval(checkConnection, 30000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const syncViewFromHash = () => {
@@ -4766,11 +4834,15 @@ function AdminApp({ admin, onSignedOut }) {
       const data = await adminRequest('/api/admin/snapshot');
       setAdminData({ ...emptyAdminData, ...data });
       setError('');
+      setConnectionStatus('connected');
       setLastUpdated(new Date());
       setNotice('数据已刷新');
     } catch (requestError) {
       if (requestError.status === 401) onSignedOut(false);
-      else setError(requestError.message);
+      else {
+        setError(requestError.message);
+        setConnectionStatus('disconnected');
+      }
     } finally {
       setRefreshing(false);
     }
@@ -4833,18 +4905,21 @@ function AdminApp({ admin, onSignedOut }) {
   };
 
   const reviewReport = async (status) => {
-    if (!detail?.id) return;
+    const reportId = detail?.type === 'interview' ? detail.reviewReport?.id : detail?.id;
+    if (!reportId) return;
     setDetailLoading(true);
     setDetailError('');
     try {
-      const payload = await adminRequest(`/api/admin/reports/${encodeURIComponent(detail.id)}/review`, {
+      const payload = await adminRequest(`/api/admin/reports/${encodeURIComponent(reportId)}/review`, {
         method: 'PATCH',
         body: JSON.stringify({ status }),
       });
-      setDetail(formatDetail('report', payload, payload.report || {}));
+      setDetail((current) => current?.type === 'interview'
+        ? { ...current, reviewReport: { ...current.reviewReport, review_status: status } }
+        : formatDetail('report', payload, payload.report || {}));
       setAdminData((current) => ({
         ...current,
-        reports: current.reports.map((item) => item.id === detail.id
+        reports: current.reports.map((item) => item.id === reportId
           ? { ...item, reviewStatus: status === 'approved' ? '已复核' : status === 'rejected' ? '复核未通过' : '待复核' }
           : item),
       }));
@@ -4920,6 +4995,7 @@ function AdminApp({ admin, onSignedOut }) {
   return (
     <main className="admin-shell">
       <aside className="admin-sidebar">
+        <div className="admin-brand"><span className="admin-logo" aria-hidden="true"><img src={cascLogo} alt="" /></span><strong>{brand.name}<small>管理端</small></strong></div>
         <div className="admin-user">
           <LockKeyhole size={16} />
           <span>
@@ -4954,7 +5030,7 @@ function AdminApp({ admin, onSignedOut }) {
       <section className="admin-main">
         <header className="admin-topbar">
           <div className="page-heading">
-            <p>Management Console / {activeItem?.group || '工作台'}</p>
+            <p>{brand.name}管理端 / {activeItem?.group || '工作台'}</p>
             <h1>{activeItem?.label || '工作台'}</h1>
             <span>{pageDescriptions[activeView]}</span>
           </div>
@@ -4978,8 +5054,8 @@ function AdminApp({ admin, onSignedOut }) {
             {activeView === 'settings' && adminData.permissions?.canViewAudit && (
               <button className="primary-button" type="button" onClick={() => setSecurityLogsOpen(true)}><ShieldCheck size={15} />安全审计</button>
             )}
-            <span className={`topbar-connection ${error ? 'error' : ''}`} title={ADMIN_API_BASE_URL}>
-              <i />{error ? '连接异常' : '服务正常'}
+            <span className={`topbar-connection ${connectionStatus === 'disconnected' ? 'error' : ''}`} title={ADMIN_API_BASE_URL}>
+              <i />{connectionStatus === 'checking' ? '连接检测中' : connectionStatus === 'disconnected' ? '连接异常' : '服务正常'}
             </span>
             <button className="icon-button" type="button" disabled={refreshing} onClick={refreshSnapshot} aria-label="刷新数据" title={lastUpdated ? `上次更新 ${lastUpdated.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '刷新数据'}>
               <RefreshCw size={17} className={refreshing ? 'spin' : ''} />
@@ -5064,4 +5140,5 @@ function AdminRoot() {
   return <AdminApp admin={admin} onSignedOut={handleSignedOut} />;
 }
 
+document.title = `${brand.name} · 管理端`;
 createRoot(document.getElementById('root')).render(<AdminRoot />);

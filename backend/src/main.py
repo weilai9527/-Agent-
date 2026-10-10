@@ -2468,15 +2468,73 @@ RESUME_FORM_COLUMNS = ", ".join(field for field, _label, _limit in RESUME_FORM_F
 
 
 def load_resume_form_settings() -> dict:
-    """读取管理端配置的学院/专业下拉选项。"""
+    """从管理端组织结构读取学院和专业，兼容职业目录及旧下拉配置。"""
+    colleges_by_name: dict[str, dict] = {}
+
+    def add_college_major(college_name: str, college_id: str, major_name: str = "", major_id: str = "") -> None:
+        name = str(college_name or "").strip()
+        if not name:
+            return
+        college = colleges_by_name.setdefault(name, {"id": college_id or name, "name": name, "majors": []})
+        major = str(major_name or "").strip()
+        if major and not any(item["name"] == major for item in college["majors"]):
+            college["majors"].append({"id": major_id or major, "name": major})
+
+    if DB_ENGINE == "sqlite":
+        campus_tables = {row["name"] for row in all_rows(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('campus_colleges', 'campus_programs')"
+        )}
+    else:
+        campus_tables = {row["name"] for row in all_rows(
+            "SELECT TABLE_NAME AS name FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('campus_colleges', 'campus_programs')"
+        )}
+    if {"campus_colleges", "campus_programs"}.issubset(campus_tables):
+        for row in all_rows("""
+            SELECT colleges.id AS college_id, colleges.name AS college_name,
+                   programs.id AS major_id, programs.name AS major_name
+            FROM campus_colleges AS colleges
+            LEFT JOIN campus_programs AS programs
+              ON programs.college_id = colleges.id AND programs.status = 'active'
+            WHERE colleges.status = 'active'
+            ORDER BY colleges.name, programs.name
+        """):
+            add_college_major(row["college_name"], row["college_id"], row["major_name"], row["major_id"])
+
+    campus_colleges_with_majors = {name for name, college in colleges_by_name.items() if college["majors"]}
+    published = one("SELECT id FROM catalog_versions WHERE status = 'published' ORDER BY revision DESC, created_at DESC LIMIT 1")
+    if published:
+        for row in all_rows("""
+            SELECT colleges.id AS college_id, colleges.name AS college_name,
+                   majors.id AS major_id, majors.name AS major_name
+            FROM catalog_colleges AS colleges
+            LEFT JOIN catalog_majors AS majors
+              ON majors.college_id = colleges.id AND majors.version_id = colleges.version_id AND majors.enabled = 1
+            WHERE colleges.version_id = ? AND colleges.enabled = 1
+            ORDER BY colleges.sort_order, colleges.name, majors.sort_order, majors.name
+        """, (published["id"],)):
+            if str(row["college_name"] or "").strip() in campus_colleges_with_majors:
+                continue
+            add_college_major(row["college_name"], row["college_id"], row["major_name"], row["major_id"])
+
     row = one("SELECT colleges FROM resume_form_settings ORDER BY updated_at DESC LIMIT 1")
-    if not row:
-        return {"colleges": []}
-    try:
-        colleges = json.loads(row["colleges"] or "[]")
-    except (TypeError, ValueError):
-        colleges = []
-    return {"colleges": colleges if isinstance(colleges, list) else []}
+    if row:
+        try:
+            legacy_colleges = json.loads(row["colleges"] or "[]")
+        except (TypeError, ValueError):
+            legacy_colleges = []
+        if isinstance(legacy_colleges, list):
+            for college in legacy_colleges:
+                if not isinstance(college, dict):
+                    continue
+                name = str(college.get("name") or "").strip()
+                if name in colleges_by_name and colleges_by_name[name]["majors"]:
+                    continue
+                add_college_major(name, str(college.get("id") or ""))
+                for major in college.get("majors") or []:
+                    if isinstance(major, dict):
+                        add_college_major(name, str(college.get("id") or ""), major.get("name"), str(major.get("id") or ""))
+    return {"colleges": list(colleges_by_name.values())}
 
 
 def build_resume_text_from_form(form: dict) -> str:
@@ -2498,7 +2556,7 @@ def build_resume_text_from_form(form: dict) -> str:
 
 @app.get("/api/resume-form/settings")
 def get_resume_form_settings(user: dict = Depends(require_auth)):
-    """候选人端读取学院/专业下拉配置（管理端“填写简历设置”维护）。"""
+    """候选人端读取管理端维护的学院和专业。"""
     return load_resume_form_settings()
 
 

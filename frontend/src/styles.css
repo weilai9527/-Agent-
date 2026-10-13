@@ -4447,8 +4447,19 @@ h1 {
 
 .jcmp-body {
   display: grid;
+  /* Let long posting content shrink within the panel instead of being clipped. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   padding: 18px;
+  overflow-wrap: anywhere;
+}
+
+.jcmp-body > *,
+.jcmp-posting > *,
+.jcmp-paste .brief-field,
+.jcmp-paste input,
+.jcmp-paste textarea {
+  min-width: 0;
 }
 
 .jcmp-mode {
@@ -4492,7 +4503,9 @@ h1 {
 }
 
 .jcmp-search:focus-within {
-  border-color: #91caff;
+  border-color: var(--v4-accent, #1677ff);
+  outline: 2px solid var(--v4-accent, #1677ff);
+  outline-offset: 3px;
   box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.1);
 }
 
@@ -4507,6 +4520,18 @@ h1 {
   outline: none;
 }
 
+/* The rounded search wrapper owns the focus ring, including the search icon. */
+.jcmp-search input:focus,
+.jcmp-search input:focus-visible {
+  outline: none;
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+.jcmp-library > .jcmp-hint {
+  margin-top: 12px;
+}
+
 .jcmp-posting-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4519,6 +4544,8 @@ h1 {
 
 .jcmp-posting {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 6px;
   justify-items: start;
   padding: 13px 14px;
@@ -4542,21 +4569,25 @@ h1 {
 
 .jcmp-posting-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
   width: 100%;
 }
 
 .jcmp-posting-head strong {
+  min-width: 0;
+  flex: 1 1 140px;
   color: #111827;
   font-size: 14px;
 }
 
 .jcmp-posting-head span {
+  max-width: 100%;
   margin-left: auto;
   color: #8a96a8;
   font-size: 12px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .jcmp-posting small {
@@ -4572,6 +4603,7 @@ h1 {
 }
 
 .jcmp-posting-skills em {
+  max-width: 100%;
   padding: 3px 8px;
   border: 1px solid #dbe6f5;
   border-radius: 999px;
@@ -4862,7 +4894,7 @@ h1 {
   .jcmp-posting-list,
   .jcmp-dimensions,
   .jcmp-paste-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .jcmp-result {

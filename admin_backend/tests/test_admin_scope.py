@@ -160,6 +160,18 @@ def test_scoped_student_access_and_fresh_admin_database(tmp_path):
         assert listing.status_code == 200, listing.text
         assert listing.json()["registrations"][0]["studentNo"] == "20260003"
         assert listing.json()["registrations"][0]["activated"] is True
+        assert listing.json()["registrations"][0]["classAssigned"] is False
+        imported_user = admin_main.one("SELECT id FROM users WHERE student_no = ?", ("20260003",))
+        assigned = root.patch(
+            f"/api/admin/campus/students/{imported_user['id']}",
+            headers=origin,
+            json={"classId": classes[0]},
+        )
+        assert assigned.status_code == 200, assigned.text
+        registration = root.get("/api/admin/student-registrations").json()["registrations"][0]
+        assert registration["classAssigned"] is True
+        assert registration["className"] == "Allowed"
+        assert admin_main.one("SELECT class_name FROM users WHERE id = ?", (imported_user["id"],))["class_name"] == "Allowed"
         assert root.post(
             "/api/admin/organization/import", headers=origin,
             files={"file": ("old.csv", b"student_no,name", "text/csv")},

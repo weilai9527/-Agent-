@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from .env import first_env_value, is_placeholder_value, reload_runtime_ai_env
+from shared.interviewer_policy import strategy_prompt
 
 
 class KimiFollowupError(RuntimeError):
@@ -253,6 +254,7 @@ def _build_messages(
             "4. 如果候选人回答很短或无效，追问应引导其补充具体经历，而不是强行推进到下一阶段。",
             "5. 优先围绕简历里的真实项目、技能和风险点追问；不要凭空添加候选人没有提过的经历。",
             "6. 电话面试语气，简洁专业，控制在 60 字以内。",
+            *([strategy_prompt(interview, active_agent or {})] if interview.get("interviewer_strategy") else []),
         ]
     )
     user_prompt = "\n".join(
@@ -692,6 +694,7 @@ def generate_opening_question(
                     "只输出一句自然的首问，不要标题、分析或多题列表。",
                     "必须围绕抽中的简历点展开，先点出候选人简历中的真实经历，再问业务背景、个人职责和结果衡量。",
                     "控制在 80 字以内。",
+                    *([strategy_prompt(interview, active_agent or {})] if interview.get("interviewer_strategy") else []),
                 ]
             ),
         },

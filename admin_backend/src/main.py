@@ -11,10 +11,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
+from .job_sync import JobSyncError, fetch_job_feed, import_job_feed
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
@@ -76,16 +79,16 @@ PROJECT_DIR = Path(__file__).resolve().parents[2]
 USER_BACKEND_ENV_PATH = PROJECT_DIR / "backend" / ".env"
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = int(os.environ.get("ADMIN_SESSION_MAX_AGE", str(60 * 60 * 8)))
-# 超级管理员账号定义在代码中（可用环境变量覆盖），不存入数据库由界面创建/删除。
+# 主管理员仅从环境配置读取，禁止内置默认登录凭据。
 MASTER_ADMIN_EMAIL = normalize_email(
     os.environ.get("ADMIN_MASTER_EMAIL")
     or os.environ.get("ADMIN_BOOTSTRAP_EMAIL")
-    or "admin@ai.local"
+    or ""
 )
 MASTER_ADMIN_PASSWORD = (
     os.environ.get("ADMIN_MASTER_PASSWORD")
     or os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
-    or "Admin@2026!Master"
+    or ""
 )
 MASTER_ADMIN_NAME = (
     os.environ.get("ADMIN_MASTER_NAME")
@@ -205,14 +208,13 @@ def admin_student_scope(admin: dict) -> list[dict[str, str]] | None:
     if is_super_admin(admin):
         return None
     raw = admin.get("student_scope")
-    if isinstance(raw, list):
-        return raw
     if isinstance(raw, str):
         try:
-            data = json.loads(raw)
+            raw = json.loads(raw)
         except (TypeError, ValueError):
             return []
-        return data if isinstance(data, list) else []
+    if isinstance(raw, list):
+        return [entry for entry in raw if isinstance(entry, dict) and entry.get("college")]
     return []
 
 
@@ -222,6 +224,8 @@ def scope_allows(scope: list[dict[str, str]] | None, college_id: str | None, pro
     if not scope:
         return False
     for entry in scope:
+        if not isinstance(entry, dict) or not entry.get("college"):
+            continue
         if entry.get("college") and entry["college"] != college_id:
             continue
         if entry.get("program") and entry["program"] != program_id:
@@ -309,6 +313,64 @@ def _ensure_student_in_scope(admin: dict, user_id: str) -> None:
     class_id = row.get("class_id") if row else None
     if not class_id or not scope_allows(scope, college_id, program_id, class_id):
         raise error(403, "该学生不在你管理的数据范围内。")
+
+
+def student_scope_sql(scope: list[dict[str, str]] | None, user_column: str) -> tuple[str, tuple]:
+    """Build a parameterized enrollment boundary; column names are internal constants."""
+    if scope is None:
+        return "1 = 1", ()
+    clauses, params = [], []
+    for entry in scope:
+        if not isinstance(entry, dict) or not entry.get("college"):
+            continue  # Malformed legacy scopes must never grant all-school access.
+        terms = []
+        for key, column in (("college", "sp.college_id"), ("program", "sc.program_id"), ("class", "sc.id")):
+            if entry.get(key):
+                terms.append(f"{column} = ?")
+                params.append(entry[key])
+        clauses.append("(" + " AND ".join(terms) + ")")
+    if not clauses:
+        return "1 = 0", ()
+    return (f"EXISTS (SELECT 1 FROM student_enrollments se "
+            f"JOIN campus_classes sc ON sc.id = se.class_id "
+            f"JOIN campus_programs sp ON sp.id = sc.program_id "
+            f"WHERE se.user_id = {user_column} AND ({' OR '.join(clauses)}))", tuple(params))
+
+
+def registration_scope_checker(admin: dict):
+    """Existing accounts use actual enrollment; pending names must resolve uniquely."""
+    scope = admin_student_scope(admin)
+    if scope is None:
+        return lambda row, destination=False: True
+    if not scope:
+        return lambda row, destination=False: False
+    condition, params = student_scope_sql(scope, "users.id")
+    allowed_users = {row["id"] for row in all_rows(f"SELECT users.id FROM users WHERE {condition}", params)}
+    users_by_no = {row["student_no"]: row["id"] for row in all_rows("SELECT id, student_no FROM users WHERE student_no IS NOT NULL")}
+    by_name = {}
+    for group in all_rows("""
+        SELECT classes.id AS class_id, classes.name AS class_name, programs.id AS program_id,
+               colleges.id AS college_id, colleges.name AS college_name
+        FROM campus_classes classes JOIN campus_programs programs ON programs.id = classes.program_id
+        JOIN campus_colleges colleges ON colleges.id = programs.college_id
+    """):
+        by_name.setdefault((group["college_name"], group["class_name"]), []).append(group)
+
+    def allowed(row, destination=False):
+        owners = {owner for owner in (row.get("user_id"), users_by_no.get(row.get("student_no"))) if owner}
+        if owners and not owners.issubset(allowed_users):
+            return False
+        if owners and not destination:
+            return True
+        matches = by_name.get((str(row.get("college") or "").strip(), str(row.get("class_name") or "").strip()), [])
+        return len(matches) == 1 and scope_allows(scope, matches[0]["college_id"], matches[0]["program_id"], matches[0]["class_id"])
+
+    return allowed
+
+
+def ensure_registration_scope(allowed, row, *, destination=False):
+    if not allowed(row, destination=destination):
+        raise error(403, "该学生或目标班级不在你管理的数据范围内，或班级无法唯一确定。")
 
 
 def require_super_admin(admin: dict = Depends(require_admin)) -> dict:
@@ -449,7 +511,7 @@ def clear_failed_logins(request: Request, email: str) -> None:
 
 
 def bootstrap_master_admin() -> None:
-    """启动时确保代码定义的主管理员存在：角色固定为 super_admin，权限点为全量。"""
+    """启动时同步环境配置的主管理员：角色固定为 super_admin，权限点为全量。"""
     email = MASTER_ADMIN_EMAIL
     if not is_valid_email(email) or len(MASTER_ADMIN_PASSWORD) < 12:
         raise RuntimeError("主管理员配置无效：邮箱需有效且密码至少 12 位。")
@@ -649,12 +711,34 @@ def build_settings() -> dict[str, Any]:
         "reportOpenaiApiKeyConfigured": bool(report_openai_key),
         "reportOpenaiApiKeyMasked": mask_secret(report_openai_key),
         "reportOpenaiModel": backend_env.get("OPENAI_FOLLOWUP_MODEL") or os.environ.get("OPENAI_FOLLOWUP_MODEL", "gpt-4o-mini"),
+        "reportOpenaiBaseUrl": backend_env.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         "reportQwenApiKeyConfigured": bool(report_qwen_key),
         "reportQwenApiKeyMasked": mask_secret(report_qwen_key),
         "reportQwenModel": backend_env.get("QWEN_MODEL") or os.environ.get("QWEN_MODEL", "qwen-plus"),
-        "reportProviderOrder": backend_env.get("REPORT_PROVIDER_ORDER") or os.environ.get("REPORT_PROVIDER_ORDER", "openai,qwen"),
+        "reportQwenBaseUrl": backend_env.get("QWEN_BASE_URL") or os.environ.get("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        **{
+            field: value
+            for prefix, env_prefix, default_model, default_url in (
+                ("reportKimi", "KIMI", "moonshot-v1-8k", "https://api.moonshot.cn/v1"),
+                ("reportDeepseek", "DEEPSEEK", "deepseek-chat", "https://api.deepseek.com"),
+                ("reportCustom", "AI", "", ""),
+            )
+            for key in [configured_secret(backend_env, f"{env_prefix}_API_KEY", *(["MOONSHOT_API_KEY"] if env_prefix == "KIMI" else []))]
+            for field, value in (
+                (f"{prefix}ApiKeyConfigured", bool(key)),
+                (f"{prefix}ApiKeyMasked", mask_secret(key)),
+                (f"{prefix}Model", backend_env.get(f"{env_prefix}_MODEL") or os.environ.get(f"{env_prefix}_MODEL", default_model)),
+                (f"{prefix}BaseUrl", backend_env.get(f"{env_prefix}_BASE_URL") or os.environ.get(f"{env_prefix}_BASE_URL", default_url)),
+            )
+        },
+        "reportProviderOrder": backend_env.get("REPORT_PROVIDER_ORDER") or os.environ.get("REPORT_PROVIDER_ORDER") or backend_env.get("FOLLOWUP_PROVIDER_ORDER") or os.environ.get("FOLLOWUP_PROVIDER_ORDER", "kimi,deepseek,qwen,openai,custom"),
         "reportTimeout": int(backend_env.get("AI_REPORT_TIMEOUT") or os.environ.get("AI_REPORT_TIMEOUT", "60")),
-        "reportRetries": int(backend_env.get("AI_REPORT_HTTP_RETRIES") or os.environ.get("AI_REPORT_HTTP_RETRIES", "1")),
+        "reportRetries": int(backend_env.get("AI_REPORT_HTTP_RETRIES") or os.environ.get("AI_REPORT_HTTP_RETRIES", "0")),
+        "evaluationProviderOrder": backend_env.get("EVALUATION_PROVIDER_ORDER") or os.environ.get("EVALUATION_PROVIDER_ORDER") or backend_env.get("FOLLOWUP_PROVIDER_ORDER") or os.environ.get("FOLLOWUP_PROVIDER_ORDER", "kimi,deepseek,qwen,openai,custom"),
+        "evaluationTimeout": int(backend_env.get("AI_EVALUATION_TIMEOUT") or os.environ.get("AI_EVALUATION_TIMEOUT", "12")),
+        "evaluationRetries": int(backend_env.get("AI_EVALUATION_HTTP_RETRIES") or os.environ.get("AI_EVALUATION_HTTP_RETRIES", "0")),
+        "evaluationAttempts": int(backend_env.get("AI_EVALUATION_PROVIDER_ATTEMPTS") or os.environ.get("AI_EVALUATION_PROVIDER_ATTEMPTS", "1")),
+        "reportAttempts": int(backend_env.get("AI_REPORT_PROVIDER_ATTEMPTS") or os.environ.get("AI_REPORT_PROVIDER_ATTEMPTS", "2")),
         "dashscopeApiKeyConfigured": bool(dashscope_key),
         "dashscopeApiKeyMasked": mask_secret(dashscope_key),
         "qwenOmniApiKeyConfigured": bool(qwen_omni_key),
@@ -1042,6 +1126,48 @@ def list_candidates(scope: list[dict[str, str]] | None = None) -> list[dict[str,
     return result
 
 
+def dashboard_roster(scope: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    """Minimal current roster for workbench tasks, filtered before returning data."""
+    rows = all_rows("""
+        SELECT reg.id, reg.name, reg.student_no, reg.college, reg.class_name,
+               reg.gender, reg.counselor, reg.created_at,
+               users.id AS user_id, enrollments.class_id
+        FROM student_registrations AS reg
+        LEFT JOIN users ON users.id = reg.user_id
+        LEFT JOIN student_enrollments AS enrollments ON enrollments.user_id = users.id
+        WHERE reg.deleted_at IS NULL
+        ORDER BY reg.created_at ASC, reg.student_no
+    """)
+    structure = all_rows("""
+        SELECT classes.id AS class_id, classes.name AS class_name,
+               programs.id AS program_id, colleges.id AS college_id, colleges.name AS college_name
+        FROM campus_classes AS classes
+        JOIN campus_programs AS programs ON programs.id = classes.program_id
+        JOIN campus_colleges AS colleges ON colleges.id = programs.college_id
+    """)
+    by_id = {item["class_id"]: item for item in structure}
+    by_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in structure:
+        by_name.setdefault((item["college_name"], item["class_name"]), []).append(item)
+    result = []
+    for row in rows:
+        matches = by_name.get((row["college"], row["class_name"]), [])
+        group = by_id.get(row["class_id"]) or (matches[0] if len(matches) == 1 else {})
+        scope_group = by_id.get(row["class_id"], {}) if row["user_id"] else group
+        if not scope_allows(scope, scope_group.get("college_id"), scope_group.get("program_id"), scope_group.get("class_id")):
+            continue
+        missing = [label for key, label in (("college", "学院"), ("student_no", "学号"), ("name", "姓名"),
+                   ("gender", "性别"), ("class_name", "班级"), ("counselor", "辅导员")) if not str(row.get(key) or "").strip()]
+        result.append({
+            "id": row["id"], "userId": row["user_id"], "name": row["name"],
+            "studentNo": row["student_no"], "college": group.get("college_name") or row["college"] or "",
+            "className": group.get("class_name") or row["class_name"] or "",
+            "activated": bool(row["user_id"]), "classAssigned": bool(row["class_id"]),
+            "missing": missing, "createdAt": str(row["created_at"]),
+        })
+    return result
+
+
 def get_candidate_detail(candidate_id: str) -> dict[str, Any]:
     row = one(
         """
@@ -1067,11 +1193,13 @@ def get_candidate_detail(candidate_id: str) -> dict[str, Any]:
     return row
 
 
-def list_interviews() -> list[dict[str, Any]]:
+def list_interviews(scope: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    condition, params = student_scope_sql(scope, "interviews.user_id")
     rows = all_rows(
-        """
-        SELECT interviews.id, interviews.target_role, interviews.interview_type, interviews.status,
+        f"""
+        SELECT interviews.id, interviews.user_id, interviews.target_role, interviews.interview_type, interviews.status,
                interviews.updated_at, users.name AS candidate,
+               users.student_no, users.college, users.class_name,
                COALESCE(agent_counts.agent_count, 0) AS agent_count,
                COALESCE(message_counts.message_count, 0) AS message_count,
                COALESCE(message_counts.answer_count, 0) AS answer_count
@@ -1088,9 +1216,9 @@ def list_interviews() -> list[dict[str, Any]]:
           FROM interview_messages
           GROUP BY interview_id
         ) AS message_counts ON message_counts.interview_id = interviews.id
+        WHERE {condition}
         ORDER BY interviews.updated_at DESC, interviews.created_at DESC
-        LIMIT 50
-        """
+        """, params,
     )
     return [
         {
@@ -1098,6 +1226,10 @@ def list_interviews() -> list[dict[str, Any]]:
             "candidate": row["candidate"],
             "role": row.get("target_role") or "-",
             "type": row.get("interview_type") or "综合模拟",
+            "userId": row.get("user_id"),
+            "studentNo": row.get("student_no") or "",
+            "college": row.get("college") or "",
+            "className": row.get("class_name") or "",
             "status": status_label(row.get("status")),
             "agents": f"{int(row.get('agent_count') or 0)}/3",
             "messages": int(row.get("message_count") or 0),
@@ -1247,18 +1379,20 @@ def get_interview_detail(interview_id: str) -> dict[str, Any]:
     return {"interview": interview, "agents": agents, "messages": messages}
 
 
-def list_reports() -> list[dict[str, Any]]:
+def list_reports(scope: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    condition, params = student_scope_sql(scope, "reports.user_id")
     rows = all_rows(
-        """
-        SELECT reports.id, reports.total_score, reports.grade, reports.pass_recommendation,
+        f"""
+        SELECT reports.id, reports.user_id, reports.total_score, reports.grade, reports.pass_recommendation,
                reports.review_status, reports.provider, reports.model, reports.fallback,
-               reports.created_at, users.name AS candidate, interviews.target_role
+               reports.created_at, users.name AS candidate, interviews.target_role,
+               users.student_no, users.college, users.class_name
         FROM interview_reports AS reports
         JOIN users ON users.id = reports.user_id
         JOIN interview_sessions AS interviews ON interviews.id = reports.interview_id
+        WHERE {condition}
         ORDER BY reports.updated_at DESC, reports.created_at DESC
-        LIMIT 50
-        """
+        """, params,
     )
     return [
         {
@@ -1266,6 +1400,10 @@ def list_reports() -> list[dict[str, Any]]:
             "candidate": row["candidate"],
             "role": row.get("target_role") or "-",
             "score": int(row.get("total_score") or 0),
+            "userId": row.get("user_id"),
+            "studentNo": row.get("student_no") or "",
+            "college": row.get("college") or "",
+            "className": row.get("class_name") or "",
             "grade": row.get("grade") or "-",
             "recommendation": recommendation_label(row.get("pass_recommendation")),
             "reviewStatus": {"approved": "已复核", "rejected": "复核未通过", "pending": "待复核"}.get(row.get("review_status"), "待复核"),
@@ -1444,6 +1582,8 @@ def list_campus_students() -> list[dict[str, Any]]:
             "studentNo": row.get("student_no") or "-",
             "collegeId": row.get("college_id"),
             "college": row.get("college_name") or "未归属",
+            "registeredCollege": row.get("user_college") or "",
+            "registeredClassName": row.get("user_class_name") or "",
             "programId": row.get("program_id"),
             "program": row.get("program_name") or "未归属",
             "direction": row.get("direction") or "",
@@ -1657,20 +1797,23 @@ def upsert_student_enrollment(
     return one("SELECT * FROM student_enrollments WHERE user_id = ?", (user_id,)) or {}
 
 
-def build_metrics(reports: list[dict[str, Any]]) -> list[dict[str, str]]:
-    users = count_value("SELECT COUNT(*) AS count FROM users")
-    interviews = count_value("SELECT COUNT(*) AS count FROM interview_sessions")
-    completed = count_value("SELECT COUNT(*) AS count FROM interview_sessions WHERE status = ?", ("completed",))
-    report_count = count_value("SELECT COUNT(*) AS count FROM interview_reports")
-    average_score = avg_value("SELECT AVG(total_score) AS value FROM interview_reports")
+def build_metrics(reports: list[dict[str, Any]], scope=None, *, can_students=True, can_interviews=True, can_reports=True) -> list[dict[str, str]]:
+    user_filter, user_params = student_scope_sql(scope, "users.id")
+    interview_filter, interview_params = student_scope_sql(scope, "interview_sessions.user_id")
+    users = count_value(f"SELECT COUNT(*) AS count FROM users WHERE {user_filter}", user_params) if can_students else 0
+    interviews = count_value(f"SELECT COUNT(*) AS count FROM interview_sessions WHERE {interview_filter}", interview_params) if can_interviews else 0
+    completed = count_value(f"SELECT COUNT(*) AS count FROM interview_sessions WHERE status = ? AND {interview_filter}", ("completed", *interview_params)) if can_interviews else 0
+    report_count = len(reports)
+    average_score = round(sum(report["score"] for report in reports) / report_count, 1) if report_count else 0
     review_count = len([report for report in reports if report["reviewStatus"] != "已复核"])
     completion_rate = round(completed / interviews * 100) if interviews else 0
-    return [
+    metrics = [
         {"label": "注册用户", "value": f"{users:,}", "note": "来自 users", "tone": "blue"},
         {"label": "面试任务", "value": f"{interviews:,}", "note": f"完成率 {completion_rate}%", "tone": "green"},
         {"label": "报告生成", "value": f"{report_count:,}", "note": f"平均分 {average_score}", "tone": "amber"},
         {"label": "待复核", "value": f"{review_count:,}", "note": "按分数规则计算", "tone": "red"},
     ]
+    return [metric for metric, visible in zip(metrics, (can_students, can_interviews, can_reports, can_reports)) if visible]
 
 
 @app.get("/api/admin/campus/overview")
@@ -2107,13 +2250,54 @@ async def import_campus_structure(
     }
 
 
+@app.get("/api/admin/campus/program-jobs")
+def program_job_options(admin: dict = Depends(require_permission("manageCatalog", "manageOrganization", "manageStudents"))):
+    scope = None if is_super_admin(admin) or "manageOrganization" in admin_permissions(admin) or "manageCatalog" in admin_permissions(admin) else admin_student_scope(admin)
+    data = campus_overview_data(scope=scope)
+    tree = catalog_tree(db) or {}
+    jobs = []
+    for college in tree.get("colleges", []):
+        for major in college.get("majors", []):
+            for training in major.get("training_directions", []):
+                for direction in training.get("employment_directions", []):
+                    for job in direction.get("jobs", []):
+                        if job.get("enabled"):
+                            jobs.append({"id": job["id"], "name": job["name"], "code": job["code"],
+                                         "description": job.get("description") or "",
+                                         "competencies": job.get("competencies") or [], "sourceMajor": major["name"]})
+    return {"colleges": data["colleges"], "programs": data["programs"], "jobs": jobs,
+            "publishedVersion": tree.get("version"), "canEdit": is_super_admin(admin) or "manageOrganization" in admin_permissions(admin)}
+
+
 @app.put("/api/admin/campus/programs/{program_id}/jobs")
 async def replace_program_jobs(request: Request, program_id: str, admin: dict = Depends(require_permission("manageOrganization"))):
     validate_admin_origin(request)
     if not one("SELECT id FROM campus_programs WHERE id = ?", (program_id,)):
         raise error(404, "专业不存在。")
     body = await request.json()
-    job_role_ids = list(dict.fromkeys(str(item).strip() for item in (body.get("jobRoleIds") or []) if str(item).strip()))[:50]
+    if not isinstance(body, dict):
+        raise error(400, "岗位配置格式不正确。")
+    if "jobs" in body:
+        if not isinstance(body["jobs"], list) or len(body["jobs"]) > 50:
+            raise error(400, "每个专业最多关联 50 个岗位。")
+        mappings = []
+        seen = set()
+        for item in body["jobs"]:
+            if not isinstance(item, dict):
+                raise error(400, "岗位配置格式不正确。")
+            job_id = str(item.get("jobRoleId") or "").strip()
+            priority = item.get("priority", "recommended")
+            if not job_id or job_id in seen or not isinstance(priority, str) or priority not in {"recommended", "optional"}:
+                raise error(400, "岗位不能为空或重复，推荐程度只能是重点推荐或一般推荐。")
+            mappings.append((job_id, priority))
+            seen.add(job_id)
+    else:
+        raw_ids = body.get("jobRoleIds") or []
+        if not isinstance(raw_ids, list) or len(raw_ids) > 50:
+            raise error(400, "每个专业最多关联 50 个岗位。")
+        ids = list(dict.fromkeys(str(item).strip() for item in raw_ids if str(item).strip()))
+        mappings = [(job_id, "recommended" if index < 3 else "optional") for index, job_id in enumerate(ids)]
+    job_role_ids = [job_id for job_id, _priority in mappings]
     for job_role_id in job_role_ids:
         job = one(
             """
@@ -2128,17 +2312,17 @@ async def replace_program_jobs(request: Request, program_id: str, admin: dict = 
     try:
         db.begin()
         db.execute("DELETE FROM program_job_roles WHERE program_id = ?", (program_id,))
-        for index, job_role_id in enumerate(job_role_ids):
+        for job_role_id, priority in mappings:
             db.execute(
                 "INSERT INTO program_job_roles (id, program_id, job_role_id, priority) VALUES (?, ?, ?, ?)",
-                (str(uuid4()), program_id, job_role_id, "recommended" if index < 3 else "optional"),
+                (str(uuid4()), program_id, job_role_id, priority),
             )
         db.commit()
     except Exception:
         db.rollback()
         raise
     record_audit(request, admin, "campus.program.jobs.update", target_type="campus_program", target_id=program_id, summary=f"更新推荐岗位：{len(job_role_ids)} 个")
-    return {"ok": True, "jobRoleIds": job_role_ids}
+    return {"ok": True, "jobRoleIds": job_role_ids, "jobs": [{"jobRoleId": job_id, "priority": priority} for job_id, priority in mappings]}
 
 
 @app.patch("/api/admin/campus/students/{user_id}")
@@ -2150,19 +2334,50 @@ async def update_campus_student(request: Request, user_id: str, admin: dict = De
     class_id = body.get("classId", existing.get("class_id"))
     if class_id == "":
         class_id = None
+    class_row = None
     if class_id:
         _ensure_class_in_scope(admin, class_id)
+        class_row = one(
+            """
+            SELECT classes.name AS class_name, colleges.name AS college_name
+            FROM campus_classes AS classes
+            JOIN campus_programs AS programs ON programs.id = classes.program_id
+            JOIN campus_colleges AS colleges ON colleges.id = programs.college_id
+            WHERE classes.id = ?
+            """,
+            (class_id,),
+        )
     status = str(body.get("status", existing.get("status") or "active"))
     if status not in {"active", "inactive"}:
         raise error(400, "学生归属状态不正确。")
-    enrollment = upsert_student_enrollment(
-        user_id,
-        class_id=class_id,
-        student_no=str(body.get("studentNo", existing.get("student_no") or "")).strip(),
-        status=status,
-        focus_flag=bool(body.get("focus", existing.get("focus_flag") or False)),
-        note=str(body.get("note", existing.get("note") or "")).strip(),
-    )
+    try:
+        db.begin()
+        enrollment = upsert_student_enrollment(
+            user_id,
+            class_id=class_id,
+            student_no=str(body.get("studentNo", existing.get("student_no") or "")).strip(),
+            status=status,
+            focus_flag=bool(body.get("focus", existing.get("focus_flag") or False)),
+            note=str(body.get("note", existing.get("note") or "")).strip(),
+            commit=False,
+        )
+        if "classId" in body and class_row:
+            db.execute(
+                "UPDATE users SET college = ?, class_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (class_row["college_name"], class_row["class_name"], user_id),
+            )
+            db.execute(
+                """
+                UPDATE student_registrations
+                SET college = ?, class_name = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND deleted_at IS NULL
+                """,
+                (class_row["college_name"], class_row["class_name"], user_id),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     record_audit(request, admin, "campus.student.update", target_type="student", target_id=user_id, summary="更新学生组织归属与成长关注状态")
     return {"enrollment": enrollment}
 
@@ -2465,7 +2680,11 @@ async def create_student_registration(request: Request, admin: dict = Depends(re
     if len(name) > 64:
         raise error(400, "姓名长度不能超过 64 个字符。")
 
-    existing = one("SELECT id FROM student_registrations WHERE student_no = ?", (student_no,))
+    allowed = registration_scope_checker(admin)
+    existing = one("SELECT * FROM student_registrations WHERE student_no = ?", (student_no,))
+    if existing:
+        ensure_registration_scope(allowed, existing)
+    ensure_registration_scope(allowed, {"student_no": student_no, "college": college, "class_name": class_name}, destination=True)
     created = not existing
     try:
         db.begin()
@@ -2518,6 +2737,7 @@ async def import_student_registrations(
     updated = 0
     activated = 0
     skipped: list[dict[str, str]] = []
+    allowed = registration_scope_checker(admin)
     try:
         db.begin()
         for index, row in enumerate(rows, start=2):
@@ -2530,7 +2750,10 @@ async def import_student_registrations(
             gender = str(row.get("性别") or row.get("gender") or "").strip()
             class_name = str(row.get("班级") or row.get("class_name") or "").strip()
             counselor = str(row.get("辅导员") or row.get("counselor") or "").strip()
-            existing = one("SELECT id, user_id FROM student_registrations WHERE student_no = ?", (student_no,))
+            existing = one("SELECT * FROM student_registrations WHERE student_no = ?", (student_no,))
+            if existing:
+                ensure_registration_scope(allowed, existing)
+            ensure_registration_scope(allowed, {"student_no": student_no, "college": college, "class_name": class_name}, destination=True)
             if existing:
                 registration_id = existing["id"]
                 db.execute(
@@ -2567,12 +2790,16 @@ async def import_student_registrations(
 
 @app.get("/api/admin/student-registrations")
 def list_student_registrations(admin: dict = Depends(require_permission("manageStudents"))):
+    allowed = registration_scope_checker(admin)
     rows = all_rows(
         """
-        SELECT id, student_no, name, college, gender, class_name, counselor, user_id, imported_by, created_at, updated_at
-        FROM student_registrations
-        WHERE deleted_at IS NULL
-        ORDER BY created_at DESC, student_no
+        SELECT reg.id, reg.student_no, reg.name, reg.college, reg.gender, reg.class_name,
+               reg.counselor, reg.user_id, reg.imported_by, reg.created_at, reg.updated_at,
+               enrollment.class_id AS enrollment_class_id
+        FROM student_registrations AS reg
+        LEFT JOIN student_enrollments AS enrollment ON enrollment.user_id = reg.user_id
+        WHERE reg.deleted_at IS NULL
+        ORDER BY reg.created_at DESC, reg.student_no
         """
     )
     return {
@@ -2594,10 +2821,11 @@ def list_student_registrations(admin: dict = Depends(require_permission("manageS
                     ("辅导员", row["counselor"]),
                 ) if not (value or "").strip()],
                 "activated": bool(row["user_id"]),
+                "classAssigned": bool(row["enrollment_class_id"]),
                 "importedBy": row["imported_by"],
                 "createdAt": str(row["created_at"]),
             }
-            for row in rows
+            for row in rows if allowed(row)
         ]
     }
 
@@ -2606,9 +2834,10 @@ def list_student_registrations(admin: dict = Depends(require_permission("manageS
 def revoke_all_registration_accounts(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
     """批量删除全部已开通的学生账号，注册名单保留并回到「待激活」。"""
     validate_admin_origin(request)
-    rows = all_rows(
-        "SELECT id, user_id FROM student_registrations WHERE user_id IS NOT NULL AND user_id != '' ORDER BY student_no"
-    )
+    allowed = registration_scope_checker(admin)
+    rows = [row for row in all_rows(
+        "SELECT * FROM student_registrations WHERE deleted_at IS NULL AND user_id IS NOT NULL AND user_id != '' ORDER BY student_no"
+    ) if allowed(row)]
     revoked = 0
     try:
         db.begin()
@@ -2636,9 +2865,10 @@ def revoke_student_registration_account(
 ):
     """删除单个已激活学生的账号，注册名单保留并回到「待激活」。"""
     validate_admin_origin(request)
-    existing = one("SELECT id, student_no, name, user_id FROM student_registrations WHERE id = ?", (registration_id,))
+    existing = one("SELECT * FROM student_registrations WHERE id = ?", (registration_id,))
     if not existing:
         raise error(404, "该注册信息不存在。")
+    ensure_registration_scope(registration_scope_checker(admin), existing)
     if not existing.get("user_id"):
         raise error(409, "该学生尚未开通账号，无需删除。")
     try:
@@ -2667,9 +2897,10 @@ def delete_student_registration(request: Request, registration_id: str, admin: d
     但保留 user_id 关联，学生页据此把该账号标注为「名单已删除」。
     """
     validate_admin_origin(request)
-    existing = one("SELECT id, student_no, name, user_id FROM student_registrations WHERE id = ? AND deleted_at IS NULL", (registration_id,))
+    existing = one("SELECT * FROM student_registrations WHERE id = ? AND deleted_at IS NULL", (registration_id,))
     if not existing:
         raise error(404, "该注册信息不存在。")
+    ensure_registration_scope(registration_scope_checker(admin), existing)
     db.execute("UPDATE student_registrations SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (registration_id,))
     db.commit()
     kept = "，账号保留并标注为名单已删除" if existing.get("user_id") else ""
@@ -2681,11 +2912,19 @@ def delete_student_registration(request: Request, registration_id: str, admin: d
 def clear_student_registrations(request: Request, admin: dict = Depends(require_permission("manageStudents"))):
     """清空注册名单：同样只软删除，已开通的账号全部保留并标注。"""
     validate_admin_origin(request)
-    kept = one("SELECT COUNT(*) AS total FROM student_registrations WHERE deleted_at IS NULL AND user_id IS NOT NULL AND user_id != ''")
-    db.execute("UPDATE student_registrations SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL")
-    db.commit()
-    record_audit(request, admin, "student_registrations.clear", summary=f"清空全部学生注册信息，保留已开通账号 {int((kept or {}).get('total') or 0)} 个")
-    return {"ok": True, "accountsKept": int((kept or {}).get("total") or 0)}
+    allowed = registration_scope_checker(admin)
+    rows = [row for row in all_rows("SELECT * FROM student_registrations WHERE deleted_at IS NULL") if allowed(row)]
+    kept = sum(bool(row.get("user_id")) for row in rows)
+    try:
+        db.begin()
+        for row in rows:
+            db.execute("UPDATE student_registrations SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (row["id"],))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    record_audit(request, admin, "student_registrations.clear", summary=f"清空当前数据范围学生注册信息，保留已开通账号 {kept} 个")
+    return {"ok": True, "accountsKept": kept}
 
 
 @app.post("/api/admin/student-registrations/activate")
@@ -2700,6 +2939,8 @@ def activate_student_registrations(request: Request, admin: dict = Depends(requi
         ORDER BY student_no
         """
     )
+    allowed = registration_scope_checker(admin)
+    rows = [row for row in rows if allowed(row, destination=True)]
     created = 0
     existing = 0
     skipped = 0
@@ -3010,7 +3251,7 @@ def evaluate_job_posting_import(content: bytes) -> dict[str, Any]:
 
 
 def _job_posting_scope_note() -> str:
-    return "招聘信息库包含手动录入与 Excel 导入的岗位，可选择性关联岗位知识库中的标准岗位。"
+    return "招聘信息库包含手动录入、Excel 导入和数据源同步的岗位，可选择性关联岗位知识库中的标准岗位。"
 
 
 @app.get("/api/admin/job-postings")
@@ -3027,6 +3268,7 @@ def admin_list_job_postings(
             for role in _published_job_role_map().values()
         ],
         "scopeNote": _job_posting_scope_note(),
+        "syncConfigured": bool(os.environ.get("JOB_POSTING_SYNC_ENDPOINT", "").strip()),
     }
 
 
@@ -3100,19 +3342,18 @@ async def admin_sync_job_postings(
     request: Request,
     admin: dict = Depends(require_permission("manageCatalog")),
 ):
-    """预留的第三方招聘数据源同步入口。"""
+    """读取运维配置的 JSON 数据源，按来源与外部编号更新岗位。"""
     validate_admin_origin(request)
-    endpoint = str(os.environ.get("JOB_POSTING_SYNC_ENDPOINT") or "").strip()
-    if not endpoint:
-        raise error(
-            400,
-            "尚未配置第三方招聘数据源。请设置环境变量 JOB_POSTING_SYNC_ENDPOINT 后再使用同步功能。",
-        )
-    raise error(
-        501,
-        "第三方招聘数据源同步接口已预留，但当前版本尚未接入具体数据源（"
-        f"{endpoint}）。请先使用手动录入或 Excel 导入。",
+    try:
+        rows = await run_in_threadpool(fetch_job_feed)
+        result = import_job_feed(db, rows, created_by=str(admin.get("email") or ""))
+    except JobSyncError as exc:
+        raise error(400, str(exc)) from None
+    record_audit(
+        request, admin, "job_postings.sync", target_type="job_posting",
+        summary=f"招聘同步：新增 {result['created']}，更新 {result['updated']}，失败 {result['skipped']}",
     )
+    return result
 
 
 @app.post("/api/admin/job-postings", status_code=201)
@@ -3756,7 +3997,6 @@ def security_logs(
 @app.get("/api/admin/snapshot")
 def snapshot(admin: dict = Depends(require_admin)):
     try:
-        reports = list_reports()
         is_super = is_super_admin(admin)
         perms = set(ALL_PERMISSIONS) if is_super else admin_permissions(admin)
         can_students = "manageStudents" in perms
@@ -3765,10 +4005,12 @@ def snapshot(admin: dict = Depends(require_admin)):
         can_model = "manageModelConfig" in perms
         can_catalog = "manageCatalog" in perms
         scope = admin_student_scope(admin)
+        reports = list_reports(scope) if can_reports else []
         return {
-            "metrics": build_metrics(reports),
+            "metrics": build_metrics(reports, scope, can_students=can_students, can_interviews=can_interviews, can_reports=can_reports),
             "candidates": list_candidates(scope=scope) if can_students else [],
-            "interviews": list_interviews() if can_interviews else [],
+            "dashboardRoster": dashboard_roster(scope) if can_students else None,
+            "interviews": list_interviews(scope) if can_interviews else [],
             "reports": reports if can_reports else [],
             "agents": list_agent_templates() if can_model else [],
             "auditLogs": list_audit_logs(30) if is_super else [],
@@ -3787,6 +4029,7 @@ def snapshot(admin: dict = Depends(require_admin)):
                 "canManageSettings": is_super,
                 "canViewAudit": is_super,
                 "canViewCatalog": can_catalog,
+                "canViewProgramJobs": can_catalog or can_students or "manageOrganization" in perms,
                 "canWriteCatalog": can_catalog,
                 "canImportCatalog": can_catalog,
                 "canPublishCatalog": can_catalog,
@@ -3984,6 +4227,10 @@ def candidate_detail(request: Request, candidate_id: str, admin: dict = Depends(
 
 @app.get("/api/admin/interviews/{interview_id}")
 def interview_detail(request: Request, interview_id: str, admin: dict = Depends(require_permission("viewInterviews"))):
+    owner = one("SELECT user_id FROM interview_sessions WHERE id = ?", (interview_id,))
+    if not owner:
+        raise error(404, "面试不存在。")
+    _ensure_student_in_scope(admin, owner["user_id"])
     result = get_interview_detail(interview_id)
     if is_super_admin(admin) or "viewReports" in admin_permissions(admin):
         result["reviewReport"] = one(
@@ -4000,6 +4247,10 @@ def interview_detail(request: Request, interview_id: str, admin: dict = Depends(
 
 @app.get("/api/admin/reports/{report_id}")
 def report_detail(request: Request, report_id: str, admin: dict = Depends(require_permission("viewReports"))):
+    owner = one("SELECT user_id FROM interview_reports WHERE id = ?", (report_id,))
+    if not owner:
+        raise error(404, "报告不存在。")
+    _ensure_student_in_scope(admin, owner["user_id"])
     result = {"report": get_report_detail(report_id)}
     record_audit(request, admin, "report.view", target_type="report", target_id=report_id, summary="查看面试报告")
     return result
@@ -4012,8 +4263,10 @@ async def review_report(request: Request, report_id: str, admin: dict = Depends(
     status = str(body.get("status") or "").strip()
     if status not in {"approved", "rejected", "pending"}:
         raise error(400, "复核状态必须是 approved、rejected 或 pending。")
-    if not one("SELECT id FROM interview_reports WHERE id = ?", (report_id,)):
+    owner = one("SELECT user_id FROM interview_reports WHERE id = ?", (report_id,))
+    if not owner:
         raise error(404, "报告不存在。")
+    _ensure_student_in_scope(admin, owner["user_id"])
     db.execute(
         """UPDATE interview_reports
            SET review_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP,
@@ -4072,10 +4325,13 @@ def _validate_scope(values: Any) -> list[dict[str, str]]:
         class_id = str(entry.get("class") or "").strip()
         if not college or not one("SELECT id FROM campus_colleges WHERE id = ?", (college,)):
             raise error(400, "数据范围包含不存在的学院。")
-        if program and not one("SELECT id FROM campus_programs WHERE id = ?", (program,)):
-            raise error(400, "数据范围包含不存在的专业。")
-        if class_id and not one("SELECT id FROM campus_classes WHERE id = ?", (class_id,)):
-            raise error(400, "数据范围包含不存在的班级。")
+        if program and not one("SELECT id FROM campus_programs WHERE id = ? AND college_id = ?", (program, college)):
+            raise error(400, "数据范围中的专业不属于所选学院。")
+        if class_id:
+            group = one("SELECT sc.program_id, sp.college_id FROM campus_classes sc JOIN campus_programs sp ON sp.id = sc.program_id WHERE sc.id = ?", (class_id,))
+            if not group or group["college_id"] != college or (program and group["program_id"] != program):
+                raise error(400, "数据范围中的班级不属于所选学院或专业。")
+            program = group["program_id"]
         normalized.append({"college": college, "program": program, "class": class_id})
     return normalized
 
@@ -4276,6 +4532,24 @@ async def review_permission_request(request: Request, request_id: str, admin: di
     return {"request": get_permission_request(request_id)}
 
 
+@app.get("/api/admin/interviewer-policy")
+def get_admin_interviewer_policy(admin: dict = Depends(require_super_admin)):
+    from shared.interviewer_policy import load_policy, OPTIONS
+    return {"policy": load_policy(db), "options": {key: list(values) for key, values in OPTIONS.items()}}
+
+
+@app.put("/api/admin/interviewer-policy")
+async def update_interviewer_policy(request: Request, admin: dict = Depends(require_super_admin)):
+    from shared.interviewer_policy import save_policy
+    validate_admin_origin(request)
+    try:
+        policy = save_policy(db, await request.json())
+    except ValueError as exc:
+        raise error(400, str(exc)) from exc
+    record_audit(request, admin, "interviewer_policy.update", target_type="interviewer_policy", target_id="default", summary="更新面试官默认策略与学生可选范围，仅影响新建面试")
+    return {"policy": policy}
+
+
 @app.patch("/api/admin/settings")
 async def update_settings(request: Request, admin: dict = Depends(require_super_admin)):
     validate_admin_origin(request)
@@ -4288,15 +4562,32 @@ async def update_settings(request: Request, admin: dict = Depends(require_super_
         "OPENAI_FOLLOWUP_MODEL": "reportOpenaiModel",
         "QWEN_API_KEY": "reportQwenApiKey",
         "QWEN_MODEL": "reportQwenModel",
+        "OPENAI_BASE_URL": "reportOpenaiBaseUrl",
+        "QWEN_BASE_URL": "reportQwenBaseUrl",
+        "KIMI_API_KEY": "reportKimiApiKey",
+        "KIMI_MODEL": "reportKimiModel",
+        "KIMI_BASE_URL": "reportKimiBaseUrl",
+        "DEEPSEEK_API_KEY": "reportDeepseekApiKey",
+        "DEEPSEEK_MODEL": "reportDeepseekModel",
+        "DEEPSEEK_BASE_URL": "reportDeepseekBaseUrl",
+        "AI_API_KEY": "reportCustomApiKey",
+        "AI_MODEL": "reportCustomModel",
+        "AI_BASE_URL": "reportCustomBaseUrl",
         "REPORT_PROVIDER_ORDER": "reportProviderOrder",
         "AI_REPORT_TIMEOUT": "reportTimeout",
         "AI_REPORT_HTTP_RETRIES": "reportRetries",
+        "AI_REPORT_PROVIDER_ATTEMPTS": "reportAttempts",
+        "EVALUATION_PROVIDER_ORDER": "evaluationProviderOrder",
+        "AI_EVALUATION_TIMEOUT": "evaluationTimeout",
+        "AI_EVALUATION_HTTP_RETRIES": "evaluationRetries",
+        "AI_EVALUATION_PROVIDER_ATTEMPTS": "evaluationAttempts",
         "DASHSCOPE_API_KEY": "dashscopeApiKey",
         "DASHSCOPE_TTS_MODEL": "qwenTtsModel",
         "DASHSCOPE_TTS_VOICE": "qwenTtsVoice",
         "DASHSCOPE_TTS_REGION": "qwenTtsRegion",
         "DASHSCOPE_WORKSPACE_ID": "qwenTtsWorkspaceId",
         "QWEN_OMNI_REALTIME_MODEL": "qwenOmniModel",
+        "QWEN_OMNI_REALTIME_API_KEY": "qwenOmniApiKey",
         "QWEN_OMNI_REALTIME_VOICE": "qwenOmniVoice",
         "QWEN_OMNI_REALTIME_REGION": "qwenOmniRegion",
         "QWEN_OMNI_REALTIME_WORKSPACE_ID": "qwenOmniWorkspaceId",
@@ -4304,30 +4595,44 @@ async def update_settings(request: Request, admin: dict = Depends(require_super_
     }
     updates: dict[str, str] = {}
     for env_key, body_key in allowed_fields.items():
-        value = str(body.get(body_key) or "").strip()
-        if value:
+        if body_key not in body or body[body_key] is None:
+            continue
+        value = str(body[body_key]).strip()
+        if value or body_key in {"qwenOmniEndpoint", "qwenOmniWorkspaceId", "qwenTtsWorkspaceId", "reportCustomModel", "reportCustomBaseUrl"}:
             if any(character in value for character in ("\r", "\n", "\0")):
                 raise error(400, f"配置项 {body_key} 包含非法字符。")
             updates[env_key] = value
-    for key in ("OPENAI_API_KEY", "QWEN_API_KEY"):
+    for key in ("OPENAI_API_KEY", "QWEN_API_KEY", "KIMI_API_KEY", "DEEPSEEK_API_KEY", "AI_API_KEY", "OPENAI_REALTIME_API_KEY", "QWEN_OMNI_REALTIME_API_KEY", "DASHSCOPE_API_KEY"):
         if key in updates and (len(updates[key]) > 4096 or is_placeholder_secret(updates[key])):
-            raise error(400, "报告 API Key 格式无效，请填写真实密钥。")
-    for key in ("OPENAI_FOLLOWUP_MODEL", "QWEN_MODEL"):
+            raise error(400, "API Key 格式无效，请填写真实密钥。")
+    for key in ("OPENAI_FOLLOWUP_MODEL", "QWEN_MODEL", "KIMI_MODEL", "DEEPSEEK_MODEL", "AI_MODEL", "OPENAI_REALTIME_MODEL", "QWEN_OMNI_REALTIME_MODEL", "DASHSCOPE_TTS_MODEL"):
         if key in updates and (len(updates[key]) > 120 or not all(character.isalnum() or character in "-._:/" for character in updates[key])):
-            raise error(400, "报告模型名称格式无效。")
-    if "REPORT_PROVIDER_ORDER" in updates:
-        providers = [item.strip().lower() for item in updates["REPORT_PROVIDER_ORDER"].split(",") if item.strip()]
+            raise error(400, "模型名称格式无效。")
+    for key in ("OPENAI_BASE_URL", "QWEN_BASE_URL", "KIMI_BASE_URL", "DEEPSEEK_BASE_URL", "AI_BASE_URL"):
+        if key in updates and updates[key]:
+            try:
+                url = urlsplit(updates[key])
+                valid = url.scheme in {"https", "http"} and url.hostname and not (url.username or url.password or url.query or url.fragment) and not any(c.isspace() for c in updates[key]) and len(updates[key]) <= 2048
+                _ = url.port
+            except ValueError:
+                valid = False
+            if not valid:
+                raise error(400, "模型接入地址必须是完整的 HTTP(S) 地址，且不能包含账号、密码、查询参数或片段。")
+    for order_key in ("REPORT_PROVIDER_ORDER", "EVALUATION_PROVIDER_ORDER"):
+        if order_key not in updates:
+            continue
+        providers = [item.strip().lower() for item in updates[order_key].split(",") if item.strip()]
         allowed_providers = {"openai", "qwen", "kimi", "deepseek", "custom"}
         if not providers or len(providers) != len(set(providers)) or any(item not in allowed_providers for item in providers):
-            raise error(400, "报告供应商顺序无效。")
-        updates["REPORT_PROVIDER_ORDER"] = ",".join(providers)
-    for key, minimum, maximum in (("AI_REPORT_TIMEOUT", 10, 180), ("AI_REPORT_HTTP_RETRIES", 0, 4)):
+            raise error(400, "供应商顺序无效。")
+        updates[order_key] = ",".join(providers)
+    for key, minimum, maximum in (("AI_REPORT_TIMEOUT", 10, 180), ("AI_REPORT_HTTP_RETRIES", 0, 4), ("AI_EVALUATION_TIMEOUT", 5, 180), ("AI_EVALUATION_HTTP_RETRIES", 0, 4), ("AI_EVALUATION_PROVIDER_ATTEMPTS", 1, 5), ("AI_REPORT_PROVIDER_ATTEMPTS", 1, 5)):
         if key not in updates:
             continue
         try:
             number = int(updates[key])
         except ValueError as exc:
-            raise error(400, "报告超时和重试次数必须是整数。") from exc
+            raise error(400, "超时、重试及供应商尝试次数必须是整数。") from exc
         if number < minimum or number > maximum:
             raise error(400, f"配置项 {key} 必须在 {minimum}-{maximum} 之间。")
         updates[key] = str(number)

@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
+import { usePageRefresh } from './PageRefreshContext.jsx';
 
 const dimensions = { style: '交流风格', focus: '考察重点', depth: '追问深度' };
 const roles = { technical: '技术面试官', architecture: '架构面试官', hr: 'HR 面试官' };
 
-export default function InterviewerPolicyEditor({ request }) {
+export default function InterviewerPolicyEditor({ request, active = true }) {
   const [policy, setPolicy] = useState(null);
   const [saved, setSaved] = useState(null);
   const [options, setOptions] = useState({});
@@ -21,6 +22,14 @@ export default function InterviewerPolicyEditor({ request }) {
     return () => { live = false; };
   }, [request, reload]);
   const dirty = JSON.stringify(policy) !== JSON.stringify(saved);
+  usePageRefresh(async () => {
+    if (dirty || saving) { setError('请先保存或撤销策略修改，再刷新。'); return false; }
+    setError('');
+    try {
+      const result = await request('/api/admin/interviewer-policy');
+      setPolicy(result.policy); setSaved(result.policy); setOptions(result.options);
+    } catch (failure) { setError(failure.message); return false; }
+  }, active);
   function change(next) { setPolicy(next); setMessage(''); setError(''); }
   function toggle(key, item) {
     const allowed = policy.allowed[key].includes(item) ? policy.allowed[key].filter(value => value !== item) : [...policy.allowed[key], item];

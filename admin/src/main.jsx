@@ -1,5 +1,6 @@
 import ModelSettingsPage from './ModelSettingsPage.jsx';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PageRefreshContext, usePageRefresh } from './PageRefreshContext.jsx';
 import { createRoot } from 'react-dom/client';
 import cascLogo from './assets/casc-composite.png';
 import { brand } from '../../shared/branding.js';
@@ -161,7 +162,7 @@ const navItems = [
   { key: 'interviews', label: '训练记录', icon: ClipboardList, permission: 'canViewInterviews', group: '记录与质检', parent: 'records' },
   { key: 'academic', label: '教务信息', icon: School, group: '工作台', container: true },
   { key: 'organization', label: '学生管理', icon: UsersRound, permission: 'canManageStudents', group: '教务信息', parent: 'academic' },
-  { key: 'catalog', label: '岗位信息', icon: BookOpen, permission: 'canViewCatalog', group: '工作台' },
+  { key: 'catalog', label: '岗位信息', icon: BookOpen, permission: 'canViewProgramJobs', group: '工作台' },
   { key: 'recruitment', label: '招聘信息', icon: Building2, group: '工作台', container: true },
   { key: 'jobPostings', label: '招聘岗位', icon: Building2, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
   { key: 'jobMatches', label: '对比记录', icon: FileText, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
@@ -1041,10 +1042,13 @@ function RegistrationsPage({ onNavigate, createMode = false, onRegistered, prese
       setRegistrations(data.registrations || []);
     } catch (requestError) {
       setPageError(requestError.message);
+      return false;
     } finally {
       setLoading(false);
     }
   };
+
+  usePageRefresh(loadRegistrations);
 
   useEffect(() => {
     loadRegistrations();
@@ -1209,7 +1213,7 @@ function RegistrationsPage({ onNavigate, createMode = false, onRegistered, prese
   };
 
   const handleRevokeAllAccounts = async () => {
-    if (!window.confirm(`确认删除全部 ${activatedCount} 个已开通的学生账号？注册名单会保留，学生将回到「待激活」，可再次开通账号。该操作不可撤销。`)) return;
+    if (!window.confirm(`确认删除当前管理范围名单内全部 ${activatedCount} 个已开通的学生账号？此操作不受页面筛选条件限制。注册名单会保留，学生将回到「待激活」，可再次开通账号。该操作不可撤销。`)) return;
     setDeletingId('revoke-all');
     setPageError('');
     setNotice('');
@@ -1225,7 +1229,7 @@ function RegistrationsPage({ onNavigate, createMode = false, onRegistered, prese
   };
 
   const handleDelete = async (item) => {
-    if (!window.confirm(`确认删除 ${item.name}（${item.studentNo}）的注册信息？该学生将无法再登录候选人端。`)) return;
+    if (!window.confirm(`确认从注册名单移除 ${item.name}（${item.studentNo}）？已开通的账号保留，仍可登录。`)) return;
     setDeletingId(item.id);
     setPageError('');
     setNotice('');
@@ -1270,13 +1274,13 @@ function RegistrationsPage({ onNavigate, createMode = false, onRegistered, prese
   };
 
   const handleClearAll = async () => {
-    if (!window.confirm('确认清空全部学生注册信息？该操作不可撤销，所有学生将无法再登录候选人端。')) return;
+    if (!window.confirm('确认清空当前管理范围内的全部注册名单？此操作不受页面筛选条件限制；已开通的账号保留，仍可登录。')) return;
     setDeletingId('clear-all');
     setPageError('');
     setNotice('');
     try {
       await adminRequest('/api/admin/student-registrations', { method: 'DELETE' });
-      setNotice('已清空全部学生注册信息');
+      setNotice('已清空当前管理范围内的注册名单，已开通账号保留');
       setRegistrations([]);
     } catch (requestError) {
       setPageError(requestError.message);
@@ -1667,10 +1671,13 @@ function ConnectionLogsPage() {
         : null);
     } catch (requestError) {
       setLogsError(requestError.message);
+      return false;
     } finally {
       setLoading(false);
     }
   };
+
+  usePageRefresh(loadLogs);
 
   useEffect(() => {
     loadLogs();
@@ -1846,10 +1853,13 @@ function OrganizationPage({ onView, admin, presetFilter = '', revision = 0, canM
       setError('');
     } catch (requestError) {
       setError(requestError.message);
+      return false;
     } finally {
       setLoading(false);
     }
   };
+
+  usePageRefresh(loadCampus);
 
   useEffect(() => {
     loadCampus();
@@ -2363,7 +2373,7 @@ function CatalogTree({ tree }) {
   );
 }
 
-function CatalogLibraryPage({ permissions }) {
+function CatalogLibraryPage({ permissions, active = true }) {
   const [versions, setVersions] = useState([]);
   const [selectedCode, setSelectedCode] = useState('');
   const [tree, setTree] = useState(null);
@@ -2420,6 +2430,14 @@ function CatalogLibraryPage({ permissions }) {
     const result = await adminRequest(`/api/admin/catalog/job-suggestions${status === 'all' ? '' : `?status=${status}`}`);
     setSuggestions(result.suggestions || []);
   };
+
+  usePageRefresh(async () => {
+    setCatalogError('');
+    try {
+      const code = await loadVersions(selectedCode);
+      await Promise.all([loadTree(code), loadSuggestions()]);
+    } catch (failure) { setCatalogError(failure.message); return false; }
+  }, active);
 
   useEffect(() => {
     loadVersions().then(loadTree).catch((requestError) => { setCatalogError(requestError.message); setLoading(false); });
@@ -2723,6 +2741,15 @@ function JobPostingsPage({ tab = 'postings' }) {
     setSubmissions(result.submissions || []);
     setSubmissionNote(result.scopeNote || '');
   };
+
+  usePageRefresh(async () => {
+    setPageError('');
+    try {
+      if (tab === 'postings') await loadPostings();
+      else if (tab === 'matches') await loadMatches();
+      else await loadSubmissions();
+    } catch (failure) { setPageError(failure.message); return false; }
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -3315,8 +3342,8 @@ const PERMISSION_OPTIONS = [
   { key: 'manageStudents', label: '学生管理', desc: '查看与维护学生信息、归班与重点关注，需选择数据范围' },
   { key: 'manageOrganization', label: '组织管理', desc: '维护学院、专业、班级组织结构' },
   { key: 'manageModelConfig', label: '模型配置入口', desc: '查看模型用途说明；全局参数与密钥仅超级管理员可管理' },
-  { key: 'viewInterviews', label: '查看训练记录', desc: '查看学生模拟训练进度与详情' },
-  { key: 'viewReports', label: '报告质检', desc: '查看成长报告并执行质量复核' },
+  { key: 'viewInterviews', label: '查看训练记录', desc: '查看所选数据范围内的学生训练进度与详情' },
+  { key: 'viewReports', label: '报告质检', desc: '查看所选数据范围内的成长报告并执行质量复核' },
 ];
 
 const permissionLabel = (key) => (PERMISSION_OPTIONS.find((option) => option.key === key) || {}).label || key;
@@ -3514,6 +3541,7 @@ function PermissionPage({ data, tab = 'requests' }) {
   const [editMessage, setEditMessage] = useState('');
   const [editError, setEditError] = useState('');
   const [editSaving, setEditSaving] = useState(false);
+  useEffect(() => { setAdminUsers(data.adminUsers || []); }, [data.adminUsers]);
 
   useEffect(() => {
     adminRequest('/api/admin/organization/structure')
@@ -3529,12 +3557,11 @@ function PermissionPage({ data, tab = 'requests' }) {
     setRequests(result.requests || []);
   };
 
-  // 选择学生数据范围时自动勾选「学生管理」权限（单向联动：只补充，不自动取消）
-  const linkScopeToManageStudents = (nextScope, permissions, setPermissions) => {
-    if ((nextScope || []).length > 0 && !(permissions || []).includes('manageStudents')) {
-      setPermissions([...(permissions || []), 'manageStudents']);
-    }
-  };
+  usePageRefresh(async () => {
+    await refreshRequests();
+    const structure = await adminRequest('/api/admin/organization/structure');
+    setOrg({ colleges: structure.colleges || [], programs: structure.programs || [], classes: structure.classes || [] });
+  });
 
   const createAdmin = async (event) => {
     event.preventDefault();
@@ -3654,7 +3681,7 @@ function PermissionPage({ data, tab = 'requests' }) {
   };
 
   const scopeText = (scope) => {
-    if (!scope || scope.length === 0) return '全部';
+    if (!scope || scope.length === 0) return '未分配学生数据范围';
     return scope
       .map((entry) => {
         const classItem = org.classes.find((item) => item.id === entry.class);
@@ -3701,8 +3728,8 @@ function PermissionPage({ data, tab = 'requests' }) {
             </div>
             <div className="field-block">
               <span>学生数据范围</span>
-              <small className="field-hint">勾选「学生管理」权限时，需指定该管理员可管理的学院 / 专业 / 班级（可多选，跨范围）。</small>
-              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={adminScope} onChange={(next) => { setAdminScope(next); linkScopeToManageStudents(next, adminPermissions, setAdminPermissions); }} />
+              <small className="field-hint">学生管理、训练记录和报告质检共用此范围。未选择时不能访问学生数据；选择范围不会自动授予功能权限。</small>
+              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={adminScope} onChange={setAdminScope} />
             </div>
             {adminMessage && <p className="settings-message success">{adminMessage}</p>}
             {adminError && <p className="settings-message error">{adminError}</p>}
@@ -3724,7 +3751,7 @@ function PermissionPage({ data, tab = 'requests' }) {
                   <small className="perm-badge">
                     {(item.permissions || []).map(permissionLabel).join('、') || '无权限'}
                   </small>
-                  <small className="perm-badge">范围：{scopeText(item.student_scope)}</small>
+                  <small className="perm-badge">范围：{item.role === 'super_admin' ? '全部学生数据' : scopeText(item.student_scope)}</small>
                 </div>
                 <div className="admin-row-actions">
                   <button
@@ -3776,8 +3803,8 @@ function PermissionPage({ data, tab = 'requests' }) {
             </div>
             <div className="field-block">
               <span>申请数据范围</span>
-              <small className="field-hint">仅当申请「学生管理」相关能力时填写。</small>
-              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={reqScope} onChange={(next) => { setReqScope(next); linkScopeToManageStudents(next, reqPermissions, setReqPermissions); }} />
+              <small className="field-hint">学生管理、训练记录和报告质检都需要相应数据范围，可申请多个学院、专业或班级。</small>
+              <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={reqScope} onChange={setReqScope} />
             </div>
             <label className="field-block">
               <span>申请理由</span>
@@ -3882,8 +3909,8 @@ function PermissionPage({ data, tab = 'requests' }) {
               </div>
               <div className="field-block">
                 <span>学生数据范围</span>
-                <small className="field-hint">仅当勾选「学生管理」权限时生效。</small>
-                <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={editScope} onChange={(next) => { setEditScope(next); linkScopeToManageStudents(next, editPermissions, setEditPermissions); }} />
+                <small className="field-hint">此范围同时约束学生管理、训练记录和报告质检。未选择时不能访问学生数据。</small>
+                <ScopeTree colleges={org.colleges} programs={org.programs} classes={org.classes} value={editScope} onChange={setEditScope} />
               </div>
               {editMessage && <p className="settings-message success">{editMessage}</p>}
               {editError && <p className="settings-message error">{editError}</p>}
@@ -4092,10 +4119,13 @@ function OrganizationManagementPage({ onChanged }) {
       setError('');
     } catch (requestError) {
       setError(requestError.message);
+      return false;
     } finally {
       setLoading(false);
     }
   };
+
+  usePageRefresh(loadStructure);
 
   useEffect(() => {
     loadStructure();
@@ -4493,6 +4523,11 @@ function initialAdminView() {
 }
 
 function AdminApp({ admin, onSignedOut }) {
+  const pageRefresh = useRef(null);
+  const registerPageRefresh = useCallback((refresh) => {
+    pageRefresh.current = refresh;
+    return () => { if (pageRefresh.current === refresh) pageRefresh.current = null; };
+  }, []);
   const [activeView, setActiveView] = useState(initialAdminView);
   const [navigationOpen, setNavigationOpen] = useState(() => {
     try { return window.localStorage.getItem('admin-navigation-collapsed') !== 'true'; }
@@ -4670,7 +4705,13 @@ function AdminApp({ admin, onSignedOut }) {
       setConnectionStatus('connected');
       setLastUpdated(new Date());
       setAutoRefreshError('');
-      setNotice('数据已刷新');
+      try {
+        const refreshed = await pageRefresh.current?.();
+        setNotice(refreshed === false ? '当前页面未刷新，请查看页面提示' : '数据已刷新');
+      } catch (failure) {
+        if (failure.status === 401) onSignedOut(false);
+        else setNotice(`当前页面刷新失败：${failure.message}`);
+      }
     } catch (requestError) {
       if (requestError.status === 401) onSignedOut(false);
       else {
@@ -4811,8 +4852,11 @@ function AdminApp({ admin, onSignedOut }) {
   const renderContent = () => {
     if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
+    // Redirect effects run after children mount. Block forbidden pages here so
+    // a retained URL cannot start their requests while permissions are loading.
+    if (!visibleNavItems.some((item) => item.key === activeView)) return <DashboardPage data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
     if (activeView === 'guide') return <GuidePage onNavigate={navigateGuideStep} admin={admin} visibleViews={new Set(visibleNavItems.map((item) => item.key))} />;
-    if (activeView === 'catalog') return <CatalogModule request={adminRequest} permissions={adminData.permissions || {}} renderLibrary={(permissions) => <CatalogLibraryPage permissions={permissions} />} />;
+    if (activeView === 'catalog') return <CatalogModule request={adminRequest} permissions={adminData.permissions || {}} renderLibrary={(permissions, active) => <CatalogLibraryPage permissions={permissions} active={active} />} />;
     if (recruitmentViews[activeView]) return <JobPostingsPage tab={recruitmentViews[activeView]} />;
     if (activeView === 'studentAccounts' || activeView === 'studentCreate') return <RegistrationsPage key={activeView} onNavigate={navigateTo} createMode={activeView === 'studentCreate'} onRegistered={setNotice} presetFilter={viewPreset.view === activeView ? viewPreset.value : ''} />;
     if (activeView === 'organization') return <AcademicPage onView={openDetail} admin={admin} presetFilter={viewPreset.view === 'organization' ? viewPreset.value : ''} revision={orgRevision} canManageOrganization={adminData.permissions?.canManageOrganization} onEditOrganization={() => navigateTo('organizationConfig')} />;
@@ -4836,7 +4880,7 @@ function AdminApp({ admin, onSignedOut }) {
   };
 
   return (
-    <main className={`admin-shell admin-shell-collapsible${navigationOpen ? '' : ' navigation-collapsed'}`}>
+    <PageRefreshContext.Provider value={registerPageRefresh}><main className={`admin-shell admin-shell-collapsible${navigationOpen ? '' : ' navigation-collapsed'}`}>
       <div id="admin-navigation-panel" className="admin-navigation-panel" inert={!navigationOpen} aria-hidden={!navigationOpen}>
       <aside className="admin-sidebar">
         <div className="admin-sidebar-heading">
@@ -4940,7 +4984,7 @@ function AdminApp({ admin, onSignedOut }) {
         position={detailPosition}
       />
 
-    </main>
+    </main></PageRefreshContext.Provider>
   );
 }
 

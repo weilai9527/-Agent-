@@ -12,8 +12,19 @@ const groups = [
 const fields = {
   reportOpenaiApiKey: { label: 'OpenAI 文本 API Key', secret: true, configured: 'reportOpenaiApiKeyConfigured', masked: 'reportOpenaiApiKeyMasked' },
   reportOpenaiModel: { label: 'OpenAI 文本模型', fallback: 'gpt-4o-mini' },
+  reportOpenaiBaseUrl: { label: 'OpenAI 接入地址', fallback: 'https://api.openai.com/v1' },
   reportQwenApiKey: { label: '千问文本 API Key', secret: true, configured: 'reportQwenApiKeyConfigured', masked: 'reportQwenApiKeyMasked' },
   reportQwenModel: { label: '千问文本模型', fallback: 'qwen-plus' },
+  reportQwenBaseUrl: { label: '千问接入地址', fallback: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+  reportKimiApiKey: { label: 'Kimi API Key', secret: true, configured: 'reportKimiApiKeyConfigured', masked: 'reportKimiApiKeyMasked' },
+  reportKimiModel: { label: 'Kimi 文本模型', fallback: 'moonshot-v1-8k' },
+  reportKimiBaseUrl: { label: 'Kimi 接入地址', fallback: 'https://api.moonshot.cn/v1' },
+  reportDeepseekApiKey: { label: 'DeepSeek API Key', secret: true, configured: 'reportDeepseekApiKeyConfigured', masked: 'reportDeepseekApiKeyMasked' },
+  reportDeepseekModel: { label: 'DeepSeek 文本模型', fallback: 'deepseek-chat' },
+  reportDeepseekBaseUrl: { label: 'DeepSeek 接入地址', fallback: 'https://api.deepseek.com' },
+  reportCustomApiKey: { label: '自定义服务 API Key', secret: true, configured: 'reportCustomApiKeyConfigured', masked: 'reportCustomApiKeyMasked' },
+  reportCustomModel: { label: '自定义服务模型', optional: true },
+  reportCustomBaseUrl: { label: '自定义服务接入地址', optional: true, hint: '使用自定义服务时，请同时配置密钥、模型名称和兼容 OpenAI 的 HTTP(S) 接入地址。' },
   reportProviderOrder: { label: '报告供应商顺序', fallback: 'kimi,deepseek,qwen,openai,custom', order: true },
   reportTimeout: { label: '报告超时（秒）', fallback: 60, min: 10, max: 180 },
   reportRetries: { label: '报告网络重试次数', fallback: 0, min: 0, max: 4 },
@@ -42,7 +53,7 @@ const groupKeys = {
   realtime: ['openaiApiKey', 'openaiRealtimeModel', 'openaiVoice', ...Object.keys(fields).filter(key => key.startsWith('qwenOmni'))],
   tts: ['dashscopeApiKey', ...Object.keys(fields).filter(key => key.startsWith('qwenTts'))],
 };
-const orders = [ ['openai,qwen', 'OpenAI 优先，千问备用'], ['qwen,openai', '千问优先，OpenAI 备用'], ['openai', '仅 OpenAI'], ['qwen', '仅千问'] ];
+const orders = ['kimi,deepseek,qwen,openai,custom', 'openai,qwen', 'qwen,openai', 'kimi', 'deepseek', 'openai', 'qwen', 'custom'];
 const savedValue = (settings, key) => fields[key].secret ? '' : String(settings[key] == null || settings[key] === '-' ? fields[key].fallback ?? '' : settings[key]);
 
 export default function ModelSettingsPage({ settings = {}, canEdit, request, onSettingsSaved, active = 'text' }) {
@@ -98,10 +109,10 @@ export default function ModelSettingsPage({ settings = {}, canEdit, request, onS
     const value = draft[key] ?? savedValue(settings, key);
     return <label className="field-block" key={key}>
       <span>{spec.label}{spec.optional ? '（可选）' : ''}</span>
-      {spec.order ? <select aria-label={spec.label} value={value} onChange={event => update(key, event.target.value)}>
-        {!orders.some(([order]) => order === value) && <option value={value}>保留现有顺序：{value}</option>}
-        {orders.map(([order, label]) => <option key={order} value={order}>{label}</option>)}
-      </select> : <input aria-label={spec.label} type={spec.secret ? 'password' : spec.min !== undefined ? 'number' : 'text'}
+      {spec.order ? <><input aria-label={spec.label} list={`${key}-options`} required value={value} onChange={event => update(key, event.target.value)} />
+        <datalist id={`${key}-options`}>{orders.map(order => <option key={order} value={order} />)}</datalist>
+        <small>按优先级填写：kimi、deepseek、qwen、openai、custom，以英文逗号分隔，不可重复。</small>
+      </> : <input aria-label={spec.label} type={spec.secret ? 'password' : spec.min !== undefined ? 'number' : key.endsWith('BaseUrl') ? 'url' : 'text'}
         autoComplete={spec.secret ? 'new-password' : 'off'} value={value} min={spec.min} max={spec.max} step={spec.min !== undefined ? 1 : undefined}
         required={!spec.optional && !spec.secret} maxLength={spec.secret ? 4096 : undefined}
         placeholder={spec.secret ? settings[spec.configured] ? `已配置 ${settings[spec.masked] || ''}，留空保留` : '填写 API Key' : undefined}
@@ -122,14 +133,17 @@ export default function ModelSettingsPage({ settings = {}, canEdit, request, onS
 
   return <section className="model-settings-page">
     <div className="model-settings-intro"><div><span className="model-eyebrow">AI 服务设置</span><h2>{current.description}</h2><p>{active === 'policy' ? '统一设置面试官的提问方式、学生可选范围和各轮职责，保存后应用于新建面试。' : '本页配置单独保存。密钥已配置表示已填写，连接是否成功请以检测或实际调用结果为准。'}</p></div><span className="model-admin-badge"><Bot size={16} />全局配置</span></div>
-    <div hidden={active !== 'policy'}><InterviewerPolicyEditor request={request} /></div>
+    <div hidden={active !== 'policy'}><InterviewerPolicyEditor request={request} active={active === 'policy'} /></div>
     <form hidden={active === 'policy'} className="settings-form model-settings-form" onSubmit={save}>
       <p className="model-effect-note"><AlertCircle size={16} />{current.effect}</p>
       <fieldset disabled={busy} className="model-fields">
         {active === 'text' && <>
           <div className="model-provider-grid">
-            {provider('OpenAI 文本模型', '用于报告生成和单题评价的文本分析。', 'reportOpenaiApiKeyConfigured', ['reportOpenaiApiKey', 'reportOpenaiModel'])}
-            {provider('千问文本模型', '可作为首选供应商或备用供应商。', 'reportQwenApiKeyConfigured', ['reportQwenApiKey', 'reportQwenModel'])}
+            {provider('OpenAI 文本模型', '用于报告生成和单题评价的文本分析。', 'reportOpenaiApiKeyConfigured', ['reportOpenaiApiKey', 'reportOpenaiModel', 'reportOpenaiBaseUrl'])}
+            {provider('千问文本模型', '可作为首选供应商或备用供应商。', 'reportQwenApiKeyConfigured', ['reportQwenApiKey', 'reportQwenModel', 'reportQwenBaseUrl'])}
+            {provider('Kimi 文本模型', '用于报告生成和单题评价；兼容已有 Moonshot 密钥配置。', 'reportKimiApiKeyConfigured', ['reportKimiApiKey', 'reportKimiModel', 'reportKimiBaseUrl'])}
+            {provider('DeepSeek 文本模型', '可加入报告和单题评分的供应商顺序。', 'reportDeepseekApiKeyConfigured', ['reportDeepseekApiKey', 'reportDeepseekModel', 'reportDeepseekBaseUrl'])}
+            {provider('自定义文本服务', '接入兼容 OpenAI 的文本模型服务。', 'reportCustomApiKeyConfigured', ['reportCustomApiKey', 'reportCustomModel', 'reportCustomBaseUrl'])}
           </div>
           <section className="provider-card"><div className="model-section-heading"><h3>调用策略</h3><p>报告与单题评分分别选择供应商顺序；只会调用服务端已配置的供应商。</p></div>
             <div className="model-runtime-grid">{['reportProviderOrder', 'reportTimeout', 'reportRetries', 'reportAttempts'].map(field)}</div>

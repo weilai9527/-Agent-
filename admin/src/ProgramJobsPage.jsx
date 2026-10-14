@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, BookOpen, Check, CheckCircle2, ChevronRight, GraduationCap, Plus, RefreshCw, Save, Search, Trash2, X } from 'lucide-react';
 import { programJobRows, programJobsChanged, programJobsPayload } from './programJobs.js';
 import './programJobs.css';
+import { usePageRefresh } from './PageRefreshContext.jsx';
 
 export function CatalogModule({ request, permissions, renderLibrary }) {
   const [tab, setTab] = useState('programs');
@@ -10,16 +11,16 @@ export function CatalogModule({ request, permissions, renderLibrary }) {
   return <div className="pj-module">
     <div className="pj-module-tabs" role="tablist" aria-label="岗位信息功能">
       <button type="button" role="tab" aria-selected={tab === 'programs'} aria-controls="program-jobs-panel" id="program-jobs-tab" className={tab === 'programs' ? 'active' : ''} onClick={() => setTab('programs')}><GraduationCap size={16} />专业岗位配置</button>
-      <button type="button" role="tab" aria-selected={tab === 'library'} aria-controls="catalog-library-panel" id="catalog-library-tab" className={tab === 'library' ? 'active' : ''} onClick={showLibrary}><BookOpen size={16} />岗位库维护</button>
+      {permissions.canViewCatalog && <button type="button" role="tab" aria-selected={tab === 'library'} aria-controls="catalog-library-panel" id="catalog-library-tab" className={tab === 'library' ? 'active' : ''} onClick={showLibrary}><BookOpen size={16} />岗位库维护</button>}
     </div>
-    <div hidden={tab !== 'programs'} role="tabpanel" id="program-jobs-panel" aria-labelledby="program-jobs-tab"><ProgramJobsPage request={request} onLibrary={showLibrary} /></div>
+    <div hidden={tab !== 'programs'} role="tabpanel" id="program-jobs-panel" aria-labelledby="program-jobs-tab"><ProgramJobsPage request={request} onLibrary={permissions.canViewCatalog ? showLibrary : undefined} active={tab === 'programs'} /></div>
     {openedLibrary && <div hidden={tab !== 'library'} role="tabpanel" id="catalog-library-panel" aria-labelledby="catalog-library-tab">
-      <p className="pj-library-note">这里维护可供各专业选择的岗位及能力要求。关联已有岗位请返回“专业岗位配置”。</p>{renderLibrary(permissions)}
+      <p className="pj-library-note">这里维护可供各专业选择的岗位及能力要求。关联已有岗位请返回“专业岗位配置”。</p>{renderLibrary(permissions, tab === 'library')}
     </div>}
   </div>;
 }
 
-function ProgramJobsPage({ request, onLibrary }) {
+function ProgramJobsPage({ request, onLibrary, active }) {
   const [data, setData] = useState({ colleges: [], programs: [], jobs: [], canEdit: false });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -49,10 +50,14 @@ function ProgramJobsPage({ request, onLibrary }) {
         || result.programs.find((item) => result.jobs.some((job) => job.sourceMajor === item.name)) || result.programs[0];
       setSelectedId(chosen?.id || '');
       if (!selectedId && chosen) setCollegeId(chosen.college_id);
-    } catch (error) { setLoadError(error.message); }
+    } catch (error) { setLoadError(error.message); return false; }
     finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
+  usePageRefresh(async () => {
+    if (dirty || saving) { setLoadError('请先保存或撤销修改，再刷新配置。'); return false; }
+    return load();
+  }, active);
   useEffect(() => {
     if (!dirty) return undefined;
     const warn = (event) => { event.preventDefault(); event.returnValue = ''; };
@@ -169,7 +174,7 @@ function ProgramJobsPage({ request, onLibrary }) {
         </>}
       </section>
     </section>
-    <div className="pj-library-tip"><BookOpen size={18} /><div><strong>没有找到适合的岗位？</strong><span>可以在岗位库维护中新增岗位和能力要求，发布后再回来关联。</span></div><button type="button" className="pj-text-button" onClick={onLibrary}>进入岗位库维护 <ArrowRight size={15} /></button></div>
+    {onLibrary && <div className="pj-library-tip"><BookOpen size={18} /><div><strong>没有找到适合的岗位？</strong><span>可以在岗位库维护中新增岗位和能力要求，发布后再回来关联。</span></div><button type="button" className="pj-text-button" onClick={onLibrary}>进入岗位库维护 <ArrowRight size={15} /></button></div>}
     {picker && <div className="pj-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closePicker(); }}>
       <section className="pj-picker" ref={pickerRef} role="dialog" aria-modal="true" aria-labelledby="pj-picker-title"><header><div><h3 id="pj-picker-title">为{selected?.name}选择就业岗位</h3><p>勾选岗位后会加入当前配置，完成选择后点击“保存专业配置”生效。</p></div><button type="button" aria-label="关闭岗位选择" onClick={closePicker}><X size={19} /></button></header>
         <div className="pj-picker-filters"><label className="pj-search"><Search size={16} /><input aria-label="搜索可选岗位" placeholder="搜索岗位名称、说明或能力关键词" value={jobQuery} onChange={(event) => setJobQuery(event.target.value)} /></label><select aria-label="岗位方向" value={jobMajor} onChange={(event) => setJobMajor(event.target.value)}><option value="">全部岗位方向</option>{[...new Set(data.jobs.map((job) => job.sourceMajor))].map((name) => <option key={name}>{name}</option>)}</select></div>

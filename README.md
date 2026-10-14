@@ -110,6 +110,14 @@ AI Interview Agent 是一个面向招聘与人才评估场景的智能面试平�
 - 管理端：独立 FastAPI 服务，负责候选人、职业目录、连接日志和统计管理。
 - 数据层：MySQL 用于生产数据，SQLite 用于本地开发与自动化测试。
 
+## 本地配置与 Git 提交
+
+在启动服务前，将 `backend/.env.example`、`admin_backend/.env.example` 分别复制为同目录的 `.env`，按环境填写数据库和服务配置。管理后端必须设置 `ADMIN_MASTER_EMAIL` 和 `ADMIN_MASTER_PASSWORD`（至少 12 位）；没有内置管理员账号或密码。旧的 `ADMIN_BOOTSTRAP_EMAIL` / `ADMIN_BOOTSTRAP_PASSWORD` 配置仍兼容，`ADMIN_MASTER_*` 非空值优先。
+
+实际管理端位于 `admin/`，用 `npm run dev:admin` 启动、`npm run build:admin` 构建；`admin-next/` 是独立原型。管理员数据范围同时约束学生名单、训练记录和报告，服务端也会检查详情与修改操作的权限。
+
+提交源码、测试、依赖锁文件及 `.env.example`；真实 `.env`、数据库、日志、依赖目录、构建产物，以及 `outputs/` 中的验收截图、临时脚本和备份均保留在本地，不纳入 Git。不要使用 `git add -f` 强制提交这些本地产物。
+
 ## Cloudflare 前端部署
 
 ### 双品牌入口

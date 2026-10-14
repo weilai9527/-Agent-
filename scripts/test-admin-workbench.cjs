@@ -14,7 +14,7 @@ const output = path.join(root, 'outputs', 'admin-workbench-check');
 fs.mkdirSync(output, { recursive: true });
 
 const admin = { id: 'test-admin', name: '界面测试管理员', email: 'admin@example.test', role: 'super_admin' };
-const permissions = Object.fromEntries(['canViewCandidates', 'canViewInterviews', 'canViewReports', 'canViewAgents', 'canManageStudents', 'canManageOrganization', 'canManageSettings', 'canViewCatalog', 'canViewJobPostings'].map(key => [key, true]));
+const permissions = Object.fromEntries(['canViewCandidates', 'canViewInterviews', 'canViewReports', 'canViewAgents', 'canManageStudents', 'canManageOrganization', 'canManageSettings', 'canViewCatalog', 'canViewProgramJobs', 'canViewJobPostings'].map(key => [key, true]));
 const interviews = [
   { id: 'training-complete-001', candidate: '测试学生甲', role: '前端工程师', type: '技术面试', status: '已完成', agents: 2, qaCount: 2, updatedAt: '2026-10-12 10:30' },
   { id: 'training-running-002', candidate: '测试学生乙', role: '产品经理', type: '综合面试', status: '进行中', agents: 1, qaCount: 0, updatedAt: '2026-10-12 11:30' },
@@ -226,7 +226,7 @@ const server = createServer((req, res) => {
     await page.getByRole('button', { name: '报告与评分', exact: true }).click();
     assert.equal(await page.getByLabel('OpenAI 文本模型', { exact: true }).inputValue(), 'edited-report-model', 'Other scenario drafts survive saving');
     await page.getByLabel('报告网络重试次数', { exact: true }).fill('0');
-    await page.getByLabel('单题评分供应商顺序', { exact: true }).selectOption('openai');
+    await page.getByLabel('单题评分供应商顺序', { exact: true }).fill('openai');
     await page.getByLabel('OpenAI 文本 API Key', { exact: true }).fill('synthetic-api-key');
     failModelSave = true;
     await page.getByRole('button', { name: '保存报告与评分配置', exact: true }).click();

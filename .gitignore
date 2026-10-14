@@ -26,6 +26,7 @@ pnpm-debug.log*
 Thumbs.db
 
 # Build and cache output
+/outputs/
 .vite/
 .turbo/
 coverage/

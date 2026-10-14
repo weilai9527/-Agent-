@@ -61,10 +61,35 @@ def test_model_settings_persistence_validation_and_permissions(tmp_path):
         assert providers[0].model == "test-report-model"
         assert providers[0].timeout == 15 and providers[0].retries == 0
 
+        additional = {}
+        for label in ("Kimi", "Deepseek", "Custom"):
+            additional.update({f"report{label}ApiKey": f"synthetic-{label}-private-key",
+                               f"report{label}Model": f"test-{label}-model",
+                               f"report{label}BaseUrl": f"https://{label.lower()}.example.test/v1"})
+        additional["reportProviderOrder"] = "custom,kimi,deepseek,qwen,openai"
+        result = save(additional)
+        assert result.status_code == 200, result.text
+        saved = main.read_env_file(main.USER_BACKEND_ENV_PATH)
+        assert saved["KIMI_MODEL"] == "test-Kimi-model"
+        assert saved["DEEPSEEK_BASE_URL"] == "https://deepseek.example.test/v1"
+        assert saved["AI_API_KEY"] == "synthetic-Custom-private-key"
+        for label in ("Kimi", "Deepseek", "Custom"):
+            assert result.json()["settings"][f"report{label}ApiKeyConfigured"] is True
+            assert f"synthetic-{label}-private-key" not in result.text
+        with patch("backend.src.kimi_followup.reload_runtime_ai_env"):
+            providers = get_task_providers("REPORT_PROVIDER_ORDER", max_tokens_env="AI_REPORT_MAX_TOKENS",
+                timeout_env="AI_REPORT_TIMEOUT", default_max_tokens=700, retries_env="AI_REPORT_HTTP_RETRIES")
+        assert [p.name for p in providers] == ["custom", "kimi", "deepseek", "qwen", "openai"]
+        assert providers[0].base_url == "https://custom.example.test/v1"
+        assert providers[1].model == "test-Kimi-model"
+
         before = main.USER_BACKEND_ENV_PATH.read_text(encoding="utf-8")
         for invalid in ({"evaluationRetries": -1}, {"evaluationTimeout": 999}, {"evaluationAttempts": 0},
                         {"reportRetries": 1.5}, {"evaluationProviderOrder": "openai,openai"},
-                        {"qwenOmniApiKey": "bad\\nINJECTED=value"}, {"openaiRealtimeModel": "bad model"}):
+                        {"qwenOmniApiKey": "bad\\nINJECTED=value"}, {"openaiRealtimeModel": "bad model"},
+                        {"reportCustomBaseUrl": "file:///tmp/model"}, {"reportKimiBaseUrl": "https://user:pass@example.test"},
+                        {"reportDeepseekBaseUrl": "https://example.test/?key=secret"},
+                        {"reportKimiApiKey": "bad\\nINJECTED=value"}, {"reportCustomModel": "bad model"}):
             assert save(invalid).status_code == 400
             assert main.USER_BACKEND_ENV_PATH.read_text(encoding="utf-8") == before
         assert save({"qwenOmniEndpoint": "https://example.test/realtime"}).status_code == 200

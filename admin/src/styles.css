@@ -5931,6 +5931,24 @@ td {
   .academic-page .section-card > header { flex-wrap: wrap; gap: 12px; }
 }
 .security-log-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; margin-bottom: 18px; }
+.security-log-filters .field-block { min-width: 0; }
+.security-log-filters input { box-sizing: border-box; width: 100%; min-width: 0; height: 40px; padding: 9px 12px; border: 1px solid #dce4ee; border-radius: 6px; background: #fff; color: #1e293b; font: inherit; font-size: 13px; }
+.security-log-filters input:focus-visible { outline: 2px solid #91caff; outline-offset: 1px; border-color: #1677ff; }
+.security-log-filters > button { min-height: 40px; }
+.table-view-button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 5px 12px; border: 1px solid #d5e6ff; border-radius: 6px; background: #f0f6ff; color: #0958d9; font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.table-view-button:hover { background: #e0edff; border-color: #91caff; }
+.table-view-button:focus-visible { outline: 3px solid #91caff; outline-offset: 2px; }
+.table-view-button:disabled { opacity: .5; cursor: not-allowed; }
+.security-log-detail > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.security-log-detail:focus-visible { outline: 2px solid #91caff; }
+.security-logs-content .connection-log-table table { width: 100%; min-width: 760px; table-layout: fixed; }
+.security-logs-content .connection-log-table th:nth-child(1) { width: 17%; }
+.security-logs-content .connection-log-table th:nth-child(2) { width: 24%; }
+.security-logs-content .connection-log-table th:nth-child(3) { width: 20%; }
+.security-logs-content .connection-log-table th:nth-child(4) { width: 12%; }
+.security-logs-content .connection-log-table th:nth-child(5) { width: 16%; }
+.security-logs-content .connection-log-table th:nth-child(6) { width: 11%; }
+.security-logs-content .connection-log-table td { white-space: normal; overflow-wrap: anywhere; }
 .security-log-pagination { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
 .security-log-detail { margin-top: 20px; padding: 16px; background: #f5f7fb; border-radius: 12px; }
 .security-log-detail dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }

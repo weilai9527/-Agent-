@@ -35,6 +35,129 @@ class AdminAuthTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
+    def test_record_filters_receive_student_fields_and_records_beyond_first_fifty(self):
+        self.login_super_admin()
+        user_id = f"filters-{uuid4().hex}"
+        try:
+            admin_main.db.execute(
+                "INSERT INTO users (id, email, password_hash, name, student_no, college, class_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, f"{user_id}@example.test", "not-a-login-account", "筛选测试学生", "20260099", "测试学院", "测试班级"),
+            )
+            for index in range(61):
+                interview_id = f"{user_id}-{index}"
+                admin_main.db.execute(
+                    "INSERT INTO interview_sessions (id, user_id, target_role, status, updated_at) "
+                    "VALUES (?, ?, '前端工程师', 'completed', ?)",
+                    (interview_id, user_id, f"2026-01-{index % 28 + 1:02d} 23:59:59"),
+                )
+                admin_main.db.execute(
+                    "INSERT INTO interview_reports (id, user_id, interview_id, total_score, grade, "
+                    "pass_recommendation, ability_radar, agent_feedback, timeline_review, summary, suggestions) "
+                    "VALUES (?, ?, ?, 70, 'C', 'hold', '{}', '[]', '[]', '测试摘要', '测试建议')",
+                    (f"report-{interview_id}", user_id, interview_id),
+                )
+            admin_main.db.commit()
+            response = self.client.get('/api/admin/snapshot')
+            self.assertEqual(response.status_code, 200, response.text)
+            for key in ('interviews', 'reports'):
+                records = [row for row in response.json()[key] if user_id in row['id']]
+                self.assertEqual(len(records), 61)
+                for row in records:
+                    self.assertEqual(row['studentNo'], '20260099')
+                    self.assertEqual(row['college'], '测试学院')
+                    self.assertEqual(row['className'], '测试班级')
+        finally:
+            admin_main.db.execute('DELETE FROM interview_reports WHERE user_id = ?', (user_id,))
+            admin_main.db.execute('DELETE FROM interview_sessions WHERE user_id = ?', (user_id,))
+            admin_main.db.execute('DELETE FROM users WHERE id = ?', (user_id,))
+            admin_main.db.commit()
+
+    def test_dashboard_roster_scope_and_incomplete_pending_students(self):
+        prefix = f"dashboard-{uuid4().hex}"
+        db = admin_main.db
+        try:
+            db.execute("INSERT INTO campus_colleges (id, code, name) VALUES (?, ?, ?)", (prefix, prefix, prefix))
+            db.execute("INSERT INTO campus_programs (id, college_id, name) VALUES (?, ?, '专业')", (prefix, prefix))
+            for suffix in ('allowed', 'outside'):
+                db.execute("INSERT INTO campus_classes (id, program_id, name, invite_code) VALUES (?, ?, ?, ?)",
+                           (f'{prefix}-{suffix}', prefix, suffix, f'{prefix}-{suffix}'))
+            for suffix, class_name, activated in [('assigned', 'allowed', True), ('unassigned', 'allowed', True),
+                                                   ('pending', 'allowed', False), ('outside', 'outside', False)]:
+                student_id = f'{prefix}-{suffix}'
+                if activated:
+                    db.execute("INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, 'not-login', ?)",
+                               (student_id, f'{student_id}@example.test', suffix))
+                    if suffix == 'assigned':
+                        db.execute("INSERT INTO student_enrollments (id, user_id, class_id) VALUES (?, ?, ?)",
+                                   (student_id, student_id, f'{prefix}-allowed'))
+                db.execute("INSERT INTO student_registrations (id, student_no, name, college, class_name, gender, counselor, user_id) "
+                           "VALUES (?, ?, ?, ?, ?, '男', '', ?)",
+                           (student_id, student_id, suffix, prefix, class_name, student_id if activated else None))
+            db.commit()
+            all_rows = [row for row in admin_main.dashboard_roster() if row['id'].startswith(prefix)]
+            self.assertEqual(len(all_rows), 4)
+            pending = next(row for row in all_rows if row['id'] == f'{prefix}-pending')
+            self.assertEqual(pending['missing'], ['辅导员'])
+            scoped = admin_main.dashboard_roster([{'college': prefix, 'program': prefix, 'class': f'{prefix}-allowed'}])
+            self.assertEqual({row['id'] for row in scoped}, {f'{prefix}-assigned', f'{prefix}-pending'})
+            self.assertEqual(admin_main.dashboard_roster([]), [])
+            for row in all_rows:
+                self.assertNotIn('password_hash', row)
+                self.assertNotIn('temp_password_encrypted', row)
+        finally:
+            for suffix in ('assigned', 'unassigned', 'pending', 'outside'):
+                student_id = f'{prefix}-{suffix}'
+                db.execute('DELETE FROM student_registrations WHERE id = ?', (student_id,))
+                db.execute('DELETE FROM student_enrollments WHERE user_id = ?', (student_id,))
+                db.execute('DELETE FROM users WHERE id = ?', (student_id,))
+            db.execute('DELETE FROM campus_classes WHERE program_id = ?', (prefix,))
+            db.execute('DELETE FROM campus_programs WHERE id = ?', (prefix,))
+            db.execute('DELETE FROM campus_colleges WHERE id = ?', (prefix,))
+            db.commit()
+
+    def test_admin_creation_disable_and_reenable_revoke_old_sessions(self):
+        self.login_super_admin()
+        root_id = self.client.get('/api/admin/auth/me').json()['admin']['id']
+        payload = {"email": f"lifecycle-{uuid4().hex}@example.com", "name": "生命周期测试管理员", "password": "TestAdminPassword123!", "role": "super_admin", "permissions": ["viewReports"]}
+        short = self.client.post('/api/admin/users', headers={"Origin": TRUSTED_ORIGIN}, json={**payload, "password": "short"})
+        self.assertEqual(short.status_code, 400)
+        created = self.client.post('/api/admin/users', headers={"Origin": TRUSTED_ORIGIN}, json=payload)
+        self.assertEqual(created.status_code, 201, created.text)
+        account_id = created.json()['admin']['id']
+        self.assertEqual(self.client.post('/api/admin/users', headers={"Origin": TRUSTED_ORIGIN}, json=payload).status_code, 409)
+        subordinate = TestClient(app)
+        login = lambda: subordinate.post('/api/admin/auth/login', headers={"Origin": TRUSTED_ORIGIN}, json={"email": payload['email'], "password": payload['password']})
+        self.assertEqual(login().status_code, 200)
+        self.assertEqual(subordinate.get('/api/admin/users').status_code, 403, 'A role label cannot grant super-admin access')
+        self.assertEqual(subordinate.patch(f'/api/admin/users/{root_id}', headers={"Origin": TRUSTED_ORIGIN}, json={"status": "disabled"}).status_code, 403)
+        disabled = self.client.patch(f'/api/admin/users/{account_id}', headers={"Origin": TRUSTED_ORIGIN}, json={"status": "disabled"})
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        self.assertEqual(subordinate.get('/api/admin/auth/me').status_code, 401)
+        self.assertEqual(login().status_code, 401)
+        enabled = self.client.patch(f'/api/admin/users/{account_id}', headers={"Origin": TRUSTED_ORIGIN}, json={"status": "normal"})
+        self.assertEqual(enabled.status_code, 200, enabled.text)
+        self.assertEqual(subordinate.get('/api/admin/auth/me').status_code, 401, 'Reenabling must not restore revoked sessions')
+        self.assertEqual(login().status_code, 200)
+        self.assertEqual(subordinate.get('/api/admin/auth/me').json()['admin']['permissions'], ['viewReports'])
+        self.assertEqual(self.client.patch(f'/api/admin/users/{root_id}', headers={"Origin": TRUSTED_ORIGIN}, json={"status": "disabled"}).status_code, 400)
+
+    def test_job_sync_requires_auth_and_returns_persisted_results(self):
+        with patch.object(admin_main, "fetch_job_feed") as fetch_feed:
+            self.assertEqual(self.client.post('/api/admin/job-postings/sync').status_code, 401)
+            fetch_feed.assert_not_called()
+            self.login_super_admin()
+            fetch_feed.return_value = [{"id": uuid4().hex, "title": "同步测试岗位", "company": "测试公司"}, {"title": "缺少编号"}]
+            self.assertEqual(self.client.post('/api/admin/job-postings/sync', headers={"Origin": "https://untrusted.test"}).status_code, 403)
+            fetch_feed.assert_not_called()
+            first = self.client.post('/api/admin/job-postings/sync', headers={"Origin": TRUSTED_ORIGIN})
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual((first.json()['created'], first.json()['skipped']), (1, 1))
+            second = self.client.post('/api/admin/job-postings/sync', headers={"Origin": TRUSTED_ORIGIN})
+            self.assertEqual(second.json()['updated'], 1)
+            with patch.dict(os.environ, {"JOB_POSTING_SYNC_ENDPOINT": ""}):
+                self.assertFalse(self.client.get('/api/admin/job-postings').json()['syncConfigured'])
+
     def test_interview_detail_returns_complete_transcript_and_review_target(self):
         self.login_super_admin()
         suffix = uuid4().hex
@@ -254,6 +377,53 @@ class AdminAuthTests(unittest.TestCase):
         refreshed = self.client.get("/api/admin/campus/overview").json()
         program = next(item for item in refreshed["programs"] if item["id"] == program_id)
         self.assertEqual([item["job_role_id"] for item in program["jobs"]], [job_id])
+
+    def test_program_job_configuration_priorities_validation_and_permissions(self):
+        self.assertEqual(self.client.get('/api/admin/campus/program-jobs').status_code, 401)
+        self.login_super_admin()
+        _, program_id, _ = self.create_campus_hierarchy()
+        options = self.client.get('/api/admin/campus/program-jobs')
+        self.assertEqual(options.status_code, 200, options.text)
+        self.assertTrue(options.json()['canEdit'])
+        self.assertIn(program_id, {program['id'] for program in options.json()['programs']})
+        jobs = options.json()['jobs'][:2]
+        self.assertEqual(len(jobs), 2)
+        self.assertIn('competencies', jobs[0])
+        self.assertIn('sourceMajor', jobs[0])
+        payload = [{'jobRoleId': jobs[0]['id'], 'priority': 'optional'},
+                   {'jobRoleId': jobs[1]['id'], 'priority': 'recommended'}]
+        path = f'/api/admin/campus/programs/{program_id}/jobs'
+        headers = {'Origin': TRUSTED_ORIGIN}
+        saved = self.client.put(path, headers=headers, json={'jobs': payload})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()['jobs'], payload)
+        refreshed = self.client.get('/api/admin/campus/program-jobs').json()
+        program = next(row for row in refreshed['programs'] if row['id'] == program_id)
+        self.assertEqual({row['job_role_id']: row['priority'] for row in program['jobs']},
+                         {item['jobRoleId']: item['priority'] for item in payload})
+        for invalid in [payload + [payload[0]], [{'jobRoleId': jobs[0]['id'], 'priority': 'unknown'}],
+                        [{'jobRoleId': jobs[0]['id'], 'priority': {}}], [{'jobRoleId': 'missing', 'priority': 'optional'}],
+                        payload * 26]:
+            response = self.client.put(path, headers=headers, json={'jobs': invalid})
+            self.assertEqual(response.status_code, 400, response.text)
+        still_saved = admin_main.all_rows('SELECT job_role_id, priority FROM program_job_roles WHERE program_id = ?', (program_id,))
+        self.assertEqual(len(still_saved), 2)
+        account = {'email': f'catalog-reader-{uuid4().hex}@example.com', 'name': '岗位查看员',
+                   'password': 'ReadOnlyCatalog123!', 'permissions': ['manageCatalog'], 'role': 'manager'}
+        created = self.client.post('/api/admin/users', headers=headers, json=account)
+        self.assertEqual(created.status_code, 201, created.text)
+        reader = TestClient(app)
+        self.assertEqual(reader.post('/api/admin/auth/login', headers=headers,
+                                    json={'email': account['email'], 'password': account['password']}).status_code, 200)
+        self.assertFalse(reader.get('/api/admin/campus/program-jobs').json()['canEdit'])
+        self.assertEqual(reader.put(path, headers=headers, json={'jobs': []}).status_code, 403)
+        cleared = self.client.put(path, headers=headers, json={'jobs': []})
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertEqual(admin_main.all_rows('SELECT id FROM program_job_roles WHERE program_id = ?', (program_id,)), [])
+        with patch.object(admin_main, 'catalog_tree', return_value=None):
+            empty = self.client.get('/api/admin/campus/program-jobs')
+            self.assertEqual(empty.status_code, 200)
+            self.assertEqual(empty.json()['jobs'], [])
 
     def test_campus_student_assignment_and_csv_import(self):
         self.login_super_admin()

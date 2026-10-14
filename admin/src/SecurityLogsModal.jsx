@@ -3,6 +3,20 @@ import { ShieldCheck, X } from 'lucide-react';
 import { securityLogParams } from './securityLogQuery.js';
 
 export default function SecurityLogsModal({ request, onClose }) {
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="安全审计" onClick={onClose}>
+      <div className="modal-card clog-modal" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <span><ShieldCheck size={18} />安全审计</span>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭安全审计"><X size={15} /></button>
+        </header>
+        <SecurityLogsPage request={request} />
+      </div>
+    </div>
+  );
+}
+
+export function SecurityLogsPage({ request }) {
   const [form, setForm] = useState({ event_type: '', request_id: '', actor_id: '', since: '', until: '' });
   const [query, setQuery] = useState({ offset: 0, until: new Date().toISOString() });
   const [payload, setPayload] = useState({ events: [], total: 0, hasMore: false });
@@ -34,12 +48,6 @@ export default function SecurityLogsModal({ request, onClose }) {
   }
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="安全审计" onClick={onClose}>
-      <div className="modal-card clog-modal" onClick={(event) => event.stopPropagation()}>
-        <header>
-          <span><ShieldCheck size={18} />安全审计</span>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭安全审计"><X size={15} /></button>
-        </header>
         <div className="security-logs-content">
           <p className="form-hint">查看启用新审计后记录的账号操作、权限拒绝和操作异常。时间按本机时区显示。</p>
           <form className="security-log-filters" onSubmit={search}>
@@ -96,7 +104,5 @@ export default function SecurityLogsModal({ request, onClose }) {
             </section>}
           </>}
         </div>
-      </div>
-    </div>
   );
 }

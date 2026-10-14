@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import ModelSettingsPage from './ModelSettingsPage.jsx';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import cascLogo from './assets/casc-composite.png';
 import { brand } from '../../shared/branding.js';
@@ -19,6 +20,7 @@ import {
   Copy,
   Download,
   Eye,
+  EyeOff,
   FileText,
   Filter,
   GraduationCap,
@@ -28,6 +30,9 @@ import {
   ListOrdered,
   LockKeyhole,
   LogOut,
+  Mail,
+  PanelLeftClose,
+  PanelLeftOpen,
   MousePointerClick,
   Network,
   Pencil,
@@ -49,8 +54,14 @@ import {
   X,
 } from 'lucide-react';
 import './styles.css';
-import SecurityLogsModal from './SecurityLogsModal.jsx';
+import { SecurityLogsPage } from './SecurityLogsModal.jsx';
 import { resolveRegistrationCounselor } from './registrationCounselor.js';
+import { registrationAssignmentCounts, registrationAssignmentLabel } from './registrationAssignment.js';
+import RecordFilterFields from './RecordFilterFields.jsx';
+import { matchesRecordFilters } from './recordFilters.js';
+import ReportReviewSection from './ReportReviewSection.jsx';
+import DashboardPage from './DashboardPage.jsx';
+import { CatalogModule } from './ProgramJobsPage.jsx';
 
 const ADMIN_API_BASE_URL = import.meta.env.VITE_ADMIN_API_BASE_URL || (import.meta.env.DEV ? 'http://127.0.0.1:3002' : '');
 
@@ -144,18 +155,40 @@ async function adminDownload(path, fallbackFilename) {
 }
 
 const navItems = [
-  { key: 'dashboard', label: '工作台', icon: LayoutDashboard, group: '工作台' },
-  { key: 'guide', label: '使用流程指引', icon: ListOrdered, group: '工作台' },
-  { key: 'interviews', label: '训练记录', icon: ClipboardList, permission: 'canViewInterviews', group: '工作台' },
-  { key: 'reports', label: '报告质检', icon: FileText, permission: 'canViewReports', group: '工作台' },
-  { key: 'organization', label: '学生', icon: School, permission: 'canManageStudents', group: '学生成长' },
-  { key: 'organizationConfig', label: '组织', icon: Network, permission: 'canManageOrganization', group: '学生成长' },
-  { key: 'catalog', label: '岗位知识库', icon: BookOpen, permission: 'canViewCatalog', group: '训练内容' },
-  { key: 'jobPostings', label: '招聘信息库', icon: Building2, permission: 'canViewJobPostings', group: '训练内容' },
-  { key: 'agents', label: '面试模型配置', icon: Bot, permission: 'canViewAgents', group: '训练内容' },
-  { key: 'permission', label: '权限管理', icon: ShieldCheck, group: '系统' },
-  { key: 'settings', label: '系统管理', icon: Settings, permission: 'canManageSettings', group: '系统' },
+  { key: 'dashboard', label: '工作台', icon: LayoutDashboard, group: '总览' },
+  { key: 'guide', label: '使用指引', icon: ListOrdered, group: '工作台' },
+  { key: 'records', label: '记录与质检', icon: ClipboardList, group: '工作台', container: true },
+  { key: 'interviews', label: '训练记录', icon: ClipboardList, permission: 'canViewInterviews', group: '记录与质检', parent: 'records' },
+  { key: 'academic', label: '教务信息', icon: School, group: '工作台', container: true },
+  { key: 'organization', label: '学生管理', icon: UsersRound, permission: 'canManageStudents', group: '教务信息', parent: 'academic' },
+  { key: 'catalog', label: '岗位信息', icon: BookOpen, permission: 'canViewCatalog', group: '工作台' },
+  { key: 'recruitment', label: '招聘信息', icon: Building2, group: '工作台', container: true },
+  { key: 'jobPostings', label: '招聘岗位', icon: Building2, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
+  { key: 'jobMatches', label: '对比记录', icon: FileText, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
+  { key: 'jdSubmissions', label: '学生 JD 审核', icon: ClipboardList, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
+  { key: 'agents', label: '模型配置', icon: Bot, permission: 'canViewAgents', group: '工作台', container: true },
+  { key: 'modelText', label: '报告与评分', icon: FileText, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
+  { key: 'modelRealtime', label: '实时面试', icon: Bot, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
+  { key: 'interviewerPolicy', label: '面试官策略', icon: Bot, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
+  { key: 'modelTts', label: '语音合成', icon: Bot, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
+  { key: 'organizationConfig', label: '组织管理', icon: Network, permission: 'canManageOrganization', group: '教务信息', parent: 'academic' },
+  { key: 'studentAccounts', label: '学生账号', icon: UserPlus, permission: 'canManageStudents', group: '教务信息', parent: 'academic' },
+  { key: 'studentCreate', label: '注册学生', icon: UserPlus, permission: 'canManageStudents', group: '教务信息', parent: 'academic', hidden: true },
+  { key: 'reports', label: '报告质检', icon: FileText, permission: 'canViewReports', group: '记录与质检', parent: 'records' },
+  { key: 'permission', label: '权限管理', icon: ShieldCheck, group: '系统管理', container: true },
+  { key: 'adminUsers', label: '管理员管理', icon: UserCog, group: '权限管理', parent: 'permission', superOnly: true },
+  { key: 'permissionRequests', label: '权限申请', icon: KeyRound, group: '权限管理', parent: 'permission' },
+  { key: 'permissionReview', label: '申请审核', icon: ShieldCheck, group: '权限管理', parent: 'permission', superOnly: true },
+  { key: 'settings', label: '系统管理', icon: Settings, group: '系统管理', container: true },
+  { key: 'connectionLogs', label: '连接日志', icon: Wifi, permission: 'canViewConnectionLogs', group: '系统管理', parent: 'settings' },
+  { key: 'securityLogs', label: '安全审计', icon: ShieldCheck, permission: 'canViewAudit', group: '系统管理', parent: 'settings' },
 ];
+
+const recruitmentViews = { jobPostings: 'postings', jobMatches: 'matches', jdSubmissions: 'jdSubmissions' };
+
+const permissionViews = { adminUsers: 'admins', permissionRequests: 'requests', permissionReview: 'review' };
+
+const modelViews = { modelText: 'text', modelRealtime: 'realtime', interviewerPolicy: 'policy', modelTts: 'tts' };
 
 const roleLabels = {
   super_admin: '超级管理员',
@@ -189,19 +222,29 @@ function AdminLogin({ onAuthenticated }) {
   const [form, setForm] = useState({ email: '', password: '' });
   const [submitting, setSubmitting] = useState(false);
   const [loginError, setLoginError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [capsLock, setCapsLock] = useState(false);
+
+  const updateField = (field, value) => {
+    setForm((current) => ({ ...current, [field]: value }));
+    setLoginError('');
+  };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (submitting) return;
     setSubmitting(true);
     setLoginError('');
     try {
       const data = await adminRequest('/api/admin/auth/login', {
         method: 'POST',
-        body: JSON.stringify(form),
+        body: JSON.stringify({ email: form.email.trim(), password: form.password }),
       });
       onAuthenticated(data.admin);
     } catch (requestError) {
-      setLoginError(requestError.message);
+      setLoginError(requestError.status
+        ? requestError.message
+        : '暂时无法连接登录服务，请检查网络后重试。');
     } finally {
       setSubmitting(false);
     }
@@ -209,41 +252,69 @@ function AdminLogin({ onAuthenticated }) {
 
   return (
     <main className="admin-login-page">
-      <form className="admin-login-card" onSubmit={handleSubmit}>
-        <div className="admin-login-brand"><span className="admin-logo" aria-hidden="true"><img src={cascLogo} alt="" /></span></div>
+      <div className="admin-login-layout">
+        <div className="admin-login-identity">
+          <span className="admin-logo" aria-hidden="true"><img src={cascLogo} alt="" /></span>
+          <strong>{brand.name}</strong>
+          <span className="admin-login-edition">管理端</span>
+        </div>
+      <form className="admin-login-card" onSubmit={handleSubmit} aria-labelledby="admin-login-title" aria-busy={submitting}>
         <header>
-          <span>{brand.name} · 管理端</span>
-          <h1>管理员登录</h1>
-          <p>登录后可以查看学生成长、训练报告和系统配置。</p>
+          <h1 id="admin-login-title">管理员登录</h1>
+          <p>使用管理员账号进入工作台</p>
         </header>
-        <label>
-          <span>管理员邮箱</span>
+        <div className="admin-login-field">
+          <label htmlFor="admin-login-email">管理员邮箱</label>
+          <div className="admin-login-input">
+          <Mail size={18} aria-hidden="true" />
           <input
+            id="admin-login-email"
+            name="email"
             type="email"
             autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            disabled={submitting}
             value={form.email}
-            onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
-            placeholder="admin@example.com"
+            onChange={(event) => updateField('email', event.target.value)}
+            placeholder="请输入管理员邮箱"
             required
           />
-        </label>
-        <label>
-          <span>密码</span>
+          </div>
+        </div>
+        <div className="admin-login-field">
+          <label htmlFor="admin-login-password">登录密码</label>
+          <div className="admin-login-input">
+          <LockKeyhole size={18} aria-hidden="true" />
           <input
-            type="password"
+            id="admin-login-password"
+            name="password"
+            type={showPassword ? 'text' : 'password'}
             autoComplete="current-password"
+            disabled={submitting}
             value={form.password}
-            onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+            onChange={(event) => updateField('password', event.target.value)}
+            onKeyDown={(event) => setCapsLock(event.getModifierState('CapsLock'))}
+            onKeyUp={(event) => setCapsLock(event.getModifierState('CapsLock'))}
+            onBlur={() => setCapsLock(false)}
+            aria-describedby={capsLock ? 'admin-login-caps' : undefined}
             placeholder="请输入管理员密码"
             required
           />
-        </label>
-        {loginError && <p className="admin-login-error">{loginError}</p>}
-        <button className="primary-button" type="submit" disabled={submitting}>
-          {submitting ? '登录中...' : '进入管理端'}
+          <button className="admin-login-password-toggle" type="button" disabled={submitting} onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? '隐藏密码' : '显示密码'} aria-pressed={showPassword}>
+            {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+          </button>
+          </div>
+          {capsLock && <p className="admin-login-caps" id="admin-login-caps" role="status">大写锁定已开启</p>}
+        </div>
+        {loginError && <div className="admin-login-error" role="alert"><AlertCircle size={17} aria-hidden="true" /><span>{loginError}</span></div>}
+        <button className="primary-button admin-login-submit" type="submit" disabled={submitting}>
+          {submitting ? <><RefreshCw size={17} className="spin" aria-hidden="true" />正在登录…</> : <>登录管理端<ArrowRight size={17} aria-hidden="true" /></>}
         </button>
-        <small>首次使用请先在管理后端环境变量中配置管理员初始化账号。</small>
+        <p className="admin-login-help">账号由管理员统一分配。<br />如需开通账号或重置密码，请联系系统管理员。</p>
       </form>
+        <p className="admin-login-footer"><ShieldCheck size={15} aria-hidden="true" />管理员专用入口</p>
+      </div>
     </main>
   );
 }
@@ -297,7 +368,7 @@ function CompactId({ value }) {
   );
 }
 
-function AdminTable({ columns, rows, allRows, onView, sort, onSort }) {
+function AdminTable({ columns, rows, allRows, onView, sort, onSort, expandedId, renderExpanded }) {
   return (
     <div className="table-wrap">
       <table>
@@ -325,13 +396,15 @@ function AdminTable({ columns, rows, allRows, onView, sort, onSort }) {
             </tr>
           )}
           {rows.map((row) => (
+            <React.Fragment key={row.id || row.name}>
             <tr
               key={row.id || row.name}
               className="data-row"
               tabIndex={0}
+              aria-expanded={renderExpanded ? expandedId === row.id : undefined}
               onClick={() => onView?.(row, allRows)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
+                if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
                   event.preventDefault();
                   onView?.(row, allRows);
                 }
@@ -341,11 +414,13 @@ function AdminTable({ columns, rows, allRows, onView, sort, onSort }) {
                 <td key={column.key} className={column.className || ''}>{column.render ? column.render(row) : row[column.key] ?? '-'}</td>
               ))}
               <td className="row-action">
-                <button type="button" tabIndex={-1} onClick={(event) => { event.stopPropagation(); onView?.(row, allRows); }} aria-label="查看详情">
-                  <ChevronRight size={16} />
+                <button type="button" tabIndex={-1} onClick={(event) => { event.stopPropagation(); onView?.(row, allRows); }} aria-label={expandedId === row.id ? '收起详情' : '查看详情'}>
+                  {expandedId === row.id ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                 </button>
               </td>
             </tr>
+            {renderExpanded && expandedId === row.id && <tr className="expanded-record"><td colSpan={columns.length + 1}>{renderExpanded(row)}</td></tr>}
+            </React.Fragment>
           ))}
         </tbody>
       </table>
@@ -364,17 +439,25 @@ function DataWorkspace({
   filterKey,
   filterLabel = '全部状态',
   statusOptions,
+  filterPredicate,
   presetFilter = '',
+  expandedId,
+  renderExpanded,
+  recordFilterKind,
 }) {
-  const [filterValue, setFilterValue] = useState(presetFilter);
+  const [filterValue, setFilterValue] = useState(() => typeof presetFilter === 'object' ? presetFilter.status || '' : presetFilter);
+  const [recordFilters, setRecordFilters] = useState({});
   const [sort, setSort] = useState({ key: '', direction: 'asc' });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
   useEffect(() => {
-    setFilterValue(presetFilter || '');
+    const status = typeof presetFilter === 'object' ? presetFilter.status : presetFilter;
+    const lowScorePreset = recordFilterKind === 'reports' && status === '低于 70 分';
+    setFilterValue(lowScorePreset ? '' : status || '');
+    setRecordFilters({ ...(typeof presetFilter === 'object' ? presetFilter.records : {}), ...(lowScorePreset ? { scoreBand: 'low' } : {}) });
     setPage(1);
-  }, [presetFilter]);
+  }, [presetFilter, recordFilterKind]);
 
   const filterOptions = useMemo(
     () => statusOptions || [...new Set(rows.map((row) => row[filterKey]).filter(Boolean))],
@@ -384,9 +467,10 @@ function DataWorkspace({
   const filteredRows = useMemo(() => {
     const keyword = String(query || '').trim().toLowerCase();
     const filtered = rows.filter((row) => {
-      const matchesFilter = !filterValue || row[filterKey] === filterValue;
+      const matchesFilter = !filterValue || (filterPredicate ? filterPredicate(row, filterValue) : row[filterKey] === filterValue);
       const searchableText = Object.values(row).filter((value) => typeof value !== 'object').join(' ').toLowerCase();
-      return matchesFilter && (!keyword || searchableText.includes(keyword));
+      return matchesFilter && (!recordFilterKind || matchesRecordFilters(row, recordFilters, recordFilterKind === 'interviews' ? 'updatedAt' : 'createdAt'))
+        && (!keyword || searchableText.includes(keyword));
     });
     if (!sort.key) return filtered;
     return [...filtered].sort((left, right) => {
@@ -399,17 +483,17 @@ function DataWorkspace({
         : String(leftValue).localeCompare(String(rightValue), 'zh-CN', { numeric: true });
       return sort.direction === 'asc' ? comparison : -comparison;
     });
-  }, [rows, query, filterKey, filterValue, sort]);
+  }, [rows, query, filterKey, filterValue, filterPredicate, sort, recordFilterKind, recordFilters]);
 
   useEffect(() => {
     setPage(1);
-  }, [query, filterValue, pageSize]);
+  }, [query, filterValue, pageSize, recordFilters]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const safePage = Math.min(page, totalPages);
   const startIndex = (safePage - 1) * pageSize;
   const visibleRows = filteredRows.slice(startIndex, startIndex + pageSize);
-  const hasFilters = Boolean(query || filterValue);
+  const hasFilters = Boolean(query || filterValue || Object.values(recordFilters).some(Boolean));
 
   const handleSort = (key) => {
     setSort((current) => current.key === key
@@ -419,6 +503,7 @@ function DataWorkspace({
 
   const resetFilters = () => {
     setFilterValue('');
+    setRecordFilters({});
     onQueryChange?.('');
     setSort({ key: '', direction: 'asc' });
   };
@@ -428,11 +513,13 @@ function DataWorkspace({
       title={title}
       icon={icon}
       className="data-workspace"
-      action={<span className="record-count">{filteredRows.length} 条结果</span>}
+      action={<span className="record-count" role="status">{filteredRows.length} 条结果{recordFilterKind && hasFilters ? ` / 共 ${rows.length} 条` : ''}</span>}
     >
       <div className="table-toolbar">
         <div className="table-filter-group">
           <Filter size={15} />
+          {recordFilterKind && <label className="record-search"><Search size={15} /><input type="search" aria-label="搜索当前记录"
+            placeholder="搜索姓名、学号、岗位或 ID" value={query || ''} onChange={(event) => onQueryChange?.(event.target.value)} /></label>}
           <select value={filterValue} onChange={(event) => setFilterValue(event.target.value)} aria-label={filterLabel}>
             <option value="">{filterLabel}</option>
             {filterOptions.map((option) => <option value={option} key={option}>{option}</option>)}
@@ -441,7 +528,9 @@ function DataWorkspace({
         </div>
         <span className="data-scope-note">列表内容来自当前管理端数据范围</span>
       </div>
-      <AdminTable columns={columns} rows={visibleRows} allRows={filteredRows} onView={onView} sort={sort} onSort={handleSort} />
+      {recordFilterKind && <RecordFilterFields kind={recordFilterKind} rows={rows} filters={recordFilters} onChange={setRecordFilters} />}
+      {recordFilterKind && hasFilters && filteredRows.length === 0 && <p className="record-filter-empty">没有符合当前条件的记录，可以调整条件或点击上方“清空筛选”。</p>}
+      <AdminTable columns={columns} rows={visibleRows} allRows={filteredRows} onView={onView} sort={sort} onSort={handleSort} expandedId={expandedId} renderExpanded={renderExpanded} />
       <footer className="table-pagination">
         <span>
           {filteredRows.length === 0 ? '0' : `${startIndex + 1}–${Math.min(startIndex + pageSize, filteredRows.length)}`} / {filteredRows.length}
@@ -535,11 +624,11 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
               {rows.map((item) => (
                 <div key={item.label}>
                   <span>{item.label}</span>
-                  <strong>{item.value || '-'}</strong>
+                  <strong>{item.value === 0 ? '0' : item.value || '-'}</strong>
                 </div>
               ))}
             </div>
-            {blocks.map((block) => (
+            {blocks.map((block) => block.kind ? <ReportReviewSection key={block.title} kind={block.kind} value={block.value} /> : (
               <section className="detail-block" key={block.title}>
                 <h3>{block.title}</h3>
                 {block.items?.length > 0 ? (
@@ -644,14 +733,15 @@ function formatDetail(type, payload, fallbackRow) {
       type: 'interview',
       id: interview.id || fallbackRow.id,
       title: `训练 · ${interview.target_role || fallbackRow.role}`,
+      status: ({ completed: '已完成', in_progress: '进行中', running: '进行中', pending: '进行中', created: '进行中' })[interview.status] || interview.status || fallbackRow.status,
       messages: payload.messages || [],
       reviewReport: payload.reviewReport || null,
       rows: [
         { label: '候选人', value: interview.candidate },
         { label: '邮箱', value: interview.candidate_email },
         { label: '训练类型', value: interview.interview_type || fallbackRow.type },
-        { label: '状态', value: interview.status || fallbackRow.status },
-        { label: '难度', value: interview.difficulty },
+        { label: '状态', value: ({ completed: '已完成', in_progress: '进行中', running: '进行中', pending: '进行中', created: '进行中' })[interview.status] || interview.status || fallbackRow.status },
+        { label: '目标岗位', value: interview.target_role || fallbackRow.role },
         { label: '公司场景', value: interview.company_context },
         { label: '开始时间', value: interview.started_at },
         { label: '完成时间', value: interview.completed_at },
@@ -670,11 +760,11 @@ function formatDetail(type, payload, fallbackRow) {
           title: '问答摘要',
           items: (payload.messages || [])
             .filter((message) => message.sender_type === 'candidate' || (message.sender_type === 'agent' && message.message_type !== 'system'))
-            .slice(-10).map((message) => ({
+            .map((message) => ({
             id: message.id,
             title: message.sender_type === 'candidate' ? '候选人' : message.agent_name || '面试官',
             meta: `${message.message_type} · ${message.created_at}`,
-            text: compactText(message.content, 260),
+            text: compactText(message.transcript_text || message.content, 180),
           })),
         },
       ],
@@ -690,7 +780,7 @@ function formatDetail(type, payload, fallbackRow) {
         { label: '候选人', value: report.candidate },
         { label: '邮箱', value: report.candidate_email },
         { label: '目标岗位', value: report.target_role || report.role },
-        { label: '总分', value: report.total_score || report.score },
+        { label: '总分', value: report.total_score ?? report.score },
         { label: '等级', value: report.grade },
         { label: '准备建议', value: report.pass_recommendation || report.recommendation },
         { label: '生成来源', value: report.fallback ? `本地兜底 · ${report.model || 'rules-v1'}` : `${report.provider || '-'} · ${report.model || '-'}` },
@@ -700,8 +790,8 @@ function formatDetail(type, payload, fallbackRow) {
       blocks: [
         { title: '报告摘要', text: report.summary },
         { title: '提升建议', text: report.suggestions },
-        { title: 'Agent 反馈', text: compactText(report.agent_feedback, 900) },
-        { title: '时间线复盘', text: compactText(report.timeline_review, 900) },
+        { title: '面试官反馈', kind: 'feedback', value: report.agent_feedback },
+        { title: '逐题复盘', kind: 'timeline', value: report.timeline_review },
       ],
     };
   }
@@ -731,94 +821,120 @@ function formatDetail(type, payload, fallbackRow) {
   };
 }
 
-function Dashboard({ data, admin, onNavigate, onView }) {
-  const reviewCount = data.reports.filter((report) => report.reviewStatus === '待复核').length;
-  const runningCount = data.interviews.filter((interview) => interview.status === '进行中').length;
-  const lowScoreCount = data.reports.filter((report) => Number(report.score) < 70).length;
-  const averageScore = data.reports.length
-    ? Math.round(data.reports.reduce((sum, item) => sum + Number(item.score || 0), 0) / data.reports.length)
-    : 0;
-  const highScoreCount = data.reports.filter((item) => Number(item.score) >= 85).length;
-  const mediumScoreCount = data.reports.filter((item) => Number(item.score) >= 70 && Number(item.score) < 85).length;
-  const queueReports = data.reports.filter((report) => report.reviewStatus === '待复核').slice(0, 5);
-  const queueInterviews = data.interviews.filter((interview) => interview.status === '进行中').slice(0, 5);
-  const queueItems = queueReports.length ? queueReports : queueInterviews;
-  const queueType = queueReports.length ? 'report' : 'interview';
+const isLowScoreReport = (report) => report.score != null && report.score !== '' && Number.isFinite(Number(report.score)) && Number(report.score) < 70;
+const matchesReportFilter = (report, filter) => filter === '低于 70 分' ? isLowScoreReport(report) : report.reviewStatus === filter;
 
-  const metrics = [
-    { label: '待复核报告', value: reviewCount, note: '进入审核队列', tone: reviewCount ? 'red' : 'green', view: 'reports', filter: '待复核' },
-    ...(data.permissions?.canViewInterviews ? [{ label: '进行中面试', value: runningCount, note: '查看实时进度', tone: 'blue', view: 'interviews', filter: '进行中' }] : []),
-    { label: '低分报告', value: lowScoreCount, note: '低于 70 分', tone: lowScoreCount ? 'amber' : 'green', view: 'reports', filter: '' },
-  ];
-
-  return (
-    <div className="dashboard-page">
-      <section className="dashboard-welcome">
-        <div>
-          <span>{roleLabels[admin?.role] || '管理员'}工作台</span>
-          <h2>先处理今天最需要关注的事项</h2>
-          <p>指标卡和任务队列都可以直接进入对应记录。</p>
-        </div>
-        <span className="connection-pill"><i /> 服务正常</span>
-      </section>
-
-      <section className="metric-grid">
-        {metrics.map((item) => (
-          <button className={`metric-card ${item.tone}`} key={item.label} type="button" onClick={() => onNavigate(item.view, item.filter)}>
-            <span>{item.label}</span>
-            <strong>{item.value}</strong>
-            <small>{item.note}<ChevronRight size={14} /></small>
-          </button>
-        ))}
-      </section>
-
-      <section className="content-grid">
-        <SectionCard
-          title="优先处理"
-          icon={<Activity size={18} />}
-          action={<button className="section-link" type="button" onClick={() => onNavigate(queueType === 'report' ? 'reports' : 'interviews', queueType === 'report' ? '待复核' : '进行中')}>查看全部 <ChevronRight size={14} /></button>}
-        >
-          <div className="task-queue">
-            {queueItems.length === 0 && <EmptyState text="当前没有需要立即处理的任务" />}
-            {queueItems.map((item) => (
-              <button type="button" key={item.id} onClick={() => onView(queueType, item, queueItems)}>
-                <span className={`task-dot ${queueType === 'report' ? 'amber' : 'blue'}`} />
-                <span>
-                  <strong>{item.candidate || item.name || '未命名记录'}</strong>
-                  <small>{item.role || item.target_role || '-'} · {queueType === 'report' ? `${item.score || 0} 分` : item.status}</small>
-                </span>
-                <ChevronRight size={16} />
-              </button>
-            ))}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="报告质量概览" icon={<BarChart3 size={18} />}>
-          <div className="score-overview">
-            {data.reports.length === 0 ? <EmptyState text="生成报告后展示统计" /> : (
-              <>
-                <div className="average-score">
-                  <div><span>平均分</span><strong>{averageScore}<small>/100</small></strong></div>
-                  <div className="bar-track"><span style={{ width: `${Math.min(averageScore, 100)}%` }} /></div>
-                </div>
-                <div className="distribution-grid">
-                  <div><strong>{highScoreCount}</strong><span>优秀（85+）</span></div>
-                  <div><strong>{mediumScoreCount}</strong><span>合格（70–84）</span></div>
-                  <div><strong>{lowScoreCount}</strong><span>需关注（&lt;70）</span></div>
-                </div>
-              </>
-            )}
-          </div>
-        </SectionCard>
-      </section>
-    </div>
-  );
+function interviewReviewId() {
+  const match = window.location.hash.match(/^#\/interviews\/review\/([^/?]+)/);
+  try { return match ? decodeURIComponent(match[1]) : ''; } catch { return ''; }
 }
 
-function InterviewsPage({ data, onView, query, onQueryChange, presetFilter }) {
+function InterviewsPage({ data, query, onQueryChange, presetFilter, requestedId, onReviewed }) {
+  const [expandedId, setExpandedId] = useState(() => requestedId || interviewReviewId());
+  const [record, setRecord] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [reviewing, setReviewing] = useState(() => Boolean(interviewReviewId()));
+  const [saving, setSaving] = useState(false);
+  const [reviewError, setReviewError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [revision, setRevision] = useState(0);
+  const [liveError, setLiveError] = useState('');
+  const reviewHeading = useRef(null);
+  const canReview = data.permissions?.canViewReports;
+
+  useEffect(() => { if (requestedId) setExpandedId(requestedId); }, [requestedId]);
+  useEffect(() => {
+    const syncReview = () => {
+      const id = interviewReviewId();
+      setReviewing(Boolean(id));
+      if (id) setExpandedId(id);
+    };
+    window.addEventListener('hashchange', syncReview);
+    return () => window.removeEventListener('hashchange', syncReview);
+  }, []);
+  const openReview = () => {
+    window.history.pushState(null, '', `#/interviews/review/${encodeURIComponent(expandedId)}`);
+    setReviewing(true);
+    setReviewError('');
+    setNotice('');
+  };
+  const closeReview = () => {
+    window.history.replaceState(null, '', '#/interviews');
+    setReviewing(false);
+  };
+  useEffect(() => {
+    if (!expandedId) { setRecord(null); return undefined; }
+    let active = true;
+    setLoading(true);
+    setError('');
+    setRecord(null);
+    setLiveError('');
+    adminRequest(`/api/admin/interviews/${encodeURIComponent(expandedId)}`)
+      .then((payload) => { if (active) setRecord(formatDetail('interview', payload, { id: expandedId })); })
+      .catch((requestError) => { if (active) setError(requestError.message); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [expandedId, revision]);
+
+  useEffect(() => {
+    if (!expandedId || reviewing || saving || record?.status !== '进行中') return undefined;
+    let active = true;
+    let pending = false;
+    const refresh = async () => {
+      if (document.hidden || pending) return;
+      pending = true;
+      try {
+        const payload = await adminRequest(`/api/admin/interviews/${encodeURIComponent(expandedId)}`);
+        if (active) { setRecord(formatDetail('interview', payload, { id: expandedId })); setLiveError(''); }
+      } catch (failure) {
+        if (active) setLiveError(`训练详情更新失败：${failure.message}`);
+      } finally { pending = false; }
+    };
+    const timer = window.setInterval(refresh, 10000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { active = false; window.clearInterval(timer); document.removeEventListener('visibilitychange', refresh); };
+  }, [expandedId, reviewing, saving, record?.status]);
+
+  useEffect(() => { if (reviewing) reviewHeading.current?.focus(); }, [reviewing]);
+
+  const submitReview = async (status) => {
+    if (saving || !record?.reviewReport?.id || !canReview) return;
+    setSaving(true);
+    setReviewError('');
+    try {
+      await adminRequest(`/api/admin/reports/${encodeURIComponent(record.reviewReport.id)}/review`, {
+        method: 'PATCH', body: JSON.stringify({ status }),
+      });
+      setRecord((current) => ({ ...current, reviewReport: { ...current.reviewReport, review_status: status } }));
+      onReviewed?.(record.reviewReport.id, status);
+      setNotice(status === 'approved' ? '已通过复核，结果已保存' : '已标记未通过，结果已保存');
+    } catch (requestError) {
+      setReviewError(requestError.message);
+    } finally { setSaving(false); }
+  };
+
+  const messages = (record?.messages || []).filter((message) => message.sender_type === 'candidate' || (message.sender_type === 'agent' && message.message_type !== 'system'));
+  const reviewLabel = ({ approved: '已复核', rejected: '复核未通过', pending: '待复核' })[record?.reviewReport?.review_status] || '待复核';
+  const details = () => (
+    <div className="interview-expanded-content">
+      {loading ? <div className="page-message" role="status"><RefreshCw size={18} className="spin" />正在读取训练详情</div>
+        : error ? <div className="page-message error" role="alert">{error}<button type="button" onClick={() => setRevision((value) => value + 1)}>重试</button></div>
+          : record && <>
+            {liveError && <p className="page-message warning" role="status">{liveError}，保留上次数据，将自动重试。</p>}
+            {record.status === '进行中' && <p className="data-scope-note">页面可见时每 10 秒更新训练详情。</p>}
+            <section className="interview-info-section"><h3>基本信息</h3><div className="detail-grid interview-info-grid">{record.rows.map((item) => <div key={item.label}><span>{item.label}</span><strong>{item.value || '-'}</strong></div>)}</div></section>
+            <section className="interview-info-section"><h3>Agent 队列</h3><div className="interview-agent-queue">{record.blocks[0].items.length ? record.blocks[0].items.map((agent, index) => <article key={agent.id || index}><b>{index + 1}</b><div><strong>{agent.title}</strong><span>{agent.meta}</span><p>{agent.text}</p></div></article>) : <EmptyState text="暂无 Agent 信息" />}</div></section>
+            <section className="interview-info-section"><div className="interview-section-heading"><h3>问答摘要 <small>{messages.length} 条</small></h3><button className="primary-button" type="button" onClick={openReview}><ShieldCheck size={16} />复核质检<ArrowRight size={15} /></button></div>
+              <div className="interview-summaries">{record.blocks[1].items.length ? record.blocks[1].items.map((message, index) => <article key={message.id || index}><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{message.title}</strong><p>{message.text}</p></div></article>) : <EmptyState text="这场训练暂无问答记录" />}</div>
+            </section>
+          </>}
+    </div>
+  );
+
   const columns = [
     { key: 'id', label: '训练 ID', sortable: false, render: (row) => <CompactId value={row.id} /> },
-    { key: 'candidate', label: '学生' },
+    { key: 'candidate', label: '学生姓名' },
     { key: 'role', label: '目标岗位' },
     { key: 'type', label: '训练类型' },
     { key: 'status', label: '状态', render: (row) => <StatusBadge>{row.status}</StatusBadge> },
@@ -826,7 +942,24 @@ function InterviewsPage({ data, onView, query, onQueryChange, presetFilter }) {
     { key: 'qaCount', label: '问答数' },
     { key: 'updatedAt', label: '更新时间' },
   ];
-  return <DataWorkspace title="模拟训练记录" icon={<ClipboardList size={18} />} columns={columns} rows={data.interviews} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部状态" statusOptions={['进行中', '已完成']} presetFilter={presetFilter} onView={(row, rows) => onView('interview', row, rows)} />;
+  return <>
+    <div hidden={reviewing}>
+      <DataWorkspace title="训练记录" icon={<ClipboardList size={18} />} columns={columns} rows={data.interviews} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部状态" statusOptions={['草稿', '进行中', '已完成']} presetFilter={presetFilter} recordFilterKind="interviews" onView={(row) => setExpandedId((current) => current === row.id ? '' : row.id)} expandedId={expandedId} renderExpanded={details} />
+    </div>
+    {reviewing && <section className="interview-review-page" aria-labelledby="interview-review-title">
+      <div className="review-page-heading"><button type="button" className="secondary-button" disabled={saving} onClick={closeReview}><ArrowLeft size={16} />返回训练记录</button><span>记录与质检 / 复核质检</span></div>
+      {loading && <div className="page-message" role="status">正在读取完整问答记录…</div>}
+      {error && <div className="page-message error" role="alert">{error}<button type="button" onClick={() => setRevision((value) => value + 1)}>重试</button></div>}
+      {!loading && !error &&
+      <SectionCard title="完整问答记录" icon={<ShieldCheck size={18} />} action={record?.reviewReport && <StatusBadge>{reviewLabel}</StatusBadge>}>
+        <div className="review-record-heading"><h2 id="interview-review-title" tabIndex={-1} ref={reviewHeading}>{record?.title}</h2><CompactId value={expandedId} /><p>按训练顺序查看完整提问与回答，核对后提交复核结果。</p></div>
+        <div className="review-transcript">{messages.length ? messages.map((message, index) => <article className={message.sender_type === 'candidate' ? 'candidate-message' : 'agent-message'} key={message.id || index}><header><strong>{message.sender_type === 'candidate' ? '候选人' : message.agent_name || '面试官'}</strong><span>{({ question: '提问', follow_up: '追问', answer: '回答', transcript: '回答' })[message.message_type] || '消息'} · {message.created_at || '-'}</span></header><p>{message.transcript_text || message.content || '无文本内容'}</p></article>) : <EmptyState text="这场训练暂无问答记录" />}</div>
+        {notice && <div className="page-message success" role="status"><CheckCircle2 size={18} />{notice}</div>}
+        {reviewError && <div className="page-message error" role="alert">{reviewError}</div>}
+        <footer className="review-page-actions"><span>{!canReview ? '当前账号没有复核权限' : !record?.reviewReport ? '训练报告尚未生成，暂不能提交复核' : '复核结果将保存，并记录操作人与时间'}</span><div><button type="button" className="secondary-button danger" disabled={saving || !canReview || !record?.reviewReport} onClick={() => submitReview('rejected')}>标记未通过</button><button type="button" className="primary-button" disabled={saving || !canReview || !record?.reviewReport} onClick={() => submitReview('approved')}>{saving ? '正在保存…' : '通过复核'}</button></div></footer>
+      </SectionCard>}
+    </section>}
+  </>;
 }
 
 function ReportsPage({ data, onView, query, onQueryChange, presetFilter }) {
@@ -840,29 +973,7 @@ function ReportsPage({ data, onView, query, onQueryChange, presetFilter }) {
     { key: 'reviewStatus', label: '复核状态', render: (row) => <StatusBadge>{row.reviewStatus}</StatusBadge> },
     { key: 'createdAt', label: '生成时间' },
   ];
-  return <DataWorkspace title="成长报告质检" icon={<FileText size={18} />} columns={columns} rows={data.reports} query={query} onQueryChange={onQueryChange} filterKey="reviewStatus" filterLabel="全部质检状态" presetFilter={presetFilter} onView={(row, rows) => onView('report', row, rows)} />;
-}
-
-function AgentsPage({ data, onView, query, onQueryChange, presetFilter }) {
-  const columns = [
-    { key: 'name', label: 'Agent 名称' },
-    { key: 'type', label: '类型' },
-    { key: 'focus', label: '考察重点' },
-    { key: 'usageCount', label: '使用次数' },
-    { key: 'status', label: '状态', render: (row) => <StatusBadge>{row.status}</StatusBadge> },
-  ];
-  return (
-    <section className="content-grid">
-      <DataWorkspace title="AI 陪练角色" icon={<Bot size={18} />} columns={columns} rows={data.agents} query={query} onQueryChange={onQueryChange} filterKey="status" filterLabel="全部角色状态" presetFilter={presetFilter} onView={(row, rows) => onView('agent', row, rows)} />
-      <SectionCard title="评分维度配置" icon={<SlidersHorizontal size={18} />}>
-        <div className="config-list">
-          {['技术深度', '表达清晰度', '业务理解', '架构思维', '稳定抗压'].map((item) => (
-            <div key={item}><span>{item}</span><b>权重 20%</b></div>
-          ))}
-        </div>
-      </SectionCard>
-    </section>
-  );
+  return <DataWorkspace title="成长报告质检" icon={<FileText size={18} />} columns={columns} rows={data.reports} query={query} onQueryChange={onQueryChange} filterKey="reviewStatus" filterLabel="全部报告" statusOptions={['待复核', '已复核', '复核未通过']} filterPredicate={matchesReportFilter} presetFilter={presetFilter} recordFilterKind="reports" onView={(row, rows) => onView('report', row, rows)} />;
 }
 
 const connectionEventLabels = {
@@ -894,22 +1005,29 @@ const connectionLevelLabels = {
   error: '错误',
 };
 
-function RegistrationsPage() {
+function RegistrationsPage({ onNavigate, createMode = false, onRegistered, presetFilter }) {
   const [registrations, setRegistrations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [notice, setNotice] = useState('');
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [rosterScope, setRosterScope] = useState({});
+  useEffect(() => {
+    if (presetFilter && typeof presetFilter === 'object') {
+      setStatusFilter(presetFilter.status || 'all');
+      setRosterScope(presetFilter.records || {});
+      setQuery(presetFilter.query || '');
+    }
+  }, [presetFilter]);
   const [importing, setImporting] = useState(false);
   const [activating, setActivating] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [deletingId, setDeletingId] = useState('');
-  const [addOpen, setAddOpen] = useState(false);
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
-  const [addForm, setAddForm] = useState({ collegeId: '', classId: '', studentNo: '', name: '', gender: '' });
+  const [addForm, setAddForm] = useState({ collegeId: '', classId: '', studentNo: '', name: '', gender: '', counselor: null });
   const [addStructure, setAddStructure] = useState({ colleges: [], classes: [] });
   const [addStructureLoading, setAddStructureLoading] = useState(false);
   const [addStructureError, setAddStructureError] = useState('');
@@ -930,6 +1048,7 @@ function RegistrationsPage() {
 
   useEffect(() => {
     loadRegistrations();
+    if (createMode) loadAddStructure();
   }, []);
 
   const loadAddStructure = async () => {
@@ -946,20 +1065,17 @@ function RegistrationsPage() {
   };
 
   const openAddStudent = () => {
-    setAddForm({ collegeId: '', classId: '', studentNo: '', name: '', gender: '' });
-    setAddError('');
-    setAddStructure({ colleges: [], classes: [] });
-    setAddOpen(true);
-    loadAddStructure();
+    onNavigate('studentCreate');
   };
 
   const closeAddStudent = () => {
     if (addSaving) return;
-    setAddOpen(false);
+    onNavigate('studentAccounts');
   };
 
   const updateAddForm = (field, value) => setAddForm((current) => (
-    field === 'collegeId' ? { ...current, collegeId: value, classId: '' } : { ...current, [field]: value }
+    field === 'collegeId' ? { ...current, collegeId: value, classId: '', counselor: null }
+      : field === 'classId' ? { ...current, classId: value, counselor: null } : { ...current, [field]: value }
   ));
 
   // 优先读取班级配置，缺失时从同学院、同班级的注册名单识别辅导员。
@@ -967,6 +1083,7 @@ function RegistrationsPage() {
   const addSelectedClass = addStructure.classes.find((item) => item.id === addForm.classId) || null;
   const addSelectedCollege = addStructure.colleges.find((item) => item.id === addForm.collegeId) || null;
   const addCounselor = resolveRegistrationCounselor(addSelectedCollege, addSelectedClass, addStructure.classes, registrations);
+  const counselorValue = addForm.counselor ?? addCounselor.counselor ?? '';
 
   const handleAddStudent = async (event) => {
     event.preventDefault();
@@ -974,14 +1091,14 @@ function RegistrationsPage() {
       setAddError('请先选择学院与班级。');
       return;
     }
-    if (!addCounselor.counselor) {
-      setAddError(addCounselor.error);
+    if (!counselorValue.trim()) {
+      setAddError('请填写辅导员。');
       return;
     }
     const payload = {
       college: addSelectedCollege.name,
       className: addSelectedClass.name,
-      counselor: addCounselor.counselor,
+      counselor: counselorValue.trim(),
       studentNo: addForm.studentNo.trim(),
       name: addForm.name.trim(),
       gender: addForm.gender.trim(),
@@ -998,9 +1115,8 @@ function RegistrationsPage() {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      setNotice(`已${data.created ? '添加' : '更新'}学生信息：${payload.name}（${payload.studentNo}），当前为待激活状态`);
-      setAddOpen(false);
-      await loadRegistrations();
+      onRegistered?.(`已${data.created ? '添加' : '更新'}学生信息：${payload.name}（${payload.studentNo}），请在学生账号页核对激活状态`);
+      onNavigate('studentAccounts');
     } catch (requestError) {
       setAddError(requestError.message);
     } finally {
@@ -1036,6 +1152,17 @@ function RegistrationsPage() {
     }
   };
 
+  const downloadTemplate = () => {
+    const blob = new Blob(['\uFEFF学院,学号,姓名,性别,班级,辅导员\r\n'], { type: 'text/csv;charset=utf-8' });
+    const anchor = document.createElement('a');
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = '学生名单导入模板.csv';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(anchor.href);
+  };
+
   const handleExport = async () => {
     setExporting(true);
     setPageError('');
@@ -1050,8 +1177,7 @@ function RegistrationsPage() {
   };
 
   const handleActivate = async () => {
-    const pending = registrations.length - activatedCount;
-    if (!window.confirm(`将为尚未开通账号的 ${pending} 名注册学生批量开通候选人端账号。账号使用随机临时密码，首次登录需修改密码。确定继续吗？`)) return;
+    if (!window.confirm(`将为资料齐全的 ${eligiblePendingCount} 名待激活学生开通候选人端账号。账号使用随机临时密码，首次登录需修改密码。确定继续吗？`)) return;
     setActivating(true);
     setPageError('');
     setNotice('');
@@ -1117,16 +1243,19 @@ function RegistrationsPage() {
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     return registrations.filter((item) => {
+      if (!matchesRecordFilters(item, rosterScope)) return false;
       if (statusFilter === 'activated' && !item.activated) return false;
       if (statusFilter === 'pending' && item.activated) return false;
       if (!keyword) return true;
       return [item.studentNo, item.name, item.college, item.gender, item.className, item.counselor, item.importedBy]
         .join(' ').toLowerCase().includes(keyword);
     });
-  }, [registrations, query, statusFilter]);
+  }, [registrations, query, statusFilter, rosterScope]);
 
   const activatedCount = useMemo(() => registrations.filter((item) => item.activated).length, [registrations]);
   const missingCount = useMemo(() => registrations.filter((item) => (item.missing || []).length > 0).length, [registrations]);
+  const eligiblePendingCount = useMemo(() => registrations.filter((item) => !item.activated && (item.missing || []).length === 0).length, [registrations]);
+  const { unassigned: unassignedCount, unknown: unknownAssignmentCount } = useMemo(() => registrationAssignmentCounts(registrations), [registrations]);
 
   const inspectList = useMemo(() => {
     if (inspectMode === 'missing') return registrations.filter((item) => (item.missing || []).length > 0);
@@ -1137,6 +1266,7 @@ function RegistrationsPage() {
   const handleClearFilter = () => {
     setQuery('');
     setStatusFilter('all');
+    setRosterScope({});
   };
 
   const handleClearAll = async () => {
@@ -1157,19 +1287,37 @@ function RegistrationsPage() {
 
   return (
     <div className="registrations-page">
-      <section className="connection-log-summary">
-        <article><span>已导入学生</span><strong>{registrations.length}</strong></article>
+      {!createMode && <div>
+      <div className="registration-paths" aria-label="学生账号办理流程">
+        <div><strong>批量导入</strong><span>下载模板并上传名单 → 信息齐全者自动开通 → 核对归班 → 导出临时密码</span></div>
+        <div><strong>单人补录</strong><span>添加学生 → 检查待激活名单 → 开通账号 → 导出临时密码</span></div>
+      </div>
+      <section className="connection-log-summary registration-summary">
+        <article><span>已导入学生数量</span><strong>{registrations.length}</strong></article>
         <article><span>已激活账号</span><strong>{activatedCount}</strong></article>
         <article><span>待激活</span><strong>{registrations.length - activatedCount}</strong></article>
         <article><span>信息缺失</span><strong className={missingCount > 0 ? 'count-alert' : ''}>{missingCount}</strong></article>
+        <article><span>已开通但未归班</span><strong className={unassignedCount > 0 ? 'count-alert' : ''}>{unknownAssignmentCount > 0 ? '待核对' : unassignedCount}</strong></article>
       </section>
 
+      {unassignedCount > 0 && (
+        <div className="page-message warning registration-unassigned">
+          <AlertCircle size={18} />
+          <span>{unassignedCount} 名学生已开通账号，但尚未关联组织班级。请核对归班情况。</span>
+          <button className="section-link" type="button" onClick={() => onNavigate('organization', '未归班')}>查看未归班学生 <ChevronRight size={14} /></button>
+        </div>
+      )}
+
       <SectionCard
-        title="学生注册"
+        title="学生名单与账号"
         icon={<UserPlus size={18} />}
         action={<span className="record-count">候选人端凭学号 + 临时密码登录</span>}
       >
-        <div className="connection-log-toolbar registration-toolbar">
+        {(rosterScope.college || rosterScope.className) && <p className="academic-section-note">当前范围：{[rosterScope.college, rosterScope.className].filter(Boolean).join(' / ')}，点击“清空筛选”恢复全部名单。</p>}
+        <div className="registration-controls">
+          <div className="registration-control-group">
+            <strong>查询名单</strong>
+            <div className="registration-control-actions">
           <label>
             <Search size={15} />
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学院、学号、姓名、性别、班级、辅导员" />
@@ -1184,16 +1332,30 @@ function RegistrationsPage() {
             <option value="activated">已激活</option>
             <option value="pending">待激活</option>
           </select>
-          <button className="secondary-button" type="button" onClick={handleClearFilter} disabled={!query && statusFilter === 'all'} title="清空筛选条件">
+          <button className="secondary-button" type="button" onClick={handleClearFilter} disabled={!query && statusFilter === 'all' && !rosterScope.college && !rosterScope.className} title="清空筛选条件">
             <X size={15} />清空筛选
           </button>
+          <button className="secondary-button" type="button" onClick={loadRegistrations} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
+          </button>
+            </div>
+          </div>
+          <div className="registration-control-group">
+            <strong>录入与开通</strong>
+            <div className="registration-control-actions">
+          <button className="secondary-button" type="button" onClick={downloadTemplate}><Download size={15} />下载名单模板</button>
+          <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
+            <Upload size={15} className={importing ? 'spin' : ''} />
+            {importing ? '正在导入…' : '导入文档（CSV / Excel）'}
+            <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleImport} disabled={importing} hidden />
+          </label>
           <button
             className="secondary-button"
             type="button"
             onClick={openAddStudent}
             title="手动添加单个学生信息，用于补充数据或添加测试学生"
           >
-            <UserPlus size={15} />添加学生信息
+            <UserPlus size={15} />注册学生
           </button>
           <button
             className="secondary-button"
@@ -1211,11 +1373,6 @@ function RegistrationsPage() {
           >
             <UsersRound size={15} />检测激活
           </button>
-          <label className={`secondary-button import-button${importing ? ' disabled' : ''}`}>
-            <Upload size={15} className={importing ? 'spin' : ''} />
-            {importing ? '正在导入…' : '导入文档（CSV / Excel）'}
-            <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleImport} disabled={importing} hidden />
-          </label>
           <button
             className="secondary-button"
             type="button"
@@ -1228,12 +1385,17 @@ function RegistrationsPage() {
           <button
             className="secondary-button"
             type="button"
-            disabled={activating || registrations.length === 0}
+            disabled={activating || eligiblePendingCount === 0}
             onClick={handleActivate}
             title="为尚未开通账号的注册学生批量开通候选人端账号"
           >
-            <UserPlus size={15} className={activating ? 'spin' : ''} />一键激活账号
+            <UserPlus size={15} className={activating ? 'spin' : ''} />开通待激活账号
           </button>
+            </div>
+          </div>
+          <details className="registration-maintenance">
+            <summary>账号与名单维护</summary>
+            <div className="registration-control-actions">
           <button
             className="secondary-button danger"
             type="button"
@@ -1243,9 +1405,6 @@ function RegistrationsPage() {
           >
             <Trash2 size={15} />删除全部账号
           </button>
-          <button className="secondary-button" type="button" onClick={loadRegistrations} disabled={loading}>
-            <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
-          </button>
           <button
             className="secondary-button danger"
             type="button"
@@ -1254,9 +1413,11 @@ function RegistrationsPage() {
           >
             <Trash2 size={15} />清空数据
           </button>
+            </div>
+          </details>
         </div>
 
-        <p className="form-hint">文档需包含「学院」「学号」「姓名」「性别」「班级」「辅导员」六列（支持中文或 college / student_no / name / gender / class_name / counselor 列名）；导入后会自动为六项信息（学院、学号、姓名、性别、班级、辅导员）齐全的学生开通候选人端账号，账号使用随机临时密码，学生凭「学号 + 临时密码」首次登录后必须修改密码。缺任一字段的学生会被标记为「信息缺失」，且不会被开通账号。「导出临时密码」会导出尚未改密学生的临时密码，请交由对应辅导员发放。</p>
+        <p className="form-hint">名单需有学院、学号、姓名、性别、班级、辅导员六列。导入时会为六项齐全的学生自动开通账号；缺项者保留在名单中，补齐后再开通。临时密码只可在学生首次改密前导出，请交由对应辅导员发放。</p>
 
         {pageError && <div className="page-message error"><AlertCircle size={18} />{pageError}</div>}
         {notice && <div className="page-message success"><CheckCircle2 size={18} />{notice}</div>}
@@ -1291,6 +1452,7 @@ function RegistrationsPage() {
                   <th>班级</th>
                   <th>辅导员</th>
                   <th>状态</th>
+                  <th>组织归属</th>
                   <th>导入人</th>
                   <th>导入时间</th>
                   <th>操作</th>
@@ -1311,6 +1473,7 @@ function RegistrationsPage() {
                       {mark('班级', item.className)}
                       {mark('辅导员', item.counselor)}
                       <td><span className={`status-badge ${item.activated ? 'green' : 'gray'}`}>{item.activated ? '已激活' : '待激活'}</span></td>
+                      <td>{item.activated ? <StatusBadge>{registrationAssignmentLabel(item)}</StatusBadge> : '-'}</td>
                       <td>{item.importedBy || '-'}</td>
                       <td>{item.createdAt ? item.createdAt.slice(0, 19).replace('T', ' ') : '-'}</td>
                       <td>
@@ -1346,14 +1509,16 @@ function RegistrationsPage() {
         )}
       </SectionCard>
 
-      {addOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="添加学生信息" onClick={closeAddStudent}>
-          <div className="modal-card student-add-modal" onClick={(event) => event.stopPropagation()}>
+      </div>}
+      {createMode && (
+        <div className="student-registration-page">
+          <section className="student-registration-form">
             <header>
-              <div><UserPlus size={18} /><h2>添加学生信息</h2></div>
-              <button className="modal-close" type="button" onClick={closeAddStudent} disabled={addSaving} title="关闭"><X size={18} /></button>
+              <div><UserPlus size={18} /><h2>学生基本信息</h2></div>
+              <span>标有 * 的项目为必填项</span>
             </header>
             <form className="job-form" onSubmit={handleAddStudent}>
+              {pageError && <div className="page-message error">{pageError}<button type="button" onClick={loadRegistrations}>重新读取学生名单</button></div>}
               {addStructureLoading ? (
                 <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取组织结构</div>
               ) : addStructureError ? (
@@ -1379,7 +1544,7 @@ function RegistrationsPage() {
                     </label>
                     <label className="field-block">
                       <span>辅导员 *</span>
-                      <input value={addCounselor.counselor} placeholder="选择班级后自动带出" readOnly disabled />
+                      <input value={counselorValue} onChange={(event) => updateAddForm('counselor', event.target.value)} placeholder="选择班级后自动带出，也可手动填写" required />
                     </label>
                     <label className="field-block">
                       <span>学号 *</span>
@@ -1404,19 +1569,24 @@ function RegistrationsPage() {
                   {addCounselor.source === 'registrations' && (
                     <p className="form-hint">辅导员已从该学院、该班级的学生名单中自动识别。</p>
                   )}
-                  {addCounselor.error && (
+                  {addCounselor.error && !counselorValue && (
                     <p className="form-hint error-hint">{addCounselor.error}</p>
                   )}
                 </>
               )}
               {addError && <div className="page-message error"><AlertCircle size={18} />{addError}</div>}
-              <p className="form-hint">填写完成后加入下方学生信息列表，状态为「待激活」。需要开通候选人端账号时，请在列表中点击「批量开通账号」；学号已存在时按补录更新该学生的六项信息。</p>
+              <p className="form-hint">填写完成后加入学生名单，状态为「待激活」。核对信息后，点击列表上方的「开通待激活账号」；学号已存在时会更新该学生的六项信息。</p>
               <footer>
-                <button type="button" className="secondary-button" onClick={closeAddStudent} disabled={addSaving}>取消</button>
-                <button type="submit" className="primary-button" disabled={addSaving || addStructureLoading || !addForm.collegeId || !addForm.classId || !addCounselor.counselor}>{addSaving ? '添加中…' : '确认添加'}</button>
+                <button type="button" className="secondary-button" onClick={closeAddStudent} disabled={addSaving}><ArrowLeft size={15} />返回学生账号</button>
+                <button type="submit" className="primary-button" disabled={addSaving || addStructureLoading || !addForm.collegeId || !addForm.classId || !counselorValue.trim()}>{addSaving ? '提交中…' : '提交并返回列表'}</button>
               </footer>
             </form>
-          </div>
+          </section>
+          <aside className="student-registration-help">
+            <h2>注册与开通流程</h2>
+            <ol><li><strong>填写学生资料</strong><p>选择组织归属，核对学号、姓名与辅导员信息。</p></li><li><strong>核对并开通账号</strong><p>提交后返回学生账号页，为待激活学生开通账号。</p></li><li><strong>发放临时密码</strong><p>导出临时密码，交由辅导员发放，学生首次登录后修改密码。</p></li></ol>
+            <p className="form-hint">批量录入请返回学生账号页，下载名单模板后导入。</p>
+          </aside>
         </div>
       )}
 
@@ -1464,25 +1634,11 @@ function RegistrationsPage() {
             <p className="form-hint">
               {inspectMode === 'missing'
                 ? `共 ${inspectList.length} 名学生信息不完整，补齐六项信息后才能开通账号。`
-                : `共 ${inspectList.length} 名学生尚未激活，可在列表中点击「一键激活账号」批量开通。`}
+                : `共 ${inspectList.length} 名学生尚未激活，核对信息后可点击「开通待激活账号」。`}
             </p>
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function ConnectionLogsModal({ onClose }) {
-  return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="连接日志" onClick={onClose}>
-      <div className="modal-card clog-modal" onClick={(event) => event.stopPropagation()}>
-        <header>
-          <span><Wifi size={18} />连接日志</span>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭连接日志"><X size={15} /></button>
-        </header>
-        <ConnectionLogsPage />
-      </div>
     </div>
   );
 }
@@ -1660,7 +1816,13 @@ const emptyCampusData = {
   summary: { colleges: 0, programs: 0, classes: 0, students: 0, unassigned: 0, focus: 0 },
 };
 
-function OrganizationPage({ onView, admin }) {
+function AcademicPage({ onView, admin, presetFilter, revision, canManageOrganization, onEditOrganization }) {
+  return <div className="academic-page">
+    <OrganizationPage onView={onView} admin={admin} presetFilter={presetFilter} revision={revision} canManageOrganization={canManageOrganization} onEditOrganization={onEditOrganization} />
+  </div>;
+}
+
+function OrganizationPage({ onView, admin, presetFilter = '', revision = 0, canManageOrganization, onEditOrganization }) {
   const [campus, setCampus] = useState(emptyCampusData);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1668,6 +1830,11 @@ function OrganizationPage({ onView, admin }) {
   const [busy, setBusy] = useState('');
   const [studentQuery, setStudentQuery] = useState('');
   const [studentFilter, setStudentFilter] = useState({ collegeId: '', programId: '', classId: '' });
+  const [onlyUnassigned, setOnlyUnassigned] = useState(presetFilter === '未归班');
+  const [dashboardScope, setDashboardScope] = useState({});
+  const [assignmentStudent, setAssignmentStudent] = useState(null);
+  const [assignmentForm, setAssignmentForm] = useState({ collegeId: '', programId: '', classId: '' });
+  const [assignmentError, setAssignmentError] = useState('');
   // 下级管理员未分配任何学生数据范围时，筛选区提示并禁用
   const scopeEmpty = admin?.role !== 'super_admin' && (admin?.student_scope || []).length === 0;
 
@@ -1686,7 +1853,14 @@ function OrganizationPage({ onView, admin }) {
 
   useEffect(() => {
     loadCampus();
-  }, []);
+  }, [revision]);
+
+  useEffect(() => {
+    const status = typeof presetFilter === 'object' ? presetFilter.status : presetFilter;
+    setOnlyUnassigned(status === '未归班');
+    setDashboardScope(typeof presetFilter === 'object' ? presetFilter.records || {} : {});
+    if (typeof presetFilter === 'object') setStudentQuery(presetFilter.query || '');
+  }, [presetFilter]);
 
   const allStudents = useMemo(() => {
     return [...(campus.students || []), ...(campus.pendingStudents || [])];
@@ -1702,6 +1876,7 @@ function OrganizationPage({ onView, admin }) {
   );
 
   const updateStudentFilter = (field, value) => {
+    setDashboardScope({});
     setStudentFilter((current) => {
       if (field === 'collegeId') return { collegeId: value, programId: '', classId: '' };
       if (field === 'programId') return { ...current, programId: value, classId: '' };
@@ -1709,11 +1884,20 @@ function OrganizationPage({ onView, admin }) {
     });
   };
 
-  const clearStudentFilter = () => setStudentFilter({ collegeId: '', programId: '', classId: '' });
+  const clearStudentFilter = () => {
+    setStudentFilter({ collegeId: '', programId: '', classId: '' });
+    setOnlyUnassigned(false);
+    setDashboardScope({});
+    setStudentQuery('');
+  };
 
   const filteredStudents = useMemo(() => {
     const keyword = studentQuery.trim().toLowerCase();
     return allStudents.filter((student) => {
+      const group = { college: student.classId ? student.college : student.registeredCollege || student.college,
+        className: student.classId ? student.className : student.registeredClassName || student.className };
+      if (!matchesRecordFilters(group, dashboardScope)) return false;
+      if (onlyUnassigned && (student.pending || student.classId)) return false;
       if (studentFilter.collegeId && student.collegeId !== studentFilter.collegeId) return false;
       if (studentFilter.programId && student.programId !== studentFilter.programId) return false;
       if (studentFilter.classId && student.classId !== studentFilter.classId) return false;
@@ -1721,9 +1905,41 @@ function OrganizationPage({ onView, admin }) {
       const searchable = [student.name, student.email, student.studentNo, student.targetRole, student.program, student.className].join(' ').toLowerCase();
       return searchable.includes(keyword);
     });
-  }, [allStudents, studentQuery, studentFilter]);
+  }, [allStudents, studentQuery, studentFilter, onlyUnassigned, dashboardScope]);
 
-  const hasStudentFilter = Boolean(studentFilter.collegeId || studentFilter.programId || studentFilter.classId);
+  const hasStudentFilter = Boolean(studentFilter.collegeId || studentFilter.programId || studentFilter.classId || onlyUnassigned || dashboardScope.college || dashboardScope.className || studentQuery);
+
+  const assignmentPrograms = campus.programs.filter((item) => item.college_id === assignmentForm.collegeId);
+  const assignmentClasses = campus.classes.filter((item) => item.program_id === assignmentForm.programId);
+
+  const openAssignment = (student) => {
+    const currentClass = campus.classes.find((item) => item.id === student.classId);
+    const programId = currentClass?.program_id || '';
+    const collegeId = student.collegeId || campus.programs.find((item) => item.id === programId)?.college_id || campus.colleges.find((item) => item.name === student.college)?.id || '';
+    setAssignmentStudent(student);
+    setAssignmentForm({ collegeId, programId, classId: currentClass?.id || '' });
+    setAssignmentError('');
+  };
+
+  const saveAssignment = async (event) => {
+    event.preventDefault();
+    if (!assignmentStudent || !assignmentForm.classId) return;
+    setBusy(`assign-${assignmentStudent.id}`);
+    setAssignmentError('');
+    try {
+      await adminRequest(`/api/admin/campus/students/${encodeURIComponent(assignmentStudent.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ classId: assignmentForm.classId }),
+      });
+      setAssignmentStudent(null);
+      setMessage('学生班级归属已更新');
+      await loadCampus();
+    } catch (requestError) {
+      setAssignmentError(requestError.message);
+    } finally {
+      setBusy('');
+    }
+  };
 
   const updateStudent = async (student, updates) => {
     setBusy(`student-${student.id}`);
@@ -1766,8 +1982,23 @@ function OrganizationPage({ onView, admin }) {
     <div className="campus-page">
       {(error || message) && <div className={`campus-feedback ${error ? 'error' : 'success'}`}>{error || message}</div>}
 
-      <section className="campus-workspace">
+      <section className="campus-workspace academic-student-workspace">
+        <SectionCard title="组织分类" icon={<Network size={18} />} className="academic-organization-card" action={canManageOrganization && <button type="button" className="section-link" onClick={onEditOrganization}>管理组织</button>}>
+          <p className="academic-section-note">依次选择学院、专业和班级，查看对应学生。</p>
+          <div className="campus-tree academic-organization-tree">
+            <button type="button" className={!studentFilter.collegeId ? 'active' : ''} onClick={clearStudentFilter}><span><UsersRound size={15} />全部学生</span><b>{allStudents.length}</b></button>
+            {campus.colleges.map((college) => <div className="campus-college-node" key={college.id}>
+              <button type="button" aria-expanded={studentFilter.collegeId === college.id} className={studentFilter.collegeId === college.id ? 'active' : ''} onClick={() => updateStudentFilter('collegeId', studentFilter.collegeId === college.id ? '' : college.id)}><span>{studentFilter.collegeId === college.id ? <ChevronDown size={15} /> : <ChevronRight size={15} />}<Building2 size={15} />{college.name}</span></button>
+              {studentFilter.collegeId === college.id && <div>{filterPrograms.length ? filterPrograms.map((program) => <div className="campus-program-node" key={program.id}>
+                <button type="button" aria-expanded={studentFilter.programId === program.id} className={studentFilter.programId === program.id ? 'active' : ''} onClick={() => updateStudentFilter('programId', studentFilter.programId === program.id ? '' : program.id)}><span>{studentFilter.programId === program.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<GraduationCap size={14} />{program.name}</span></button>
+                {studentFilter.programId === program.id && <div>{filterClasses.length ? filterClasses.map((classItem) => <button type="button" className={studentFilter.classId === classItem.id ? 'active' : ''} aria-pressed={studentFilter.classId === classItem.id} key={classItem.id} onClick={() => updateStudentFilter('classId', classItem.id)}><span>{classItem.name}</span></button>) : <p className="academic-section-note">暂无班级</p>}</div>}
+              </div>) : <p className="academic-section-note">暂无专业</p>}</div>}
+            </div>)}
+            {!campus.colleges.length && <EmptyState text="暂无可查看的组织" />}
+          </div>
+        </SectionCard>
         <SectionCard title="学生列表" icon={<UsersRound size={18} />} action={<span className="record-count">{filteredStudents.length} 名学生</span>} className="campus-students-card">
+          {(dashboardScope.college || dashboardScope.className) && <p className="academic-section-note">工作台筛选范围：{[dashboardScope.college, dashboardScope.className].filter(Boolean).join(' / ')}，可清空筛选查看全部学生。</p>}
           <div className="campus-student-toolbar">
             <label className="campus-student-search"><Search size={15} /><input value={studentQuery} onChange={(event) => setStudentQuery(event.target.value)} placeholder="搜索姓名、学号、邮箱或目标岗位" /></label>
             <div className="campus-student-filters">
@@ -1783,13 +2014,14 @@ function OrganizationPage({ onView, admin }) {
                 <option value="">{studentFilter.programId ? '全部班级' : '请先选专业'}</option>
                 {filterClasses.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
               </select>
+              <button className={`secondary-button${onlyUnassigned ? ' active' : ''}`} type="button" onClick={() => setOnlyUnassigned((current) => !current)} aria-pressed={onlyUnassigned}>只看未归班</button>
               <button className="secondary-button" type="button" onClick={clearStudentFilter} disabled={!hasStudentFilter} title="清空学院/专业/班级筛选"><X size={15} />清空筛选</button>
             </div>
           </div>
           {scopeEmpty && <p className="campus-scope-hint"><AlertCircle size={15} />当前账号未分配学生数据范围，无法筛选或查看学生，请联系超级管理员分配数据范围。</p>}
           <div className="table-wrap campus-student-table">
             <table>
-              <thead><tr><th>学生</th><th>目标岗位</th><th>准备度</th><th>训练</th><th>成长状态</th><th>班级</th><th>学院</th><th aria-label="关注" /></tr></thead>
+              <thead><tr><th>学生姓名</th><th>目标岗位</th><th>准备度</th><th>训练</th><th>成长状态</th><th>班级</th><th>学院</th><th>操作</th></tr></thead>
               <tbody>
                 {filteredStudents.length === 0 && <tr><td colSpan="8"><EmptyState text="当前范围没有学生" /></td></tr>}
                 {filteredStudents.map((student) => (
@@ -1804,7 +2036,10 @@ function OrganizationPage({ onView, admin }) {
                     <td onClick={(event) => event.stopPropagation()}>
                       {student.pending
                         ? <span className="student-pending-hint">未激活</span>
-                        : <button type="button" className={`focus-student-button ${student.focus ? 'active' : ''}`} disabled={busy === `student-${student.id}`} onClick={() => updateStudent(student, { focus: !student.focus })}>{student.focus ? '已关注' : '关注'}</button>}
+                        : <div className="campus-student-actions">
+                          <button type="button" className="secondary-button" onClick={() => openAssignment(student)}>{student.classId ? '调整班级' : '归入班级'}</button>
+                          <button type="button" className={`focus-student-button ${student.focus ? 'active' : ''}`} disabled={busy === `student-${student.id}`} onClick={() => updateStudent(student, { focus: !student.focus })}>{student.focus ? '已关注' : '关注'}</button>
+                        </div>}
                     </td>
                   </tr>
                 ))}
@@ -1813,6 +2048,20 @@ function OrganizationPage({ onView, admin }) {
           </div>
         </SectionCard>
       </section>
+      {assignmentStudent && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生归班" onClick={() => setAssignmentStudent(null)}>
+          <div className="modal-card student-add-modal" onClick={(event) => event.stopPropagation()}>
+            <header><div><School size={18} /><h2>为 {assignmentStudent.name} 选择班级</h2></div><button className="modal-close" type="button" onClick={() => setAssignmentStudent(null)} title="关闭"><X size={18} /></button></header>
+            <form className="campus-assignment-form" onSubmit={saveAssignment}>
+              <label className="field-block"><span>学院</span><select value={assignmentForm.collegeId} onChange={(event) => setAssignmentForm({ collegeId: event.target.value, programId: '', classId: '' })} required><option value="">请选择学院</option>{campus.colleges.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              <label className="field-block"><span>专业</span><select value={assignmentForm.programId} onChange={(event) => setAssignmentForm((current) => ({ ...current, programId: event.target.value, classId: '' }))} disabled={!assignmentForm.collegeId} required><option value="">请选择专业</option>{assignmentPrograms.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              <label className="field-block"><span>班级</span><select value={assignmentForm.classId} onChange={(event) => setAssignmentForm((current) => ({ ...current, classId: event.target.value }))} disabled={!assignmentForm.programId} required><option value="">请选择班级</option>{assignmentClasses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              {assignmentError && <div className="page-message error"><AlertCircle size={18} />{assignmentError}</div>}
+              <footer><button className="secondary-button" type="button" onClick={() => setAssignmentStudent(null)}>取消</button><button className="primary-button" type="submit" disabled={!assignmentForm.classId || busy.startsWith('assign-')}>{busy.startsWith('assign-') ? '保存中…' : '确认归班'}</button></footer>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2114,7 +2363,7 @@ function CatalogTree({ tree }) {
   );
 }
 
-function CatalogPage({ permissions }) {
+function CatalogLibraryPage({ permissions }) {
   const [versions, setVersions] = useState([]);
   const [selectedCode, setSelectedCode] = useState('');
   const [tree, setTree] = useState(null);
@@ -2420,8 +2669,7 @@ const jobPostingFormTemplate = {
 const matchStatusLabels = { satisfied: '已满足', partial: '部分满足', missing: '未体现' };
 const jdSubmissionStatusLabels = { pending: '待审核', approved: '已入库', rejected: '已驳回' };
 
-function JobPostingsPage() {
-  const [tab, setTab] = useState('postings');
+function JobPostingsPage({ tab = 'postings' }) {
   const [postings, setPostings] = useState([]);
   const [jobRoles, setJobRoles] = useState([]);
   const [postingNote, setPostingNote] = useState('');
@@ -2444,6 +2692,8 @@ function JobPostingsPage() {
   const [submissionKeyword, setSubmissionKeyword] = useState('');
   const [submissionStatusFilter, setSubmissionStatusFilter] = useState('');
   const [submissionForm, setSubmissionForm] = useState(null);
+  const [syncConfigured, setSyncConfigured] = useState(false);
+  const [syncErrors, setSyncErrors] = useState([]);
 
   const loadPostings = async () => {
     const query = new URLSearchParams();
@@ -2453,6 +2703,7 @@ function JobPostingsPage() {
     setPostings(result.postings || []);
     setJobRoles(result.jobRoles || []);
     setPostingNote(result.scopeNote || '');
+    setSyncConfigured(Boolean(result.syncConfigured));
   };
 
   const loadMatches = async () => {
@@ -2620,10 +2871,12 @@ function JobPostingsPage() {
   };
 
   const syncPostings = async () => {
-    setBusy('sync'); setMessage(''); setPageError('');
+    setBusy('sync'); setMessage(''); setPageError(''); setSyncErrors([]);
     try {
       const result = await adminRequest('/api/admin/job-postings/sync', { method: 'POST' });
-      setMessage(result.message || '第三方数据源同步完成。');
+      setMessage(`同步完成：新增 ${result.created} 条，更新 ${result.updated} 条，失败 ${result.skipped} 条。`);
+      setSyncErrors(result.errors || []);
+      await loadPostings();
     } catch (requestError) { setPageError(requestError.message); }
     finally { setBusy(''); }
   };
@@ -2647,12 +2900,6 @@ function JobPostingsPage() {
 
   return (
     <div className="job-postings-page">
-      <div className="job-tabs" role="tablist">
-        <button type="button" className={tab === 'postings' ? 'active' : ''} onClick={() => setTab('postings')}>岗位管理<span>{postings.length}</span></button>
-        <button type="button" className={tab === 'matches' ? 'active' : ''} onClick={() => setTab('matches')}>对比记录<span>{matches.length}</span></button>
-        <button type="button" className={tab === 'jdSubmissions' ? 'active' : ''} onClick={() => setTab('jdSubmissions')}>学生粘贴JD<span>{submissions.length}</span></button>
-      </div>
-
       {message && <p className="settings-message success catalog-message">{message}</p>}
       {pageError && <p className="settings-message error catalog-message">{pageError}</p>}
 
@@ -2733,8 +2980,9 @@ function JobPostingsPage() {
                 <button className="primary-button" type="submit" disabled={busy === 'import' || !file}>{busy === 'import' ? '导入中…' : '上传并导入'}</button>
               </form>
               <div className="job-action-form">
-                <p>预留第三方招聘平台数据源同步入口，配置 <code>JOB_POSTING_SYNC_ENDPOINT</code> 后即可启用。</p>
-                <button className="secondary-button" type="button" onClick={syncPostings} disabled={busy === 'sync'}><RefreshCw size={15} className={busy === 'sync' ? 'spin' : ''} />从数据源同步</button>
+                <p>{syncConfigured ? '数据源已配置。同步会按外部编号新增或更新岗位，不会删除已有岗位。' : '尚未配置招聘数据源，请联系系统维护人员接入。当前可使用手动录入或 Excel 导入。'}</p>
+                <button className="secondary-button" type="button" onClick={syncPostings} disabled={Boolean(busy) || !syncConfigured}><RefreshCw size={15} className={busy === 'sync' ? 'spin' : ''} />{busy === 'sync' ? '正在同步…' : '从数据源同步'}</button>
+                {syncErrors.length > 0 && <div className="page-message warning" role="status"><div>部分记录未能同步（最多显示 20 条）：<ul>{syncErrors.map((item, index) => <li key={index}>{item}</li>)}</ul></div></div>}
               </div>
             </div>
           </SectionCard>
@@ -2788,7 +3036,7 @@ function JobPostingsPage() {
         </SectionCard>
       ) : (
         <SectionCard
-          title="学生粘贴JD审核"
+          title="学生 JD 审核"
           icon={<ClipboardList size={18} />}
           action={(
             <div className="job-toolbar-actions">
@@ -3062,371 +3310,11 @@ function JobPostingsPage() {
   );
 }
 
-function SettingsPage({ data, onSettingsSaved }) {
-  const settings = data.settings || emptyAdminData.settings;
-  const [form, setForm] = useState({
-    reportOpenaiApiKey: '',
-    reportOpenaiModel: settings.reportOpenaiModel || 'gpt-4o-mini',
-    reportQwenApiKey: '',
-    reportQwenModel: settings.reportQwenModel || 'qwen-plus',
-    reportProviderOrder: settings.reportProviderOrder || 'openai,qwen',
-    reportTimeout: settings.reportTimeout || 60,
-    reportRetries: settings.reportRetries ?? 1,
-    openaiApiKey: '',
-    openaiRealtimeModel: settings.openaiRealtimeModel === '-' ? '' : settings.openaiRealtimeModel,
-    openaiVoice: settings.openaiVoice === '-' ? '' : settings.openaiVoice,
-    dashscopeApiKey: '',
-    qwenTtsModel: settings.qwenTtsModel === '-' ? '' : settings.qwenTtsModel,
-    qwenTtsVoice: settings.qwenTtsVoice === '-' ? '' : settings.qwenTtsVoice,
-    qwenTtsRegion: settings.qwenTtsRegion || 'beijing',
-    qwenTtsWorkspaceId: settings.qwenTtsWorkspaceId || '',
-    qwenOmniModel: settings.qwenOmniModel || 'qwen3.5-omni-plus-realtime',
-    qwenOmniVoice: settings.qwenOmniVoice || 'Tina',
-    qwenOmniRegion: settings.qwenOmniRegion || 'beijing',
-    qwenOmniWorkspaceId: settings.qwenOmniWorkspaceId || '',
-    qwenOmniEndpoint: settings.qwenOmniEndpoint || '',
-  });
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState('');
-  const [saveError, setSaveError] = useState('');
-  const [testingProviders, setTestingProviders] = useState(false);
-  const [providerTestResults, setProviderTestResults] = useState([]);
-  const [providerTestError, setProviderTestError] = useState('');
-  const openaiReady = Boolean(settings.openaiApiKeyConfigured);
-  const reportOpenaiReady = Boolean(settings.reportOpenaiApiKeyConfigured);
-  const reportQwenReady = Boolean(settings.reportQwenApiKeyConfigured);
-  const dashscopeReady = Boolean(settings.dashscopeApiKeyConfigured);
-  const qwenOmniReady = Boolean(settings.qwenOmniApiKeyConfigured);
-
-  useEffect(() => {
-    setForm((current) => ({
-      ...current,
-      reportOpenaiModel: settings.reportOpenaiModel || 'gpt-4o-mini',
-      reportQwenModel: settings.reportQwenModel || 'qwen-plus',
-      reportProviderOrder: settings.reportProviderOrder || 'openai,qwen',
-      reportTimeout: settings.reportTimeout || 60,
-      reportRetries: settings.reportRetries ?? 1,
-      openaiRealtimeModel: settings.openaiRealtimeModel === '-' ? '' : settings.openaiRealtimeModel,
-      openaiVoice: settings.openaiVoice === '-' ? '' : settings.openaiVoice,
-      qwenTtsModel: settings.qwenTtsModel === '-' ? '' : settings.qwenTtsModel,
-      qwenTtsVoice: settings.qwenTtsVoice === '-' ? '' : settings.qwenTtsVoice,
-      qwenTtsRegion: settings.qwenTtsRegion || 'beijing',
-      qwenTtsWorkspaceId: settings.qwenTtsWorkspaceId || '',
-      qwenOmniModel: settings.qwenOmniModel || 'qwen3.5-omni-plus-realtime',
-      qwenOmniVoice: settings.qwenOmniVoice || 'Tina',
-      qwenOmniRegion: settings.qwenOmniRegion || 'beijing',
-      qwenOmniWorkspaceId: settings.qwenOmniWorkspaceId || '',
-      qwenOmniEndpoint: settings.qwenOmniEndpoint || '',
-    }));
-  }, [
-    settings.reportOpenaiModel,
-    settings.reportQwenModel,
-    settings.reportProviderOrder,
-    settings.reportTimeout,
-    settings.reportRetries,
-    settings.openaiRealtimeModel,
-    settings.openaiVoice,
-    settings.qwenTtsModel,
-    settings.qwenTtsVoice,
-    settings.qwenTtsRegion,
-    settings.qwenTtsWorkspaceId,
-    settings.qwenOmniModel,
-    settings.qwenOmniVoice,
-    settings.qwenOmniRegion,
-    settings.qwenOmniWorkspaceId,
-    settings.qwenOmniEndpoint,
-  ]);
-
-  const updateForm = (key, value) => setForm((current) => ({ ...current, [key]: value }));
-
-  const handleSave = async (event) => {
-    event.preventDefault();
-    setSaving(true);
-    setMessage('');
-    setSaveError('');
-    try {
-      const data = await adminRequest('/api/admin/settings', {
-        method: 'PATCH',
-        body: JSON.stringify(form),
-      });
-      setMessage(data.message || '配置已保存。');
-      setForm((current) => ({
-        ...current,
-        reportOpenaiApiKey: '',
-        reportQwenApiKey: '',
-        openaiApiKey: '',
-        dashscopeApiKey: '',
-      }));
-      onSettingsSaved(data.settings);
-    } catch (requestError) {
-      setSaveError(requestError.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-  const testReportProviders = async () => {
-    setTestingProviders(true);
-    setProviderTestResults([]);
-    setProviderTestError('');
-    try {
-      const result = await adminRequest('/api/admin/settings/report-providers/test', { method: 'POST' });
-      setProviderTestResults(result.providers || []);
-    } catch (requestError) {
-      setProviderTestError(requestError.message);
-    } finally {
-      setTestingProviders(false);
-    }
-  };
-  return (
-    <section className="content-grid">
-      <SectionCard title="系统配置" icon={<Settings size={18} />}>
-        <form className="settings-form" onSubmit={handleSave}>
-          <div className="settings-overview">
-            <div className={`settings-status ${reportOpenaiReady || reportQwenReady ? 'ready' : 'missing'}`}>
-              {reportOpenaiReady || reportQwenReady ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-              <div>
-                <strong>复盘报告 AI</strong>
-                <span>OpenAI {reportOpenaiReady ? settings.reportOpenaiApiKeyMasked : '未配置'} · 千问 {reportQwenReady ? settings.reportQwenApiKeyMasked : '未配置'}</span>
-              </div>
-            </div>
-            <div className={`settings-status ${openaiReady ? 'ready' : 'missing'}`}>
-              {openaiReady ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-              <div>
-                <strong>OpenAI 实时语音</strong>
-                <span>{openaiReady ? `已配置 ${settings.openaiApiKeyMasked}` : '待配置 API Key'}</span>
-              </div>
-            </div>
-            <div className={`settings-status ${dashscopeReady ? 'ready' : 'missing'}`}>
-              {dashscopeReady ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-              <div>
-                <strong>千问语音合成</strong>
-                <span>{dashscopeReady ? `已配置 ${settings.dashscopeApiKeyMasked}` : '待配置 DashScope Key'}</span>
-              </div>
-            </div>
-            <div className={`settings-status ${qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? 'ready' : 'missing'}`}>
-              {qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-              <div>
-                <strong>Qwen Omni WebRTC</strong>
-                <span>{qwenOmniReady ? `密钥已配置 ${settings.qwenOmniApiKeyMasked}` : '待配置 DashScope Key'}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="provider-card">
-            <div className="provider-card-header">
-              <div>
-                <KeyRound size={18} />
-                <div>
-                  <h3>OpenAI Realtime</h3>
-                  <p>控制用户端电话面试、实时转写和 AI 面试官语音回复。</p>
-                </div>
-              </div>
-              <span className={`provider-pill ${openaiReady ? 'ready' : 'missing'}`}>{openaiReady ? '可用' : '未配置'}</span>
-            </div>
-            <label className="field-block">
-              <span>API Key</span>
-              <input
-                type="password"
-                value={form.openaiApiKey}
-                onChange={(event) => updateForm('openaiApiKey', event.target.value)}
-                placeholder={openaiReady ? `保留当前：${settings.openaiApiKeyMasked}` : 'sk-...'}
-              />
-              <small>留空不会覆盖已有密钥；只在需要替换时填写。</small>
-            </label>
-            <div className="field-grid">
-              <label className="field-block">
-                <span>Realtime 模型</span>
-                <input value={form.openaiRealtimeModel} onChange={(event) => updateForm('openaiRealtimeModel', event.target.value)} placeholder="gpt-realtime-2" />
-              </label>
-              <label className="field-block">
-                <span>输出音色</span>
-                <input value={form.openaiVoice} onChange={(event) => updateForm('openaiVoice', event.target.value)} placeholder="marin" />
-              </label>
-            </div>
-          </div>
-
-          <div className="provider-card">
-            <div className="provider-card-header">
-              <div>
-                <KeyRound size={18} />
-                <div>
-                  <h3>DashScope / 千问流式 TTS</h3>
-                  <p>面向文本追问转语音播放：AI 已生成文本后，服务端用 CosyVoice 流式合成音频并返回用户端播放。</p>
-                </div>
-              </div>
-              <span className={`provider-pill ${dashscopeReady ? 'ready' : 'missing'}`}>{dashscopeReady ? '可用' : '未配置'}</span>
-            </div>
-            <label className="field-block">
-              <span>API Key</span>
-              <input
-                type="password"
-                value={form.dashscopeApiKey}
-                onChange={(event) => updateForm('dashscopeApiKey', event.target.value)}
-                placeholder={dashscopeReady ? `保留当前：${settings.dashscopeApiKeyMasked}` : 'sk-...'}
-              />
-              <small>留空不会覆盖已有密钥；用于服务端连接 DashScope CosyVoice 流式语音合成。</small>
-            </label>
-            <div className="field-grid">
-              <label className="field-block">
-                <span>TTS 模型</span>
-                <input value={form.qwenTtsModel} onChange={(event) => updateForm('qwenTtsModel', event.target.value)} placeholder="cosyvoice-v3-flash" />
-              </label>
-              <label className="field-block">
-                <span>TTS 音色</span>
-                <input value={form.qwenTtsVoice} onChange={(event) => updateForm('qwenTtsVoice', event.target.value)} placeholder="longanyang" />
-              </label>
-            </div>
-            <div className="field-grid">
-              <label className="field-block">
-                <span>TTS 地域</span>
-                <input value={form.qwenTtsRegion} onChange={(event) => updateForm('qwenTtsRegion', event.target.value)} placeholder="beijing" />
-                <small>默认使用北京：beijing；新加坡可填 singapore 或 ap-southeast-1。</small>
-              </label>
-              <label className="field-block">
-                <span>Workspace ID</span>
-                <input value={form.qwenTtsWorkspaceId} onChange={(event) => updateForm('qwenTtsWorkspaceId', event.target.value)} placeholder="新加坡地域必填，北京地域可留空" />
-                <small>仅新加坡地域需要，用来拼接专属 WebSocket 接入地址。</small>
-              </label>
-            </div>
-          </div>
-
-          <div className="provider-card report-provider-card">
-            <div className="provider-card-header">
-              <div>
-                <KeyRound size={18} />
-                <div>
-                  <h3>复盘报告 / 单题评价模型</h3>
-                  <p>为综合复盘报告和单题评分配置独立文本模型密钥，不再依赖实时语音密钥。</p>
-                </div>
-              </div>
-              <span className={`provider-pill ${reportOpenaiReady || reportQwenReady ? 'ready' : 'missing'}`}>
-                {reportOpenaiReady || reportQwenReady ? '已配置' : '未配置'}
-              </span>
-            </div>
-            <div className="field-grid">
-              <label className="field-block">
-                <span>OpenAI 文本 API Key</span>
-                <input type="password" autoComplete="new-password" value={form.reportOpenaiApiKey} onChange={(event) => updateForm('reportOpenaiApiKey', event.target.value)} placeholder={reportOpenaiReady ? `保留当前：${settings.reportOpenaiApiKeyMasked}` : 'sk-...'} />
-                <small>写入 OPENAI_API_KEY；留空不会覆盖已有密钥。</small>
-              </label>
-              <label className="field-block">
-                <span>OpenAI 报告模型</span>
-                <input value={form.reportOpenaiModel} onChange={(event) => updateForm('reportOpenaiModel', event.target.value)} placeholder="gpt-4o-mini" />
-              </label>
-            </div>
-            <div className="field-grid">
-              <label className="field-block">
-                <span>千问文本 API Key</span>
-                <input type="password" autoComplete="new-password" value={form.reportQwenApiKey} onChange={(event) => updateForm('reportQwenApiKey', event.target.value)} placeholder={reportQwenReady ? `保留当前：${settings.reportQwenApiKeyMasked}` : 'sk-...'} />
-                <small>写入 QWEN_API_KEY；不会再把语音 Key 当作报告专用配置。</small>
-              </label>
-              <label className="field-block">
-                <span>千问报告模型</span>
-                <input value={form.reportQwenModel} onChange={(event) => updateForm('reportQwenModel', event.target.value)} placeholder="qwen-plus" />
-              </label>
-            </div>
-            <div className="field-grid report-runtime-grid">
-              <label className="field-block">
-                <span>供应商优先顺序</span>
-                <select value={form.reportProviderOrder} onChange={(event) => updateForm('reportProviderOrder', event.target.value)}>
-                  <option value="openai,qwen">OpenAI 优先，千问备用</option>
-                  <option value="qwen,openai">千问优先，OpenAI 备用</option>
-                  <option value="openai">仅 OpenAI</option>
-                  <option value="qwen">仅千问</option>
-                </select>
-              </label>
-              <label className="field-block">
-                <span>单供应商超时（秒）</span>
-                <input type="number" min="10" max="180" value={form.reportTimeout} onChange={(event) => updateForm('reportTimeout', event.target.value)} />
-              </label>
-              <label className="field-block">
-                <span>网络重试次数</span>
-                <input type="number" min="0" max="4" value={form.reportRetries} onChange={(event) => updateForm('reportRetries', event.target.value)} />
-              </label>
-            </div>
-            <div className="provider-test-actions">
-              <button className="secondary-button" type="button" onClick={testReportProviders} disabled={testingProviders}>{testingProviders ? '检测中...' : '检测报告模型连通性'}</button>
-              <span>请先保存配置，再执行检测；检测会发送一个最小 JSON 请求。</span>
-            </div>
-            {providerTestError && <p className="settings-message error">{providerTestError}</p>}
-            {providerTestResults.length > 0 && (
-              <div className="provider-test-results">
-                {providerTestResults.map((item) => (
-                  <div className={item.status === 'ok' ? 'ready' : 'missing'} key={item.provider}>
-                    <strong>{item.provider.toUpperCase()} · {item.model}</strong>
-                    <span>{item.status === 'ok' ? `连接成功 · ${item.latency_ms} ms` : item.error || '检测失败'}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="provider-card">
-            <div className="provider-card-header">
-              <div>
-                <KeyRound size={18} />
-                <div>
-                  <h3>Qwen-Omni Realtime WebRTC</h3>
-                  <p>浏览器与千问实时模型直连音频，后端仅代理 SDP 鉴权和会话配置。</p>
-                </div>
-              </div>
-              <span className={`provider-pill ${qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? 'ready' : 'missing'}`}>
-                {qwenOmniReady && (form.qwenOmniWorkspaceId || form.qwenOmniEndpoint) ? '可联调' : '缺少配置'}
-              </span>
-            </div>
-            <div className="field-grid">
-              <label className="field-block">
-                <span>Realtime 模型</span>
-                <input value={form.qwenOmniModel} onChange={(event) => updateForm('qwenOmniModel', event.target.value)} placeholder="qwen3.5-omni-plus-realtime" />
-              </label>
-              <label className="field-block">
-                <span>输出音色</span>
-                <input value={form.qwenOmniVoice} onChange={(event) => updateForm('qwenOmniVoice', event.target.value)} placeholder="Tina" />
-              </label>
-            </div>
-            <div className="field-grid">
-              <label className="field-block">
-                <span>地域</span>
-                <input value={form.qwenOmniRegion} onChange={(event) => updateForm('qwenOmniRegion', event.target.value)} placeholder="beijing" />
-                <small>支持 beijing/cn 或 singapore/ap-southeast-1。</small>
-              </label>
-              <label className="field-block">
-                <span>Workspace ID</span>
-                <input value={form.qwenOmniWorkspaceId} onChange={(event) => updateForm('qwenOmniWorkspaceId', event.target.value)} placeholder="百炼业务空间 ID" />
-                <small>后端会根据地域自动生成官方 WebRTC Endpoint。</small>
-              </label>
-            </div>
-            <label className="field-block">
-              <span>自定义 WebRTC Endpoint（可选）</span>
-              <input value={form.qwenOmniEndpoint} onChange={(event) => updateForm('qwenOmniEndpoint', event.target.value)} placeholder="https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/webrtc/realtime" />
-              <small>仅代理、自定义域名或特殊部署需要填写；常规接入留空即可。</small>
-            </label>
-          </div>
-
-          <div className="settings-note">
-            <span>配置文件</span>
-            <b>{settings.envPath}</b>
-            <p>保存会写入用户端后端 .env；复盘报告文本模型会在下一次请求时热加载，实时语音配置仍需重启用户端后端。</p>
-          </div>
-          {message && <p className="settings-message success">{message}</p>}
-          {saveError && <p className="settings-message error">{saveError}</p>}
-          <div className="settings-actions">
-            <button className="primary-button" type="submit" disabled={saving}>
-              {saving ? '保存中...' : '保存 AI 配置'}
-            </button>
-            <span>保存后密钥输入框会自动清空，页面只显示脱敏状态。</span>
-          </div>
-        </form>
-      </SectionCard>
-    </section>
-  );
-}
-
 const PERMISSION_OPTIONS = [
   { key: 'manageCatalog', label: '岗位知识库', desc: '维护目标岗位、专业方向与能力模型，含发布与导入' },
   { key: 'manageStudents', label: '学生管理', desc: '查看与维护学生信息、归班与重点关注，需选择数据范围' },
   { key: 'manageOrganization', label: '组织管理', desc: '维护学院、专业、班级组织结构' },
-  { key: 'manageModelConfig', label: '面试模型配置', desc: '查看与配置 AI 陪练角色' },
+  { key: 'manageModelConfig', label: '模型配置入口', desc: '查看模型用途说明；全局参数与密钥仅超级管理员可管理' },
   { key: 'viewInterviews', label: '查看训练记录', desc: '查看学生模拟训练进度与详情' },
   { key: 'viewReports', label: '报告质检', desc: '查看成长报告并执行质量复核' },
 ];
@@ -3602,9 +3490,8 @@ function PermissionChecklist({ options, value, onChange }) {
 
 const PERMISSION_STATUS_LABELS = { pending: '待审核', approved: '已通过', rejected: '已驳回' };
 
-function PermissionPage({ data }) {
+function PermissionPage({ data, tab = 'requests' }) {
   const isSuper = data.admin?.role === 'super_admin';
-  const [tab, setTab] = useState(isSuper ? 'admins' : 'requests');
   const [adminUsers, setAdminUsers] = useState(data.adminUsers || []);
   const [requests, setRequests] = useState([]);
   const [org, setOrg] = useState({ colleges: [], programs: [], classes: [] });
@@ -3782,23 +3669,7 @@ function PermissionPage({ data }) {
 
   return (
     <section className="settings-page">
-      <div className="perm-tabs">
-        {isSuper && (
-          <button type="button" className={tab === 'admins' ? 'active' : ''} onClick={() => setTab('admins')}>
-            <UserCog size={16} />管理员管理
-          </button>
-        )}
-        <button type="button" className={tab === 'requests' ? 'active' : ''} onClick={() => setTab('requests')}>
-          <KeyRound size={16} />权限申请
-        </button>
-        {isSuper && (
-          <button type="button" className={tab === 'review' ? 'active' : ''} onClick={() => setTab('review')}>
-            <ShieldCheck size={16} />申请审核
-          </button>
-        )}
-      </div>
-
-      {tab === 'admins' && (
+      {tab === 'admins' && isSuper && (
         <SectionCard title="管理员管理" icon={<UserCog size={18} />}>
           <form className="admin-account-form" onSubmit={createAdmin}>
             <h3>创建管理员</h3>
@@ -3939,7 +3810,7 @@ function PermissionPage({ data }) {
         </SectionCard>
       )}
 
-      {tab === 'review' && (
+      {tab === 'review' && isSuper && (
         <SectionCard title="申请审核" icon={<ShieldCheck size={18} />}>
           {(adminMessage || adminError) && (
             <p className={`settings-message ${adminError ? 'error' : 'success'}`}>{adminError || adminMessage}</p>
@@ -4031,20 +3902,30 @@ function PermissionPage({ data }) {
 }
 
 const pageDescriptions = {
-  dashboard: '集中处理今天最需要关注的任务',
+  dashboard: '集中处理学生待办，跟进训练与报告',
   guide: '按步骤了解管理端从初始化到日常运营的完整流程',
-  interviews: '查看学生模拟训练进度与 AI 陪练运行情况',
+  interviews: '展开训练记录查看摘要，进入复核质检核对完整问答',
   reports: '抽检成长报告的准确性与建议质量',
-  organization: '维护学院、专业、班级和学生组织归属',
-  organizationConfig: '维护学院、专业和班级结构',
-  catalog: '维护目标岗位、专业方向与能力模型',
-  jobPostings: '维护招聘岗位信息，查看对比记录，并审核学生粘贴的岗位描述',
-  agents: '查看 AI 陪练角色及使用情况',
-  settings: '管理服务配置、管理员与审计记录',
-  permission: '创建下级管理员、分配权限与数据范围，审核下级权限申请',
+  organization: '按组织查询学生，查看训练情况并维护归班信息',
+  organizationConfig: '维护学院、专业、班级与辅导员，支持批量导入组织结构',
+  studentAccounts: '导入学生名单、开通账号并发放临时密码',
+  studentCreate: '填写单个学生资料，提交后在学生账号页核对并开通账号',
+  catalog: '为学校专业关联就业岗位，维护推荐方向',
+  jobPostings: '维护招聘岗位，支持手动录入、批量导入与数据源同步',
+  jobMatches: '查看学生简历与招聘岗位的匹配情况和对比详情',
+  jdSubmissions: '审核学生提交的岗位描述，整理并维护招聘信息',
+  modelText: '配置报告生成、单题评分使用的模型与调用策略',
+  modelRealtime: '配置实时语音面试的模型、音色与接入参数',
+  interviewerPolicy: '配置交流风格、考察重点、追问深度与各轮面试官职责',
+  modelTts: '配置面试追问文本转语音使用的模型与音色',
+  connectionLogs: '查看实时面试连接记录，定位语音与网络链路问题',
+  securityLogs: '核对账号操作与权限变更，追踪异常和安全事件',
+  adminUsers: '创建下级管理员，分配功能权限与学生数据范围',
+  permissionRequests: '申请所需功能权限与数据范围，查看申请进度',
+  permissionReview: '审核下级管理员的权限申请，查看已处理记录',
 };
 
-const searchableViews = new Set(['interviews', 'reports', 'agents']);
+const searchableViews = new Set(['interviews', 'reports']);
 
 const roleCapabilityHints = {
   super_admin: '（超级管理员）可访问本页全部模块，负责系统初始化与全局配置',
@@ -4057,7 +3938,7 @@ const guideFlow = [
     icon: 'Lightbulb',
     desc: '上线前先完成基础配置与权限分配，为后续组织、账号和训练内容打好基础。',
     steps: [
-      { view: 'settings', text: '在「系统管理」配置报告大模型 / 供应商，以及质检相关规则。' },
+      { view: 'agents', text: '在「模型配置」配置报告评分、实时面试与语音合成的模型和密钥。' },
       { view: 'permission', text: '在「权限管理」创建下级管理员，分配功能权限与数据范围，并按需审核下级权限申请。' },
     ],
   },
@@ -4065,12 +3946,13 @@ const guideFlow = [
     key: 'students',
     title: '第二步 · 组织与学生账号',
     icon: 'UsersRound',
-    desc: '先搭好学院 / 专业 / 班级结构，再导入或补录学生名单并开通账号，学生才能登录候选人端。',
+    desc: '先维护组织结构，再选择批量导入或手动补录。两种方式的账号开通时间不同。',
     steps: [
-      { view: 'organizationConfig', text: '在「组织」点击右上角「组织配置」新增学院、专业、班级，并为班级填写辅导员。' },
-      { view: 'organization', text: '在「学生」点击右上角「学生注册」，导入学生名单，或用「添加学生信息」手动补录（状态为「待激活」）。' },
-      { view: 'organization', text: '在注册窗口用「检测信息」核对学院、学号、姓名、性别、班级、辅导员六项是否齐全，用「检测激活」查看未激活学生。' },
-      { view: 'organization', text: '信息齐全后在注册列表点击「批量开通账号」，学生凭学号 + 临时密码登录候选人端并改密。' },
+      { view: 'organizationConfig', action: 'orgConfig', text: '配置学院、专业、班级和辅导员。' },
+      { view: 'studentAccounts', text: '批量导入学生名单：资料齐全的学生会自动开通账号；缺失信息的学生暂不开通。' },
+      { view: 'studentAccounts', text: '手动补录学生：先进入待激活名单，核对信息后再点击「开通待激活账号」。' },
+      { view: 'organization', text: '检查未归班学生，并在学生列表中选择正确的学院、专业和班级。' },
+      { view: 'studentAccounts', text: '导出临时密码并交由对应辅导员发放；学生首次登录后修改密码。' },
     ],
   },
   {
@@ -4079,9 +3961,9 @@ const guideFlow = [
     icon: 'BookOpen',
     desc: '训练内容决定学生练什么、AI 以什么角色陪练，是训练质量的基础。',
     steps: [
-      { view: 'catalog', text: '在「岗位知识库」维护目标岗位、专业方向与能力模型。' },
-      { view: 'jobPostings', text: '在「招聘信息库」维护招聘岗位信息、查看对比记录，并审核学生粘贴的岗位描述。' },
-      { view: 'agents', text: '在「面试模型配置」查看 AI 陪练角色及实际使用情况。' },
+      { view: 'catalog', text: '在「岗位信息」维护目标岗位、专业方向与能力模型。' },
+      { view: 'jobPostings', text: '在「招聘信息」维护招聘岗位信息、查看对比记录，并审核学生粘贴的岗位描述。' },
+      { view: 'agents', text: '在「模型配置」检查模型参数，保存后检测报告模型连通性。' },
     ],
   },
   {
@@ -4091,9 +3973,9 @@ const guideFlow = [
     desc: '上线后每天从工作台入口开始，跟进训练进度与报告质量。',
     steps: [
       { view: 'dashboard', text: '在「工作台」集中处理今日待办：待复核报告、进行中的面试。' },
-      { view: 'interviews', text: '在「训练记录」查看学生模拟训练进度与 AI 陪练运行情况。' },
-      { view: 'reports', text: '在「报告质检」抽检成长报告的准确性与建议质量。' },
-      { view: 'organization', text: '在「学生」维护学生列表：按学院 / 专业 / 班级级联筛选，处理未激活、名单已删除等异常学生。' },
+      { view: 'interviews', text: '在「记录与质检」查看学生模拟训练进度与 AI 陪练运行情况。' },
+      { view: 'reports', text: '在「记录与质检 → 报告质检」抽检成长报告的准确性与建议质量。' },
+      { view: 'organization', text: '在「教务信息」维护学生列表：按学院 / 专业 / 班级级联筛选，处理未激活、名单已删除等异常学生。' },
     ],
   },
   {
@@ -4102,15 +3984,19 @@ const guideFlow = [
     icon: 'Wifi',
     desc: '出现链路异常或需要审计时，在系统模块定位和排查问题。',
     steps: [
-      { view: 'settings', text: '在「系统管理」点击右上角「连接日志」排查千问 WebRTC 的 ICE、SDP、数据通道和音频链路。' },
-      { view: 'settings', text: '在「系统管理」管理全局配置、管理员账号并查看审计记录。' },
+      { view: 'connectionLogs', text: '在「系统管理 → 连接日志」排查实时面试的网络、音频和连接问题。' },
+      { view: 'securityLogs', text: '在「系统管理 → 安全审计」查看操作记录；管理员账号在「权限管理」维护。' },
     ],
   },
 ];
 
 const guidePhaseIcons = { Lightbulb, BookOpen, Activity, Wifi, UsersRound };
 
-function GuidePage({ onNavigate, admin }) {
+function GuidePage({ onNavigate, admin, visibleViews }) {
+  const availablePhases = guideFlow.map((phase) => ({
+    ...phase,
+    steps: phase.steps.filter((step) => visibleViews.has(step.view)),
+  })).filter((phase) => phase.steps.length > 0);
   return (
     <div className="guide-page">
       <section className="dashboard-welcome guide-welcome">
@@ -4123,7 +4009,7 @@ function GuidePage({ onNavigate, admin }) {
       </section>
 
       <div className="guide-flow">
-        {guideFlow.map((phase) => {
+        {availablePhases.map((phase) => {
           const Icon = guidePhaseIcons[phase.icon] || Lightbulb;
           return (
             <section className="guide-phase" key={phase.key}>
@@ -4140,8 +4026,8 @@ function GuidePage({ onNavigate, admin }) {
                     className="guide-step"
                     key={`${step.view}-${index}`}
                     type="button"
-                    onClick={() => onNavigate(step.view)}
-                    title={`前往「${step.view}」`}
+                    onClick={() => onNavigate(step.view, step.action)}
+                    title={step.action === 'orgConfig' ? '打开组织配置' : `前往${navItems.find((item) => item.key === step.view)?.label || '对应页面'}`}
                   >
                     <span className="guide-step-index"><MousePointerClick size={14} /></span>
                     <span className="guide-step-text">{step.text}</span>
@@ -4164,123 +4050,6 @@ const emptyOrgStructure = {
   summary: { colleges: 0, programs: 0, classes: 0, students: 0, unassigned: 0, focus: 0 },
 };
 
-function OrganizationConfigPage({ onNavigate, revision = 0 }) {
-  const [structure, setStructure] = useState(emptyOrgStructure);
-  const [loading, setLoading] = useState(true);
-  const [pageError, setPageError] = useState('');
-  // 展开状态：缺省即收起（学院/专业默认折叠）
-  const [expandedNodes, setExpandedNodes] = useState({});
-
-  const toggleNode = (key) => setExpandedNodes((current) => ({ ...current, [key]: !current[key] }));
-
-  const loadStructure = async () => {
-    setLoading(true);
-    setPageError('');
-    try {
-      const data = await adminRequest('/api/admin/organization/structure');
-      setStructure({
-        colleges: data.colleges || [],
-        programs: data.programs || [],
-        classes: data.classes || [],
-        summary: { ...emptyOrgStructure.summary, ...(data.summary || {}) },
-      });
-    } catch (requestError) {
-      setPageError(requestError.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadStructure();
-  }, [revision]);
-
-  const { colleges, programs, classes } = structure;
-
-  return (
-    <div className="org-page">
-      <SectionCard
-        title="组织结构"
-        icon={<Network size={18} />}
-        action={<button className="section-link" type="button" onClick={() => onNavigate('organization')}>进入学生管理 <ChevronRight size={14} /></button>}
-      >
-        {loading ? (
-          <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取组织结构</div>
-        ) : pageError ? (
-          <div className="page-message error"><AlertCircle size={18} />{pageError}<button type="button" onClick={loadStructure}>重新加载</button></div>
-        ) : colleges.length === 0 ? (
-          <div className="page-message">当前还没有组织结构，可点击右上角「组织配置」新增学院、专业和班级。</div>
-        ) : (
-          <div className="campus-tree">
-            <button type="button" className="active">
-              <span><i className="campus-caret-gap" aria-hidden="true" /><UsersRound size={15} />全部学生</span><b>{structure.summary.students}</b>
-            </button>
-            {colleges.map((college) => {
-              const collegeKey = `college:${college.id}`;
-              const collegePrograms = programs.filter((program) => program.college_id === college.id);
-              const collegeCollapsed = collegePrograms.length > 0 && !expandedNodes[collegeKey];
-              return (
-                <div className="campus-college-node" key={college.id}>
-                  <button
-                    type="button"
-                    className={collegeCollapsed ? 'collapsed' : ''}
-                    aria-expanded={collegePrograms.length > 0 ? !collegeCollapsed : undefined}
-                    title={collegePrograms.length > 0 ? (collegeCollapsed ? '展开学院' : '收起学院') : undefined}
-                    onClick={collegePrograms.length > 0 ? () => toggleNode(collegeKey) : undefined}
-                  >
-                    <span>
-                      {collegePrograms.length > 0
-                        ? (collegeCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />)
-                        : <i className="campus-caret-gap" aria-hidden="true" />}
-                      <Building2 size={15} />{college.name}
-                    </span><b>{college.studentCount || 0}</b>
-                  </button>
-                  {!collegeCollapsed && (
-                    <div>
-                      {collegePrograms.map((program) => {
-                        const programKey = `program:${program.id}`;
-                        const programClasses = classes.filter((classItem) => classItem.program_id === program.id);
-                        const programCollapsed = programClasses.length > 0 && !expandedNodes[programKey];
-                        return (
-                          <div className="campus-program-node" key={program.id}>
-                            <button
-                              type="button"
-                              className={programCollapsed ? 'collapsed' : ''}
-                              aria-expanded={programClasses.length > 0 ? !programCollapsed : undefined}
-                              title={programClasses.length > 0 ? (programCollapsed ? '展开专业' : '收起专业') : undefined}
-                              onClick={programClasses.length > 0 ? () => toggleNode(programKey) : undefined}
-                            >
-                              <span>
-                                {programClasses.length > 0
-                                  ? (programCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />)
-                                  : <i className="campus-caret-gap" aria-hidden="true" />}
-                                <GraduationCap size={14} />{program.name}
-                              </span><b>{program.studentCount || 0}</b>
-                            </button>
-                            {!programCollapsed && (
-                              <div>
-                                {programClasses.map((classItem) => (
-                                  <button type="button" key={classItem.id}>
-                                    <span><i className="campus-caret-gap" aria-hidden="true" />{classItem.name}</span><b>{classItem.studentCount || 0}</b>
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </SectionCard>
-    </div>
-  );
-}
-
 const orgcEmptyForm = {
   college: { code: '', name: '' },
   program: { collegeId: '', name: '' },
@@ -4295,7 +4064,7 @@ const orgcTypePath = {
   class: '/api/admin/campus/classes',
 };
 
-function OrganizationConfigModal({ onClose, onChanged }) {
+function OrganizationManagementPage({ onChanged }) {
   const [structure, setStructure] = useState(emptyOrgStructure);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -4558,15 +4327,14 @@ function OrganizationConfigModal({ onClose, onChanged }) {
   };
 
   return (
-    <div className="orgc-overlay" role="dialog" aria-modal="true" aria-label="组织配置" onClick={onClose}>
-      <div className="orgc-modal" onClick={(event) => event.stopPropagation()}>
+    <div className="organization-management-page">
+      <div className="orgc-page">
         <header className="orgc-head">
           <div>
             <Network size={18} />
-            <h2>组织配置</h2>
+            <h2>组织管理</h2>
             <span className="orgc-head-note">学院 / 专业 / 班级的新增、编辑、删除与批量导入</span>
           </div>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>
         </header>
 
         {(error || notice) && (
@@ -4720,23 +4488,36 @@ function OrganizationConfigModal({ onClose, onChanged }) {
 }
 
 function initialAdminView() {
-  const hashView = window.location.hash.replace(/^#\/?/, '').split('?')[0];
+  const hashView = window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
   return navItems.some((item) => item.key === hashView) ? hashView : 'dashboard';
 }
 
 function AdminApp({ admin, onSignedOut }) {
   const [activeView, setActiveView] = useState(initialAdminView);
+  const [navigationOpen, setNavigationOpen] = useState(() => {
+    try { return window.localStorage.getItem('admin-navigation-collapsed') !== 'true'; }
+    catch { return true; }
+  });
+  const navigationOpenButtonRef = useRef(null);
+  const navigationCloseButtonRef = useRef(null);
   const [adminData, setAdminData] = useState(emptyAdminData);
-  const [registrationsOpen, setRegistrationsOpen] = useState(false);
-  const [orgConfigOpen, setOrgConfigOpen] = useState(false);
-  const [connectionLogsOpen, setConnectionLogsOpen] = useState(false);
-  const [securityLogsOpen, setSecurityLogsOpen] = useState(false);
+  const [expandedNavigation, setExpandedNavigation] = useState(() => {
+    let saved = {};
+    try { saved = JSON.parse(window.localStorage.getItem('admin-navigation-groups') || '{}') || {}; }
+    catch { /* Use expanded defaults if storage is unavailable or invalid. */ }
+    return Object.fromEntries(navItems.filter((item) => item.container).map((item) => [item.key, typeof saved[item.key] === 'boolean' ? saved[item.key] : true]));
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem('admin-navigation-groups', JSON.stringify(expandedNavigation)); }
+    catch { /* Navigation remains usable when browser storage is unavailable. */ }
+  }, [expandedNavigation]);
   const [orgRevision, setOrgRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('checking');
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [autoRefreshError, setAutoRefreshError] = useState('');
   const [searchByView, setSearchByView] = useState({});
   const [viewPreset, setViewPreset] = useState({ view: '', value: '' });
   const [detail, setDetail] = useState(null);
@@ -4744,11 +4525,27 @@ function AdminApp({ admin, onSignedOut }) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
   const [notice, setNotice] = useState('');
+  const [requestedInterviewId, setRequestedInterviewId] = useState('');
   const visibleNavItems = useMemo(
-    () => navItems.filter((item) => !item.permission || adminData.permissions?.[item.permission]),
-    [adminData.permissions],
+    () => {
+      const allowed = navItems.filter((item) => (!item.permission || adminData.permissions?.[item.permission]) && (!item.superOnly || adminData.admin?.role === 'super_admin'));
+      return allowed.filter((item) => !item.container || allowed.some((child) => child.parent === item.key && !child.hidden));
+    },
+    [adminData.permissions, adminData.admin?.role],
   );
+  const navGroups = useMemo(() => visibleNavItems.filter((item) => !item.parent || !visibleNavItems.some((parent) => parent.key === item.parent)).reduce((groups, item) => {
+    const previous = groups[groups.length - 1];
+    if (previous?.label === item.group) previous.items.push(item);
+    else groups.push({ label: item.group, items: [item] });
+    return groups;
+  }, []), [visibleNavItems]);
   const activeItem = useMemo(() => visibleNavItems.find((item) => item.key === activeView), [activeView, visibleNavItems]);
+  useEffect(() => {
+    const parent = activeItem?.parent;
+    if (parent && navItems.some((item) => item.key === parent && item.container)) {
+      setExpandedNavigation((current) => ({ ...current, [parent]: true }));
+    }
+  }, [activeView, activeItem?.parent]);
   const pendingReportCount = adminData.reports.filter((report) => report.reviewStatus === '待复核').length;
   const runningInterviewCount = adminData.interviews.filter((interview) => interview.status === '进行中').length;
   const currentQuery = searchByView[activeView] || '';
@@ -4758,9 +4555,24 @@ function AdminApp({ admin, onSignedOut }) {
   };
 
   const navigateTo = (view, filter = '') => {
+    setRequestedInterviewId('');
     setActiveView(view);
     setViewPreset({ view, value: filter });
     window.history.replaceState(null, '', `#/${view}`);
+    window.dispatchEvent(new Event('hashchange'));
+  };
+
+  const navigateGuideStep = (view, action) => {
+    navigateTo(action === 'orgConfig' ? 'organizationConfig' : view);
+  };
+
+  const toggleNavigation = (open) => {
+    setNavigationOpen(open);
+    try { window.localStorage.setItem('admin-navigation-collapsed', String(!open)); }
+    catch { /* Keep the control usable when browser storage is unavailable. */ }
+    window.requestAnimationFrame(() => {
+      (open ? navigationCloseButtonRef : navigationOpenButtonRef).current?.focus({ preventScroll: true });
+    });
   };
 
   useEffect(() => {
@@ -4794,20 +4606,38 @@ function AdminApp({ admin, onSignedOut }) {
 
   useEffect(() => {
     let active = true;
+    let pending = false;
+    const controller = new AbortController();
     const checkConnection = async () => {
+      if (document.hidden || pending || loading || refreshing) return;
+      pending = true;
+      const updateData = ['dashboard', 'interviews', 'reports'].includes(activeView) && !detail && !interviewReviewId();
       try {
-        await adminRequest('/api/admin/health');
-        if (active) setConnectionStatus('connected');
-      } catch {
-        if (active) setConnectionStatus('disconnected');
-      }
+        const data = await adminRequest(updateData ? '/api/admin/snapshot' : '/api/admin/health', { signal: controller.signal });
+        if (!active) return;
+        setConnectionStatus('connected');
+        if (updateData && !interviewReviewId()) {
+          setAdminData({ ...emptyAdminData, ...data });
+          setLastUpdated(new Date());
+          setAutoRefreshError('');
+          setError('');
+        }
+      } catch (failure) {
+        if (!active) return;
+        if (failure.status === 401) { onSignedOut(false); return; }
+        setConnectionStatus('disconnected');
+        if (updateData) setAutoRefreshError('数据自动更新失败，当前保留上次结果，将自动重试。');
+      } finally { pending = false; }
     };
     const timer = window.setInterval(checkConnection, 30000);
+    document.addEventListener('visibilitychange', checkConnection);
     return () => {
       active = false;
+      controller.abort();
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', checkConnection);
     };
-  }, []);
+  }, [activeView, detail, loading, refreshing, onSignedOut]);
 
   useEffect(() => {
     const syncViewFromHash = () => {
@@ -4819,7 +4649,10 @@ function AdminApp({ admin, onSignedOut }) {
   }, [visibleNavItems]);
 
   useEffect(() => {
-    if (!loading && !visibleNavItems.some((item) => item.key === activeView)) navigateTo('dashboard');
+    if (loading) return;
+    if (navItems.some((item) => item.key === activeView && item.container)) {
+      navigateTo(visibleNavItems.find((item) => item.parent === activeView)?.key || 'dashboard');
+    } else if (!visibleNavItems.some((item) => item.key === activeView)) navigateTo('dashboard');
   }, [activeView, loading, visibleNavItems]);
 
   useEffect(() => {
@@ -4836,6 +4669,7 @@ function AdminApp({ admin, onSignedOut }) {
       setError('');
       setConnectionStatus('connected');
       setLastUpdated(new Date());
+      setAutoRefreshError('');
       setNotice('数据已刷新');
     } catch (requestError) {
       if (requestError.status === 401) onSignedOut(false);
@@ -4849,6 +4683,12 @@ function AdminApp({ admin, onSignedOut }) {
   };
 
   const openDetail = async (type, row, contextRows = [row]) => {
+    if (type === 'interview') {
+      navigateTo('interviews');
+      setSearchByView((current) => ({ ...current, interviews: '' }));
+      setRequestedInterviewId(row.id);
+      return;
+    }
     const paths = {
       candidate: `/api/admin/candidates/${encodeURIComponent(row.id)}`,
       interview: `/api/admin/interviews/${encodeURIComponent(row.id)}`,
@@ -4971,11 +4811,12 @@ function AdminApp({ admin, onSignedOut }) {
   const renderContent = () => {
     if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
-    if (activeView === 'guide') return <GuidePage onNavigate={navigateTo} admin={admin} />;
-    if (activeView === 'catalog') return <CatalogPage permissions={adminData.permissions || {}} />;
-    if (activeView === 'jobPostings') return <JobPostingsPage />;
-    if (activeView === 'organization') return <OrganizationPage onView={openDetail} admin={admin} />;
-    if (activeView === 'organizationConfig') return <OrganizationConfigPage onNavigate={navigateTo} revision={orgRevision} />;
+    if (activeView === 'guide') return <GuidePage onNavigate={navigateGuideStep} admin={admin} visibleViews={new Set(visibleNavItems.map((item) => item.key))} />;
+    if (activeView === 'catalog') return <CatalogModule request={adminRequest} permissions={adminData.permissions || {}} renderLibrary={(permissions) => <CatalogLibraryPage permissions={permissions} />} />;
+    if (recruitmentViews[activeView]) return <JobPostingsPage tab={recruitmentViews[activeView]} />;
+    if (activeView === 'studentAccounts' || activeView === 'studentCreate') return <RegistrationsPage key={activeView} onNavigate={navigateTo} createMode={activeView === 'studentCreate'} onRegistered={setNotice} presetFilter={viewPreset.view === activeView ? viewPreset.value : ''} />;
+    if (activeView === 'organization') return <AcademicPage onView={openDetail} admin={admin} presetFilter={viewPreset.view === 'organization' ? viewPreset.value : ''} revision={orgRevision} canManageOrganization={adminData.permissions?.canManageOrganization} onEditOrganization={() => navigateTo('organizationConfig')} />;
+    if (activeView === 'organizationConfig') return <OrganizationManagementPage onChanged={() => setOrgRevision((current) => current + 1)} />;
     const listProps = {
       data: adminData,
       onView: openDetail,
@@ -4984,18 +4825,24 @@ function AdminApp({ admin, onSignedOut }) {
       presetFilter: viewPreset.view === activeView ? viewPreset.value : '',
     };
     if (activeView === 'candidates') return <CandidatesPage {...listProps} onAccountsChanged={refreshSnapshot} />;
-    if (activeView === 'interviews') return <InterviewsPage {...listProps} />;
-    if (activeView === 'reports') return <ReportsPage {...listProps} />;
-    if (activeView === 'agents') return <AgentsPage {...listProps} />;
-    if (activeView === 'permission') return <PermissionPage data={adminData} />;
-    if (activeView === 'settings') return <SettingsPage data={adminData} onSettingsSaved={handleSettingsSaved} />;
-    return <Dashboard data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
+    if (activeView === 'interviews' || activeView === 'reports') return <>
+      {activeView === 'interviews' ? <InterviewsPage {...listProps} requestedId={requestedInterviewId} onReviewed={(id, status) => setAdminData((current) => ({ ...current, reports: current.reports.map((report) => report.id === id ? { ...report, reviewStatus: status === 'approved' ? '已复核' : '复核未通过' } : report) }))} /> : <ReportsPage {...listProps} />}
+    </>;
+    if (modelViews[activeView]) return <ModelSettingsPage active={modelViews[activeView]} settings={adminData.settings} canEdit={adminData.permissions?.canManageSettings} request={adminRequest} onSettingsSaved={handleSettingsSaved} />;
+    if (permissionViews[activeView]) return <PermissionPage data={adminData} tab={permissionViews[activeView]} />;
+    if (activeView === 'connectionLogs') return <ConnectionLogsPage />;
+    if (activeView === 'securityLogs') return <SectionCard title="安全审计记录" icon={<ShieldCheck size={18} />}><SecurityLogsPage request={adminRequest} /></SectionCard>;
+    return <DashboardPage data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
   };
 
   return (
-    <main className="admin-shell">
+    <main className={`admin-shell admin-shell-collapsible${navigationOpen ? '' : ' navigation-collapsed'}`}>
+      <div id="admin-navigation-panel" className="admin-navigation-panel" inert={!navigationOpen} aria-hidden={!navigationOpen}>
       <aside className="admin-sidebar">
-        <div className="admin-brand"><span className="admin-logo" aria-hidden="true"><img src={cascLogo} alt="" /></span><strong>{brand.name}<small>管理端</small></strong></div>
+        <div className="admin-sidebar-heading">
+          <div className="admin-brand"><span className="admin-logo" aria-hidden="true"><img src={cascLogo} alt="" /></span><strong>{brand.name}<small>管理端</small></strong></div>
+          <button ref={navigationCloseButtonRef} className="icon-button" type="button" aria-label="收起侧边栏" title="收起侧边栏" aria-controls="admin-navigation-panel" aria-expanded={navigationOpen} onClick={() => toggleNavigation(false)}><PanelLeftClose size={19} /></button>
+        </div>
         <div className="admin-user">
           <LockKeyhole size={16} />
           <span>
@@ -5008,54 +4855,66 @@ function AdminApp({ admin, onSignedOut }) {
         </div>
 
         <nav className="admin-nav" aria-label="管理端导航">
-          {visibleNavItems.map((item) => {
-            const Icon = item.icon;
-            const badge = item.key === 'reports' ? pendingReportCount : item.key === 'interviews' ? runningInterviewCount : 0;
-            return (
-              <button
-                className={activeView === item.key ? 'active' : ''}
-                key={item.key}
-                type="button"
-                onClick={() => navigateTo(item.key)}
-              >
-                <Icon size={17} />
-                <span>{item.label}</span>
-                {badge > 0 && <b>{badge}</b>}
-              </button>
-            );
-          })}
+          {navGroups.map((group) => (
+            <div className="admin-nav-group" key={group.label}>
+              <span className="admin-nav-group-label">{group.label}</span>
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                const badge = item.key === 'reports' ? pendingReportCount : item.key === 'interviews' ? runningInterviewCount : 0;
+                if (item.container) return (
+                  <div className="admin-nav-branch" key={item.key}>
+                    <button className={activeItem?.parent === item.key ? 'branch-current' : ''} type="button" aria-expanded={Boolean(expandedNavigation[item.key])} aria-controls={`${item.key}-navigation`} onClick={() => setExpandedNavigation((current) => ({ ...current, [item.key]: !current[item.key] }))}>
+                      <Icon size={17} /><span>{item.label}</span>{expandedNavigation[item.key] ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                    </button>
+                    <div className="admin-nav-children" id={`${item.key}-navigation`} hidden={!expandedNavigation[item.key]}>
+                      {visibleNavItems.filter((child) => child.parent === item.key && !child.hidden).map((child) => {
+                        const selected = activeView === child.key || (child.key === 'studentAccounts' && activeView === 'studentCreate');
+                        const childBadge = child.key === 'reports' ? pendingReportCount : child.key === 'interviews' ? runningInterviewCount : 0;
+                        return <button key={child.key} type="button" className={selected ? 'active' : ''} aria-current={selected ? 'page' : undefined} onClick={() => navigateTo(child.key)}><span>{child.label}</span>{childBadge > 0 && <b aria-label={child.key === 'reports' ? `${childBadge} 份待复核` : `${childBadge} 场进行中`}>{childBadge}</b>}</button>;
+                      })}
+                    </div>
+                  </div>
+                );
+                return (
+                  <button
+                    className={activeView === item.key || activeItem?.parent === item.key ? 'active' : ''}
+                    key={item.key}
+                    type="button"
+                    aria-current={activeView === item.key || activeItem?.parent === item.key ? 'page' : undefined}
+                    onClick={() => navigateTo(item.key)}
+                  >
+                    <Icon size={17} />
+                    <span>{item.label}</span>
+                    {badge > 0 && <b>{badge}</b>}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
       </aside>
+      </div>
 
       <section className="admin-main">
         <header className="admin-topbar">
+          <div className="admin-heading-with-menu">
+            <button ref={navigationOpenButtonRef} hidden={navigationOpen} className="icon-button admin-menu-toggle" type="button" aria-label="展开侧边栏" title="展开侧边栏" aria-controls="admin-navigation-panel" aria-expanded={navigationOpen} onClick={() => toggleNavigation(true)}><PanelLeftOpen size={21} /></button>
           <div className="page-heading">
             <p>{brand.name}管理端 / {activeItem?.group || '工作台'}</p>
             <h1>{activeItem?.label || '工作台'}</h1>
             <span>{pageDescriptions[activeView]}</span>
           </div>
+          </div>
           <div className="topbar-actions">
-            {activeView === 'organization' && (
-              <button className="primary-button" type="button" onClick={() => setRegistrationsOpen(true)}><UserPlus size={15} />学生注册</button>
-            )}
-            {searchableViews.has(activeView) && (
+            {searchableViews.has(activeView) && !['interviews', 'reports'].includes(activeView) && (
               <label className="admin-search">
                 <Search size={16} />
                 <input value={currentQuery} onChange={(event) => setCurrentQuery(event.target.value)} placeholder={`搜索当前${activeItem?.label || '页面'}`} />
                 {currentQuery && <button type="button" onClick={() => setCurrentQuery('')} aria-label="清空搜索"><X size={14} /></button>}
               </label>
             )}
-            {activeView === 'organizationConfig' && (
-              <button className="primary-button" type="button" onClick={() => setOrgConfigOpen(true)}><Network size={15} />组织配置</button>
-            )}
-            {activeView === 'settings' && adminData.permissions?.canViewConnectionLogs && (
-              <button className="primary-button" type="button" onClick={() => setConnectionLogsOpen(true)}><Wifi size={15} />连接日志</button>
-            )}
-            {activeView === 'settings' && adminData.permissions?.canViewAudit && (
-              <button className="primary-button" type="button" onClick={() => setSecurityLogsOpen(true)}><ShieldCheck size={15} />安全审计</button>
-            )}
-            <span className={`topbar-connection ${connectionStatus === 'disconnected' ? 'error' : ''}`} title={ADMIN_API_BASE_URL}>
-              <i />{connectionStatus === 'checking' ? '连接检测中' : connectionStatus === 'disconnected' ? '连接异常' : '服务正常'}
+            <span className={`topbar-connection ${connectionStatus === 'disconnected' ? 'error' : ''}`} role="status" title={ADMIN_API_BASE_URL}>
+              <i />{connectionStatus === 'checking' ? '正在连接服务器' : connectionStatus === 'disconnected' ? '服务器连接异常' : '服务器已连接'}
             </span>
             <button className="icon-button" type="button" disabled={refreshing} onClick={refreshSnapshot} aria-label="刷新数据" title={lastUpdated ? `上次更新 ${lastUpdated.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '刷新数据'}>
               <RefreshCw size={17} className={refreshing ? 'spin' : ''} />
@@ -5063,6 +4922,8 @@ function AdminApp({ admin, onSignedOut }) {
           </div>
         </header>
 
+        {['dashboard', 'interviews', 'reports'].includes(activeView) && <p className="data-scope-note" role="status">页面可见时每 30 秒更新列表；查看报告详情或复核时暂停。{lastUpdated && ` 上次更新：${lastUpdated.toLocaleTimeString('zh-CN', { hour12: false })}`}</p>}
+        {autoRefreshError && <p className="page-message warning" role="status">{autoRefreshError}</p>}
         {renderContent()}
       </section>
       {notice && <div className="admin-toast" role="status"><CheckCircle2 size={17} />{notice}</div>}
@@ -5079,26 +4940,6 @@ function AdminApp({ admin, onSignedOut }) {
         position={detailPosition}
       />
 
-      {registrationsOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="学生注册" onClick={() => setRegistrationsOpen(false)}>
-          <div className="modal-card resg-modal" onClick={(event) => event.stopPropagation()}>
-            <header>
-              <span><UserPlus size={18} />学生注册</span>
-              <button className="icon-button" type="button" title="关闭" onClick={() => setRegistrationsOpen(false)}><X size={17} /></button>
-            </header>
-            <RegistrationsPage />
-          </div>
-        </div>
-      )}
-
-      {orgConfigOpen && (
-        <OrganizationConfigModal
-          onClose={() => setOrgConfigOpen(false)}
-          onChanged={() => setOrgRevision((current) => current + 1)}
-        />
-      )}
-      {connectionLogsOpen && <ConnectionLogsModal onClose={() => setConnectionLogsOpen(false)} />}
-      {securityLogsOpen && <SecurityLogsModal request={adminRequest} onClose={() => setSecurityLogsOpen(false)} />}
     </main>
   );
 }

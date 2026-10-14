@@ -1,0 +1,74 @@
+.model-settings-page { display: grid; gap: 18px; min-width: 0; }
+.model-settings-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px 24px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; }
+.model-eyebrow { color: #1677ff; font-size: 12px; font-weight: 700; }
+.model-settings-intro h2 { margin: 6px 0 8px; font-size: 22px; }
+.model-settings-intro p, .model-access-note p { margin: 0; color: #64748b; line-height: 1.7; }
+.model-admin-badge { display: flex; align-items: center; gap: 7px; flex-shrink: 0; padding: 7px 10px; border-radius: 6px; background: #f1f5f9; color: #64748b; font-size: 12px; }
+.model-scenario-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.model-scenario-nav button { display: flex; align-items: center; gap: 13px; padding: 18px; border: 1px solid #dde5ef; border-radius: 10px; background: #fff; color: #64748b; text-align: left; cursor: pointer; }
+.model-scenario-nav button.active { border-color: #1677ff; background: #f0f6ff; color: #0958d9; box-shadow: inset 0 0 0 1px #1677ff; }
+.model-scenario-nav button > svg { flex-shrink: 0; }
+.model-scenario-nav strong, .model-scenario-nav small { display: block; }
+.model-scenario-nav strong { color: #1e293b; font-size: 15px; }
+.model-scenario-nav small { margin-top: 5px; font-size: 12px; line-height: 1.5; }
+.model-scenario-nav i { display: inline-block; width: 6px; height: 6px; margin-left: 8px; border-radius: 50%; background: #ed9b19; vertical-align: middle; }
+.model-settings-page .model-settings-form { padding: 0; gap: 16px; }
+.model-settings-page .model-settings-form[hidden] { display: none; }
+.model-settings-page .interviewer-policy-editor { padding: 0; gap: 16px; }
+.policy-dimensions, .policy-roles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.policy-dimensions fieldset, .policy-roles fieldset { min-width: 0; padding: 16px; border: 1px solid #e2e8f0; border-radius: 8px; display: grid; gap: 12px; }
+.policy-dimensions legend, .policy-roles legend { color: #1e293b; font-size: 14px; font-weight: 600; padding: 0 6px; }
+.policy-options { display: grid; gap: 10px; align-content: start; }
+.policy-options label, .policy-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #475569; }
+.interviewer-policy-editor input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: #1677ff; flex-shrink: 0; }
+.policy-roles textarea { width: 100%; min-width: 0; border: 1px solid #dce4ee; border-radius: 6px; padding: 10px; font: inherit; line-height: 1.6; resize: vertical; }
+.policy-preview { padding: 18px 22px; border-radius: 10px; border: 1px solid #d5e6ff; background: #f0f6ff; }
+.policy-preview p { margin: 8px 0; color: #0958d9; }
+.policy-preview span { font-size: 13px; color: #64748b; }
+.model-effect-note { display: flex; align-items: flex-start; gap: 8px; margin: 0; color: #52647e; font-size: 13px; line-height: 1.6; }
+.model-effect-note svg { flex-shrink: 0; margin-top: 2px; }
+.model-fields { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.model-provider-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.model-settings-page .provider-card { padding: 22px; border-radius: 10px; }
+.model-provider-grid .field-grid { grid-template-columns: minmax(0, 1fr); }
+.model-section-heading h3 { margin: 0 0 6px; font-size: 16px; }
+.model-section-heading p, .model-runtime-help { margin: 0; color: #64748b; font-size: 12px; line-height: 1.7; }
+.model-runtime-grid { display: grid; grid-template-columns: 1.7fr repeat(3, minmax(0, 1fr)); gap: 14px; }
+.model-settings-page .field-block { min-width: 0; }
+.model-settings-page .field-block small { overflow-wrap: anywhere; }
+.model-save-bar { position: sticky; bottom: 12px; z-index: 2; display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 20px; border: 1px solid #dce5f1; border-radius: 10px; background: #fff; box-shadow: 0 4px 20px #142b4d0d; }
+.model-save-bar > span { color: #64748b; font-size: 13px; }
+.model-save-bar > div { display: flex; gap: 10px; }
+.model-save-bar button { white-space: nowrap; flex-shrink: 0; }
+.model-settings-page button:disabled { cursor: not-allowed; opacity: .55; }
+.model-settings-page button:focus-visible { outline: 3px solid #91caff; outline-offset: 3px; }
+.model-settings-page .settings-message { margin: 0; }
+.model-settings-page .provider-test-results { overflow-wrap: anywhere; }
+.model-access-note { padding: 32px; border: 1px solid #dde5ef; border-radius: 12px; background: #fff; }
+.model-access-note > svg { color: #1677ff; }
+.model-access-note h2 { margin: 12px 0; font-size: 20px; }
+@media (max-width: 1200px) {
+  .model-runtime-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .model-scenario-nav button { padding: 14px; gap: 9px; }
+  .model-settings-page .provider-card-header { flex-wrap: wrap; }
+}
+@media (max-width: 900px) {
+  .policy-dimensions, .policy-roles { grid-template-columns: minmax(0, 1fr); }
+  .model-scenario-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .model-provider-grid { grid-template-columns: minmax(0, 1fr); }
+  .model-scenario-nav button { align-items: flex-start; }
+  .model-scenario-nav small { display: none; }
+  .model-admin-badge { display: none; }
+  .model-save-bar { position: static; flex-direction: column; align-items: stretch; }
+  .model-save-bar > div { justify-content: flex-end; }
+}
+@media (max-width: 600px) {
+  .model-settings-intro { padding: 18px; }
+  .model-scenario-nav { gap: 6px; }
+  .model-scenario-nav button { flex-direction: column; gap: 8px; padding: 12px; }
+  .model-scenario-nav strong { font-size: 13px; }
+  .model-runtime-grid, .model-settings-page .field-grid { grid-template-columns: minmax(0, 1fr); }
+  .model-settings-page .provider-card { padding: 16px; }
+  .model-save-bar { position: static; flex-direction: column; align-items: stretch; padding: 14px; }
+  .model-save-bar > div { justify-content: flex-end; }
+}

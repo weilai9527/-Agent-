@@ -1120,6 +1120,10 @@ def get_database_path() -> str:
 
 init_db()
 
+from shared.interviewer_policy import ensure_interviewer_policy_schema
+
+ensure_interviewer_policy_schema(db, DB_ENGINE)
+
 from shared.security_logging import ensure_security_schema
 
 ensure_security_schema(db, DB_ENGINE)

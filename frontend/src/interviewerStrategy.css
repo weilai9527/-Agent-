@@ -1,0 +1,13 @@
+.candidate-strategy { display: grid; gap: 18px; padding: 24px; margin: 10px 0; border: 1px solid #dbe4f0; border-radius: 16px; background: #f8faff; }
+.candidate-strategy h3 { margin: 0 0 8px; color: #1e293b; font-size: 19px; }
+.candidate-strategy p { margin: 0; color: #64748b; line-height: 1.7; }
+.candidate-strategy-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.candidate-strategy-fields label { display: grid; gap: 8px; min-width: 0; color: #475569; font-size: 13px; }
+.candidate-strategy-fields select { width: 100%; min-width: 0; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; font: inherit; color: #1e293b; }
+.candidate-strategy-fields select:focus-visible { outline: 2px solid #4f82ed; outline-offset: 2px; }
+.candidate-strategy-fields select:disabled { color: #64748b; background: #f1f5f9; opacity: 1; }
+.candidate-strategy-summary { display: grid; gap: 6px; font-size: 13px; line-height: 1.7; }
+.candidate-strategy-summary strong { color: #31548e; }
+.candidate-strategy-summary span, .session-strategy-summary { color: #64748b; }
+.session-strategy-summary { padding: 12px 18px; margin: 0 0 16px; border: 1px solid #dbe4f0; border-radius: 12px; font-size: 13px; background: #f8faff; }
+@media (max-width: 700px) { .candidate-strategy { padding: 18px; } .candidate-strategy-fields { grid-template-columns: 1fr; } }

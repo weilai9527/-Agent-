@@ -1,3 +1,4 @@
+import InterviewerStrategyFields from './InterviewerStrategyFields.jsx';
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
@@ -3499,6 +3500,7 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
   const [form, setForm] = useState({
     role: '',
     ...initialPreset.overrides,
+    depth: '',
     brief: defaultBrief,
   });
   const [showAdvanced, setShowAdvanced] = useState(mode === 'custom');
@@ -3507,13 +3509,25 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
   const [recommendedRoles, setRecommendedRoles] = useState([]);
+  const [interviewerPolicy, setInterviewerPolicy] = useState(null);
+  const [policyLoading, setPolicyLoading] = useState(true);
+  const [policyError, setPolicyError] = useState('');
+  const [policyReload, setPolicyReload] = useState(0);
+  useEffect(() => {
+    let mounted = true;
+    setPolicyLoading(true); setPolicyError('');
+    apiRequest('/api/interviewer-policy').then(({ policy }) => {
+      if (!mounted) return;
+      setInterviewerPolicy(policy);
+      setForm(current => ({ ...current, style: policy.defaults.style, focusArea: policy.defaults.focus, depth: policy.defaults.depth }));
+    }).catch(failure => { if (mounted) setPolicyError(failure.message); }).finally(() => { if (mounted) setPolicyLoading(false); });
+    return () => { mounted = false; };
+  }, [policyReload]);
   const briefTouchedRef = useRef(false);
   const customDimensions = [
     { label: '面试类型', key: 'interviewType', options: setupOptions.interviewTypes },
     { label: '公司场景', key: 'companyScene', options: setupOptions.companyScenes },
-    { label: '练习重点', key: 'focusArea', options: setupOptions.focusAreas },
     { label: '面试强度', key: 'intensity', options: setupOptions.intensity },
-    { label: '面试官风格', key: 'style', options: setupOptions.styles },
   ];
   const selectedLevelIndex = Math.max(0, setupOptions.levels.indexOf(form.level));
   const activeOptions = customDimensions[activeDimension].options;
@@ -3531,7 +3545,7 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
 
         setForm((current) => mergeProfileIntoSetup(
           current,
-          { ...profile, project_experience: profileBrief },
+          { ...profile, project_experience: profileBrief, preferred_interviewer_style: '' },
           mode,
           { preserveBrief: briefTouchedRef.current },
         ));
@@ -3570,6 +3584,10 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
 
   const handleStart = async () => {
     setError('');
+    if (policyLoading || policyError || !interviewerPolicy) {
+      setError('请先成功读取面试官策略，再开始面试。');
+      return;
+    }
     if (!form.role.trim()) {
       setError('请先确认或输入目标岗位，再开始面试。');
       return;
@@ -3588,6 +3606,7 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
           resume_context: form.brief,
           difficulty: form.intensity,
           interviewer_style: form.style,
+          interviewer_strategy: { style: form.style, focus: form.focusArea, depth: form.depth },
         }),
       });
       await apiRequest(`/api/interviews/${data.interview.id}/start`, { method: 'POST' });
@@ -3612,7 +3631,7 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
       <section className="setup-grid">
         <Card title="本场面试配置" icon={<Layers3 size={18} />} className="v4-setup-card">
           <div className="setup-form">
-            {mode === 'guided' && <div className="v4-selected-preset"><span className="v4-eyebrow">01 / GUIDED SESSION</span><strong>{initialPreset.label}难度</strong><p>{initialPreset.summary}。{initialPreset.description}</p></div>}
+            {mode === 'guided' && <div className="v4-selected-preset"><span className="v4-eyebrow">01 / GUIDED SESSION</span><strong>{initialPreset.label}难度</strong><p>{initialPreset.description}。面试官策略以下方选择为准。</p></div>}
             {mode === 'custom' && <div className="v4-section-intro"><span className="v4-eyebrow">01 / EXPERIENCE & SCENARIO</span><h3>自主难度设置</h3><p>选择适合这次练习的各项参数，配置会用于真实面试。</p></div>}
             <div className="role-input-group">
               <label htmlFor="setup-target-role">{mode === 'custom' ? '02' : '01'} / 目标岗位</label>
@@ -3650,6 +3669,8 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
               )}
               <small>推荐方向仅供参考，学生可以按真实求职意愿修改。</small>
             </div>
+
+            <InterviewerStrategyFields policy={interviewerPolicy} loading={policyLoading} error={policyError} onRetry={() => setPolicyReload(value => value + 1)} form={form} onChange={updateForm} />
 
             {mode === 'guided' && <button
               type="button"
@@ -3705,7 +3726,7 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
                   </div>
                 </div>
                 <div className="v4-neural-summary">
-                  <span className="v4-eyebrow">YOUR CONFIGURATION / 5 OF 5</span>
+                  <span className="v4-eyebrow">YOUR CONFIGURATION / {customDimensions.length} OF {customDimensions.length}</span>
                   <div>{customDimensions.map((dimension, index) => <button key={dimension.key} type="button" onClick={() => setActiveDimension(index)}><small>{dimension.label}</small><b>{form[dimension.key]}</b></button>)}</div>
                 </div>
                 <label className="brief-field v4-neural-brief">
@@ -3737,22 +3758,10 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
                   onChange={(value) => updateForm('companyScene', value)}
                 />
                 <OptionGroup
-                  label="练习重点"
-                  options={setupOptions.focusAreas}
-                  value={form.focusArea}
-                  onChange={(value) => updateForm('focusArea', value)}
-                />
-                <OptionGroup
                   label="面试强度"
                   options={setupOptions.intensity}
                   value={form.intensity}
                   onChange={(value) => updateForm('intensity', value)}
-                />
-                <OptionGroup
-                  label="面试官风格"
-                  options={setupOptions.styles}
-                  value={form.style}
-                  onChange={(value) => updateForm('style', value)}
                 />
                 <label className="brief-field">
                   <span>简历 / 项目简介（最多 12,000 字）</span>
@@ -3775,7 +3784,7 @@ function SetupPage({ onStart, mode = 'guided', presetKey = defaultDifficultyPres
       </section>
       <div className="v4-setup-launch">
         <div><span className="v4-eyebrow">READY FOR YOUR SESSION</span><strong>{form.role.trim() || '请先确认目标岗位'}</strong><small>{form.interviewType} · {form.intensity} · {form.style}</small></div>
-        <button className="primary-action" onClick={handleStart} disabled={starting || loadingProfile}>
+        <button className="primary-action" onClick={handleStart} disabled={starting || loadingProfile || policyLoading || Boolean(policyError) || !interviewerPolicy}>
           <Phone size={17} />
           {starting ? '正在创建面试…' : '开始电话面试 ↗'}
         </button>
@@ -6256,6 +6265,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
   return (
     <section className={`phone-page v4-phone-page v4-interview-page ${interviewMode}-mode`}>
+      {interview?.interviewer_strategy?.selection && <p className="session-strategy-summary">本场面试官策略：{Object.values(interview.interviewer_strategy.selection).join(' · ')} · 评分标准保持统一</p>}
       <div className="v4-interview-modebar">
         <span>{interviewMode === 'text' ? '01 / 文字面试' : '02 / VOICE INTERVIEW'}</span>
         <span>{interviewMode === 'text' ? '对话与回答实时保存' : '语音与文字共享本场面试进度'}</span>

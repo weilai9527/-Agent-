@@ -1,3 +1,4 @@
+import { hasInterviewerEvaluation, roundAssessment } from '../../frontend/src/reportPresentation.js';
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 export function reviewText(value) {
@@ -38,7 +39,7 @@ export function feedbackView(value) {
       id: item.agent_id || `feedback-${index}`,
       name: reviewText(item.agent_name || item.name) || `面试官 ${index + 1}`,
       role: roleLabels[item.agent_type] || '',
-      score: reviewScore(item.score),
+      score: hasInterviewerEvaluation(item) ? reviewScore(item.score) : null,
       comment: reviewText(item.comment || item.feedback || item.summary),
       strengths: reviewText(item.strengths), issues: reviewText(item.issues),
       suggestions: reviewText(item.suggestions || item.suggestion),
@@ -65,7 +66,7 @@ export function timelineView(value) {
       name: reviewText(item.agent_name || question?.agent_name) || '面试官',
       question: reviewText(item.question || item.question_preview || question?.content || question?.content_preview),
       answer: reviewText(item.answer || item.answer_preview || item.content || item.content_preview),
-      score: reviewScore(item.score), strengths: reviewText(item.strengths),
+      ...roundAssessment(item), strengths: reviewText(item.strengths),
       issues: reviewText(item.issues), suggestions: reviewText(item.suggestions || item.suggestion),
     });
     question = null;

@@ -58,6 +58,26 @@ def root():
 
 
 SCENARIOS = {
+    "report_score_coverage": """
+def snapshot_report():
+    return request("GET", "snapshot").json()["reports"][0]
+assert snapshot_report()["scored_answer_count"] is None
+assert snapshot_report()["score"] is None
+db.execute("INSERT INTO interview_messages (id, interview_id, sender_type, message_type, content, order_index) VALUES ('msg', 'allowed', 'candidate', 'answer', 'answer text', 1)")
+for status, scored, count, fallback, total, displayed, averaged in [
+    ("succeeded", None, None, 0, 70, 70, 70), ("degraded", None, None, 1, 60, 60, None),
+    ("pending_retry", 0, 1, 1, 0, None, None), ("insufficient_evidence", 0, 1, 0, 0, None, None),
+    ("degraded", 1, 1, 1, 0, 0, 0), ("succeeded", 1, 2, 0, 55, 55, None),
+]:
+    db.execute("UPDATE interview_reports SET generation_status=?, scored_answer_count=?, answer_count=?, fallback=?, total_score=? WHERE id='allowed'", (status, scored, count, fallback, total))
+    db.commit()
+    row = snapshot_report()
+    assert row["score"] == displayed and row["scored_answer_count"] == scored, row
+    assert row["stat_eligible"] == (averaged is not None), row
+    assert request("GET", "reports/allowed").json()["report"]["total_score"] == displayed
+    assert next(r for r in main.list_candidates() if r["id"] == "allowed")["averageScore"] == averaged
+    assert next(r for r in main.list_campus_students() if r["id"] == "allowed")["readiness"] == averaged
+""",
     "training_and_reports": '''
 snapshot = request("GET", "snapshot").json()
 for collection in ("interviews", "reports", "candidates"):

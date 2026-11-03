@@ -19,7 +19,7 @@ export function dashboardModel(data, filters, now = new Date()) {
   const roster = Array.isArray(data.dashboardRoster) ? data.dashboardRoster.filter((row) => matchesRecordFilters(row, scope)) : null;
   const reports = data.permissions?.canViewReports ? (data.reports || []).filter((row) => matchesRecordFilters(row, { ...scope, ...range }, 'createdAt')) : [];
   const interviews = data.permissions?.canViewInterviews ? (data.interviews || []).filter((row) => matchesRecordFilters(row, { ...scope, ...range }, 'updatedAt')) : [];
-  const scored = reports.filter((row) => reviewScore(row.score) !== null);
+  const scored = reports.filter((row) => row.stat_eligible !== false && reviewScore(row.score) !== null);
   const completed = interviews.filter((row) => row.status === '已完成');
   const active = (roster || []).filter((row) => row.activated);
   const trainedKeys = new Set(completed.map(studentKey).filter(Boolean));

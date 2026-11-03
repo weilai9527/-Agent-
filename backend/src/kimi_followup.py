@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from .interview_decision import ANSWER_CONTEXT_POLICY, contextual_followup
 from .env import first_env_value, is_placeholder_value, reload_runtime_ai_env
 from shared.interviewer_policy import strategy_prompt
 
@@ -236,6 +237,7 @@ def _build_messages(
     messages: list[dict[str, Any]],
     last_answer: str,
     resume_analysis: dict[str, Any] | None = None,
+    turn_decision: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     recent_context = _format_recent_messages(messages)
     asked_questions = "\n".join(
@@ -251,12 +253,17 @@ def _build_messages(
             "1. 只输出一句追问，不要输出分析、评分、标题或多题列表。",
             "2. 不要机械套模板，不要重复已问过的问题。",
             "3. 如果候选人质疑问题或表示没提到某点，要先承认并修正方向，再提出更贴合上下文的问题。",
-            "4. 如果候选人回答很短或无效，追问应引导其补充具体经历，而不是强行推进到下一阶段。",
+            ANSWER_CONTEXT_POLICY,
             "5. 优先围绕简历里的真实项目、技能和风险点追问；不要凭空添加候选人没有提过的经历。",
             "6. 电话面试语气，简洁专业，控制在 60 字以内。",
             *([strategy_prompt(interview, active_agent or {})] if interview.get("interviewer_strategy") else []),
         ]
     )
+    guidance = []
+    if turn_decision:
+        missing = [key for key, evidence in turn_decision["evidence"].items() if evidence["status"] != "supported"]
+        guidance = [f"本轮待核实的维度：{'、'.join(missing) or '无'}",
+                    f"结合最新回答，自然地追问这个目标：{turn_decision['question']}"]
     user_prompt = "\n".join(
         [
             f"目标岗位：{interview.get('target_role') or '未填写'}",
@@ -269,6 +276,7 @@ def _build_messages(
             f"已问过的问题：\n{asked_questions}",
             f"最近对话：\n{recent_context}",
             f"候选人最新回答：{last_answer}",
+            *guidance,
             "请生成下一句追问：",
         ]
     )
@@ -329,8 +337,13 @@ def _call_provider_content(
                     response=response,
                 )
             data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return str(content or "").strip()
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ValueError(f"{provider.name} 返回的消息结构无效。") from exc
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError(f"{provider.name} 返回的消息内容无效。")
+            return content.strip()
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             last_error = exc
             retryable_status = isinstance(exc, httpx.HTTPStatusError) and (
@@ -361,10 +374,22 @@ def generate_kimi_followup(
     messages: list[dict[str, Any]],
     last_answer: str,
     resume_analysis: dict[str, Any] | None = None,
+    turn_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     answer = str(last_answer or "").strip()
     if not answer:
         raise KimiFollowupError("缺少候选人回答，无法生成追问。")
+
+    if turn_decision:
+        scoped_question = turn_decision["question"] if turn_decision.get("followup_mode") else None
+    else:
+        # The legacy follow-up endpoint has no persisted turn decision.
+        agent = active_agent or {}
+        asked = [str(m.get("content") or "") for m in messages if m.get("sender_type") == "agent"
+                 and m.get("message_type") in {"question", "follow_up"} and m.get("agent_id") == agent.get("id")]
+        _, scoped_question = contextual_followup(agent.get("agent_type"), answer, asked[-1] if asked else "", asked)
+    if scoped_question:
+        return {"question": scoped_question, "provider": "local", "fallback": False}
 
     providers = _provider_order()
     if not providers:
@@ -376,6 +401,7 @@ def generate_kimi_followup(
         messages=messages,
         last_answer=answer,
         resume_analysis=resume_analysis,
+        turn_decision=turn_decision,
     )
     errors = []
     for index, provider in enumerate(providers):
@@ -385,7 +411,7 @@ def generate_kimi_followup(
                 "provider": provider.name,
                 "fallback": index > 0,
             }
-        except (httpx.HTTPError, json.JSONDecodeError, KimiFollowupError) as exc:
+        except (httpx.HTTPError, ValueError, KimiFollowupError) as exc:
             errors.append(f"{provider.name}: {exc}")
 
     raise KimiFollowupError("追问生成失败：" + " | ".join(errors))
@@ -721,7 +747,7 @@ def generate_opening_question(
                 "provider": provider.name,
                 "fallback": index > 0,
             }
-        except (httpx.HTTPError, json.JSONDecodeError, KimiFollowupError) as exc:
+        except (httpx.HTTPError, ValueError, KimiFollowupError) as exc:
             errors.append(f"{provider.name}: {exc}")
     return {
         "question": build_local_opening_question(interview, active_agent, resume_analysis, selected_resume_point),

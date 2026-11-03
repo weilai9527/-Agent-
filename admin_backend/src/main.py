@@ -601,6 +601,7 @@ def report_review_status(score: int) -> str:
 
 def recommendation_label(value: str | None) -> str:
     return {
+        "insufficient_evidence": "证据不足",
         "strong_pass": "准备充分",
         "pass": "基本准备",
         "next_round": "建议进阶训练",
@@ -1055,9 +1056,25 @@ def build_student_password_workbook(rows: list[dict[str, Any]]) -> io.BytesIO:
     return output
 
 
+# 详情允许显示部分评分，均分只纳入完整有效的新版报告或有作答的旧版 AI 报告。
+# 两种数据库都保留过未评分占位值，必须先判状态和覆盖再取分。
+REPORT_HAS_ANSWER_SQL = """EXISTS (SELECT 1 FROM interview_messages m
+                                  WHERE m.interview_id = reports.interview_id
+                                    AND m.sender_type = 'candidate' AND TRIM(m.content) <> '')"""
+REPORT_SCORE_SQL = f"""CASE WHEN reports.generation_status IN ('succeeded', 'degraded')
+                          AND (reports.scored_answer_count > 0 OR
+                               (reports.scored_answer_count IS NULL AND {REPORT_HAS_ANSWER_SQL}))
+                          THEN reports.total_score END"""
+REPORT_STAT_ELIGIBLE_SQL = f"""((reports.scored_answer_count IS NULL AND reports.generation_status = 'succeeded'
+                               AND reports.fallback = 0 AND {REPORT_HAS_ANSWER_SQL})
+                             OR (reports.generation_status IN ('succeeded', 'degraded')
+                               AND reports.scored_answer_count > 0
+                               AND reports.scored_answer_count = reports.answer_count))"""
+
+
 def list_candidates(scope: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     rows = all_rows(
-        """
+        f"""
         SELECT users.id, users.email, users.student_no, users.name, users.college, users.class_name,
                users.counselor, users.student_status, users.must_change_password,
                users.temp_password_encrypted, users.status, users.created_at, users.last_login_at,
@@ -1065,7 +1082,7 @@ def list_candidates(scope: list[dict[str, str]] | None = None) -> list[dict[str,
                enrollments.class_id AS class_id, classes.program_id AS program_id,
                programs.college_id AS college_id,
                COALESCE(interview_counts.interviews, 0) AS interviews,
-               COALESCE(report_scores.average_score, 0) AS average_score
+               report_scores.average_score
         FROM users
         LEFT JOIN profiles ON profiles.user_id = users.id
         LEFT JOIN student_enrollments AS enrollments ON enrollments.user_id = users.id
@@ -1077,8 +1094,8 @@ def list_candidates(scope: list[dict[str, str]] | None = None) -> list[dict[str,
           GROUP BY user_id
         ) AS interview_counts ON interview_counts.user_id = users.id
         LEFT JOIN (
-          SELECT user_id, AVG(total_score) AS average_score
-          FROM interview_reports
+          SELECT user_id, AVG(CASE WHEN {REPORT_STAT_ELIGIBLE_SQL} THEN reports.total_score END) AS average_score
+          FROM interview_reports AS reports
           GROUP BY user_id
         ) AS report_scores ON report_scores.user_id = users.id
         ORDER BY users.updated_at DESC, users.created_at DESC
@@ -1118,7 +1135,7 @@ def list_candidates(scope: list[dict[str, str]] | None = None) -> list[dict[str,
                     and row.get("temp_password_encrypted")
                 ),
                 "interviews": int(row.get("interviews") or 0),
-                "averageScore": round(float(row.get("average_score") or 0), 1),
+                "averageScore": round(float(row["average_score"]), 1) if row.get("average_score") is not None else None,
                 "lastLogin": str(row.get("last_login_at") or "-"),
             }
         )
@@ -1383,7 +1400,9 @@ def list_reports(scope: list[dict[str, str]] | None = None) -> list[dict[str, An
     condition, params = student_scope_sql(scope, "reports.user_id")
     rows = all_rows(
         f"""
-        SELECT reports.id, reports.user_id, reports.total_score, reports.grade, reports.pass_recommendation,
+        SELECT reports.id, reports.user_id, {REPORT_SCORE_SQL} AS total_score, {REPORT_STAT_ELIGIBLE_SQL} AS stat_eligible,
+               reports.generation_status,
+               reports.answer_count, reports.scored_answer_count, reports.grade, reports.pass_recommendation,
                reports.review_status, reports.provider, reports.model, reports.fallback,
                reports.created_at, users.name AS candidate, interviews.target_role,
                users.student_no, users.college, users.class_name
@@ -1399,7 +1418,11 @@ def list_reports(scope: list[dict[str, str]] | None = None) -> list[dict[str, An
             "id": row["id"],
             "candidate": row["candidate"],
             "role": row.get("target_role") or "-",
-            "score": int(row.get("total_score") or 0),
+            "score": row.get("total_score"),
+            "stat_eligible": bool(row["stat_eligible"]),
+            "generation_status": row["generation_status"],
+            "answer_count": row["answer_count"],
+            "scored_answer_count": row["scored_answer_count"],
             "userId": row.get("user_id"),
             "studentNo": row.get("student_no") or "",
             "college": row.get("college") or "",
@@ -1418,8 +1441,8 @@ def list_reports(scope: list[dict[str, str]] | None = None) -> list[dict[str, An
 
 def get_report_detail(report_id: str) -> dict[str, Any]:
     report = one(
-        """
-        SELECT reports.*, users.name AS candidate, users.email AS candidate_email,
+        f"""
+        SELECT reports.*, {REPORT_SCORE_SQL} AS visible_score, users.name AS candidate, users.email AS candidate_email,
                interviews.target_role, interviews.interview_type, interviews.difficulty
         FROM interview_reports AS reports
         JOIN users ON users.id = reports.user_id
@@ -1430,6 +1453,7 @@ def get_report_detail(report_id: str) -> dict[str, Any]:
     )
     if not report:
         raise error(404, "报告不存在。")
+    report["total_score"] = report.pop("visible_score")
     return report
 
 
@@ -1517,16 +1541,16 @@ def _campus_catalog_options() -> tuple[list[dict[str, Any]], list[dict[str, Any]
 
 def _student_growth_status(row: dict[str, Any]) -> str:
     interviews = int(row.get("interviews") or 0)
-    readiness = float(row.get("readiness") or 0)
+    readiness = row.get("readiness")
     if bool(row.get("focus_flag")):
         return "重点关注"
     if not row.get("enrollment_id"):
         return "未归班"
     if interviews == 0:
         return "尚未训练"
-    if interviews >= 2 and readiness < 60:
+    if interviews >= 2 and readiness is not None and readiness < 60:
         return "需要关注"
-    if interviews >= 2 and readiness >= 80:
+    if interviews >= 2 and readiness is not None and readiness >= 80:
         return "表现稳定"
     return "训练中"
 
@@ -1534,7 +1558,7 @@ def _student_growth_status(row: dict[str, Any]) -> str:
 def list_campus_students() -> list[dict[str, Any]]:
     # The overview filters permissions and calculates totals from this full list.
     rows = all_rows(
-        """
+        f"""
         SELECT users.id, users.email, users.name, users.status, users.last_login_at,
                users.college AS user_college, users.gender, users.counselor,
                users.class_name AS user_class_name, users.student_no AS user_student_no,
@@ -1546,7 +1570,7 @@ def list_campus_students() -> list[dict[str, Any]]:
                colleges.id AS college_id, colleges.name AS college_name,
                removed_registrations.id AS removed_registration_id,
                COALESCE(interview_counts.interviews, 0) AS interviews,
-               COALESCE(report_scores.readiness, 0) AS readiness
+               report_scores.readiness
         FROM users
         LEFT JOIN profiles ON profiles.user_id = users.id
         LEFT JOIN student_enrollments AS enrollments ON enrollments.user_id = users.id
@@ -1562,8 +1586,8 @@ def list_campus_students() -> list[dict[str, Any]]:
           GROUP BY user_id
         ) AS interview_counts ON interview_counts.user_id = users.id
         LEFT JOIN (
-          SELECT user_id, AVG(total_score) AS readiness
-          FROM interview_reports
+          SELECT user_id, AVG(CASE WHEN {REPORT_STAT_ELIGIBLE_SQL} THEN reports.total_score END) AS readiness
+          FROM interview_reports AS reports
           GROUP BY user_id
         ) AS report_scores ON report_scores.user_id = users.id
         WHERE users.id IN (
@@ -1591,7 +1615,7 @@ def list_campus_students() -> list[dict[str, Any]]:
             "className": row.get("class_name") or "未归班",
             "graduationYear": row.get("graduation_year"),
             "targetRole": row.get("target_role") or "尚未选择",
-            "readiness": round(float(row.get("readiness") or 0), 1),
+            "readiness": round(float(row["readiness"]), 1) if row.get("readiness") is not None else None,
             "interviews": int(row.get("interviews") or 0),
             "focus": bool(row.get("focus_flag")),
             "note": row.get("note") or "",
@@ -1654,7 +1678,7 @@ def list_pending_campus_students() -> list[dict[str, Any]]:
             "className": row.get("class_name") or "未归班",
             "graduationYear": matched["graduation_year"] if matched else None,
             "targetRole": "尚未选择",
-            "readiness": 0.0,
+            "readiness": None,
             "interviews": 0,
             "focus": False,
             "note": "",
@@ -1804,7 +1828,8 @@ def build_metrics(reports: list[dict[str, Any]], scope=None, *, can_students=Tru
     interviews = count_value(f"SELECT COUNT(*) AS count FROM interview_sessions WHERE {interview_filter}", interview_params) if can_interviews else 0
     completed = count_value(f"SELECT COUNT(*) AS count FROM interview_sessions WHERE status = ? AND {interview_filter}", ("completed", *interview_params)) if can_interviews else 0
     report_count = len(reports)
-    average_score = round(sum(report["score"] for report in reports) / report_count, 1) if report_count else 0
+    scores = [report["score"] for report in reports if report.get("stat_eligible", True) and report["score"] is not None]
+    average_score = round(sum(scores) / len(scores), 1) if scores else "—"
     review_count = len([report for report in reports if report["reviewStatus"] != "已复核"])
     completion_rate = round(completed / interviews * 100) if interviews else 0
     metrics = [

@@ -1,3 +1,4 @@
+import { createAnswerSubmission, createRtcWriteQueue, postInterviewTurn } from './interviewTurn.js';
 import InterviewerStrategyFields from './InterviewerStrategyFields.jsx';
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -45,19 +46,18 @@ import {
 import {
   createAliyunRtcAudioSession,
   handoffAliyunRtcSession,
-  createAliyunRtcTranscriptAssembler,
+  createRtcCaptionStream,
   extractQuestionFromAgentTranscript,
   formatAliyunRtcStartError,
-  findLatestInterviewQuestion,
   shouldPersistAliyunAgentTurn,
 } from './aliyunRtc';
 import { V4Brand, V4Logo, V4PageHeading } from './V4Shell';
 import { brand } from '../../shared/branding.js';
 import { uploadResume } from './resumeUpload';
 import {
-  abilitySampleStatus,
+  abilitySampleStatus, coverageLabel, visibleReportScore, reportStatusText, roundAssessment,
   hasInterviewerEvaluation,
-  isAbilityReport,
+  comparableReports, dimensionLabels,
   reportEvidenceNote,
   reportScore,
 } from './reportPresentation';
@@ -645,16 +645,6 @@ const defaultProfile = {
   preferred_interviewer_style: '',
 };
 
-const dimensionLabels = {
-  technical_accuracy: '技术准确性',
-  technical_depth: '技术深度',
-  expression_clarity: '表达清晰度',
-  business_understanding: '业务理解',
-  tradeoff_reasoning: '权衡决策',
-  risk_awareness: '风险意识',
-  result_quantification: '结果量化',
-  role_fit: '岗位匹配度',
-};
 
 const dimensionTrainingCopy = {
   technical_accuracy: '选择一道近期技术题，先给出明确结论，再补充适用边界和反例验证。',
@@ -714,271 +704,6 @@ function formatDateTime(value) {
   });
 }
 
-function createInitialQuestion(interview, agent) {
-  const role = interview?.target_role || '目标岗位';
-  const focus = interview?.focus_areas || '项目经历';
-  return `我们先从你的${focus}开始。请结合一次真实经历，说明你在${role}相关工作中遇到的关键问题、你的行动以及最终结果。`;
-}
-
-function includesAny(text, keywords) {
-  return keywords.some((keyword) => text.includes(keyword));
-}
-
-function pickMentionedTopic(text) {
-  const topics = [
-    'React',
-    'Vue',
-    'Node',
-    '性能',
-    '低代码',
-    '表单',
-    '组件库',
-    '架构',
-    '缓存',
-    '数据库',
-    '接口',
-    '监控',
-    '灰度',
-    '回滚',
-    '埋点',
-    '虚拟滚动',
-    '懒加载',
-    '状态管理',
-    '团队协作',
-  ];
-  return topics.find((topic) => text.includes(topic)) || '这个项目';
-}
-
-function pickUnusedQuestion(candidates, askedQuestions) {
-  return candidates.find((question) => !askedQuestions.some((asked) => asked.includes(question.slice(0, 16)))) || candidates[0];
-}
-
-function analyzeAnswerCoverage(answer) {
-  const text = String(answer || '');
-  return {
-    background: includesAny(text, ['背景', '业务', '场景', '目标', '问题']),
-    responsibility: includesAny(text, ['负责', '我做', '我来', '主导', '推进', 'owner', 'Owner']),
-    solution: /方案|设计|实现|改造|优化|拆分|封装|接入|建设|React|Vue|Node|Schema|schema/.test(text),
-    tradeoff: includesAny(text, ['取舍', '权衡', '备选', '为什么', '成本', '复杂度', '边界']),
-    metrics: /指标|数据|百分比|耗时|成本|收益|成功率|转化率|P95|PV|UV|QPS|ms|秒|提升|降低/.test(text),
-    risk: includesAny(text, ['风险', '线上', '故障', '异常', '回滚', '灰度', '监控', '报警', '稳定性']),
-    collaboration: includesAny(text, ['协作', '推动', '沟通', '团队', '评审', '对齐', '产品', '业务方']),
-    reflection: includesAny(text, ['复盘', '沉淀', '规范', '推广', '重新', '改进', '方法论']),
-  };
-}
-
-function summarizeCoverage(messages, nextAnswer = '') {
-  const answers = [
-    ...messages.filter((item) => item.sender_type === 'candidate').map((item) => item.content || item.text || ''),
-    nextAnswer,
-  ].filter(Boolean);
-
-  return answers.reduce(
-    (summary, answer) => {
-      const coverage = analyzeAnswerCoverage(answer);
-      Object.entries(coverage).forEach(([key, value]) => {
-        summary[key] = summary[key] || value;
-      });
-      return summary;
-    },
-    {
-      background: false,
-      responsibility: false,
-      solution: false,
-      tradeoff: false,
-      metrics: false,
-      risk: false,
-      collaboration: false,
-      reflection: false,
-    }
-  );
-}
-
-function countCovered(coverage, keys) {
-  return keys.filter((key) => coverage[key]).length;
-}
-
-function getAgentRound(messages, agent) {
-  if (!agent) return 0;
-  const lastOtherAgentMessageIndex = messages.reduce((matchedIndex, item, index) => {
-    return item.sender_type === 'agent' && item.agent_id && item.agent_id !== agent.id ? index : matchedIndex;
-  }, -1);
-  return messages.slice(lastOtherAgentMessageIndex + 1).filter((item) => item.sender_type === 'candidate').length;
-}
-
-function createAgentOpeningQuestion(nextAgent, interview, coverage) {
-  const role = interview?.target_role || '目标岗位';
-  if (nextAgent?.agent_type === 'architecture') {
-    const missing = !coverage.risk
-      ? '灰度、回滚和观测体系'
-      : !coverage.tradeoff
-        ? '模块边界和方案取舍'
-        : '长期演进和复杂度治理';
-    return `技术一面先了解到这里，接下来进入架构二面。我们换一个视角：如果这个项目要支撑更多业务线，你会如何设计${missing}？`;
-  }
-  if (nextAgent?.agent_type === 'hr') {
-    return `架构二面先到这里，接下来进入 HR 面。我想了解一下你的职业动机：你现在选择${role}相关机会时，最看重团队和岗位的哪些因素？`;
-  }
-  return `我们进入下一轮面试。请结合${role}要求，补充一个最能体现你能力的真实经历。`;
-}
-
-function createAgentClosing(agent, nextAgent, coverage) {
-  if (agent?.agent_type === 'technical') {
-    return `技术一面我先了解到这里。你已经覆盖了项目背景、方案实现和部分结果验证，当前信息足够进入下一轮；剩下的系统边界和长期治理，我会交给${nextAgent?.agent_name || '架构二面 Agent'}继续追问。`;
-  }
-  if (agent?.agent_type === 'architecture') {
-    return `架构二面我先了解到这里。系统设计、复杂度治理和风险意识已经有了基本判断，接下来切到${nextAgent?.agent_name || 'HR Agent'}，看一下动机、协作和稳定性。`;
-  }
-  return '这一轮我先了解到这里。';
-}
-
-function decideNextInterviewAction({ interview, agents, messages, activeAgent, lastAnswer }) {
-  const coverage = summarizeCoverage(messages, lastAnswer);
-  const round = getAgentRound(messages, activeAgent) + 1;
-  const askedQuestions = messages.filter((item) => item.sender_type === 'agent').map((item) => item.content || '');
-  const nextAgent = agents.find((agent) => agent.order_index > (activeAgent?.order_index ?? 0) && agent.status !== 'completed');
-  const agentType = activeAgent?.agent_type || 'technical';
-
-  if (agentType === 'technical') {
-    const enoughCoverage = countCovered(coverage, ['background', 'responsibility', 'solution', 'tradeoff', 'metrics', 'risk']) >= 4;
-    if ((round >= 5 && enoughCoverage) || round >= 7) {
-      return nextAgent
-        ? {
-            action: 'switch_agent',
-            closing: createAgentClosing(activeAgent, nextAgent, coverage),
-            nextAgent,
-            opening: createAgentOpeningQuestion(nextAgent, interview, coverage),
-          }
-        : { action: 'finish_interview', closing: '技术一面的信息已经足够，我会结束本场模拟并生成报告。' };
-    }
-  }
-
-  if (agentType === 'architecture') {
-    const enoughCoverage = countCovered(coverage, ['solution', 'tradeoff', 'metrics', 'risk', 'reflection']) >= 4;
-    if ((round >= 4 && enoughCoverage) || round >= 6) {
-      return nextAgent
-        ? {
-            action: 'switch_agent',
-            closing: createAgentClosing(activeAgent, nextAgent, coverage),
-            nextAgent,
-            opening: createAgentOpeningQuestion(nextAgent, interview, coverage),
-          }
-        : { action: 'finish_interview', closing: '架构面的信息已经足够，我会结束本场模拟并生成报告。' };
-    }
-  }
-
-  if (agentType === 'hr' && round >= 3) {
-    return {
-      action: 'finish_interview',
-      closing: 'HR 面我先了解到这里。这场模拟面试的信息已经足够，接下来可以生成综合报告。',
-    };
-  }
-
-  return {
-    action: 'ask_follow_up',
-    question: createFollowUpQuestion(lastAnswer, interview, messages, activeAgent),
-    askedQuestions,
-  };
-}
-
-function createFollowUpQuestion(answer, interview, messages = [], activeAgent = null) {
-  const text = String(answer || '');
-  const targetRole = interview?.target_role || '目标岗位';
-  const candidateRound = getAgentRound(messages, activeAgent) + 1;
-  const askedQuestions = messages
-    .filter((item) => item.sender_type === 'agent')
-    .map((item) => item.content || '');
-  const topic = pickMentionedTopic(text);
-  const hasMetric = /指标|数据|百分比|耗时|成本|收益|成功率|转化率|P95|PV|UV|QPS|ms|秒/.test(text);
-  const hasTradeoff = /取舍|权衡|边界|风险|限制|方案|设计|架构|模块/.test(text);
-  const hasCollaboration = /协作|推动|沟通|团队|评审|对齐|产品|业务方/.test(text);
-  const hasIncident = /线上|故障|异常|回滚|灰度|监控|报警|稳定性/.test(text);
-  const agentType = activeAgent?.agent_type || 'technical';
-
-  if (agentType === 'architecture') {
-    const architectureQuestions = [
-      [
-        `从架构角度看，如果${topic}要支撑多个业务线，你会如何拆分核心模块和扩展点？`,
-        `你会如何定义 schema、渲染器、组件协议和业务插件之间的边界？`,
-      ],
-      [
-        `如果历史页面已经接入旧协议，你会怎么做版本兼容、迁移和灰度？`,
-        `哪些能力应该沉淀到平台，哪些逻辑必须留在业务侧？你怎么判断？`,
-      ],
-      [
-        hasIncident
-          ? '你刚才提到线上风险，架构层面会设计哪些观测指标、降级策略和回滚开关？'
-          : '如果平台能力出问题会影响多个业务线，你会怎么设计监控、降级和止损链路？',
-        '这个系统最容易失控的复杂度在哪里？你会用什么治理机制长期控制？',
-      ],
-      [
-        `如果让你作为${targetRole} owner 推进半年路线图，你会优先做哪三件事？为什么？`,
-        '你如何衡量这个平台架构是否成功？除了性能指标，还会看哪些工程和业务指标？',
-      ],
-    ];
-    return pickUnusedQuestion(architectureQuestions[Math.min(candidateRound - 1, architectureQuestions.length - 1)], askedQuestions);
-  }
-
-  if (agentType === 'hr') {
-    const hrQuestions = [
-      [
-        `你为什么会考虑${targetRole}这个方向？它和你下一阶段的成长目标怎么匹配？`,
-        '你在选择团队时最看重什么？业务空间、技术深度、团队氛围还是成长节奏？',
-      ],
-      [
-        hasCollaboration
-          ? '你刚才提到协作，能讲一个你和业务方或同事目标不一致但最后推进成功的例子吗？'
-          : '如果你和产品、后端或测试对优先级判断不一致，你通常怎么处理？',
-        '过去一段经历里，什么样的管理方式最能激发你的状态？什么方式会明显消耗你？',
-      ],
-      [
-        '如果入职后发现项目历史包袱比预期重，你会怎么调整预期并建立短期成果？',
-        '你希望面试官通过这场面试记住你的哪三个关键词？',
-      ],
-    ];
-    return pickUnusedQuestion(hrQuestions[Math.min(candidateRound - 1, hrQuestions.length - 1)], askedQuestions);
-  }
-
-  const stageQuestions = [
-    [
-      `你刚才提到${topic}，先把项目背景讲实一点：当时业务目标是什么，你个人负责到哪一层？`,
-      `如果只看你负责的部分，${topic}里面最难解决的一个点是什么？为什么它不是常规开发能顺手解决的？`,
-      `这个项目在开始前有哪些约束，比如时间、人力、历史包袱或线上风险？你是怎么判断优先级的？`,
-    ],
-    [
-      hasTradeoff
-        ? `你提到了方案设计，我想继续追一下取舍：当时至少有哪些备选方案，为什么最后选了这一种？`
-        : `你刚才更多讲了做法，能不能补一下方案选择过程：你排除过哪些方案，它们的问题分别是什么？`,
-      `围绕${topic}，如果让你画一张模块关系图，核心链路会怎么拆？哪些部分必须隔离？`,
-      `这个方案有没有引入新的复杂度？比如维护成本、学习成本、兼容成本，你当时怎么控制？`,
-    ],
-    [
-      hasMetric
-        ? `你提到了指标，我追一下数据口径：这些数据从哪里采集，如何排除缓存、网络和样本差异的影响？`
-        : `这里我还缺少结果验证。上线前后你看了哪些指标，怎么证明优化真的有效？`,
-      `如果优化后技术指标变好了，但业务方感知不明显，你会怎么复盘这个结果？`,
-      `有没有一个具体数字能说明收益？比如耗时、错误率、人效、投诉量或交付周期的变化。`,
-    ],
-    [
-      hasIncident
-        ? `你提到了线上风险，那灰度和回滚方案具体怎么设计？什么情况下会触发回滚？`
-        : `如果这个改动上线后出现性能回退或兼容问题，你会怎么监控、止损和定位？`,
-      `这个项目有没有失败或反复的地方？如果重新做一遍，你会提前改变哪一个决策？`,
-      `站在${targetRole}的要求看，这个项目最能证明你能力的一点是什么？有没有可复用的方法论沉淀下来？`,
-    ],
-    [
-      hasCollaboration
-        ? `你提到了协作，我想听一个具体冲突：谁和谁的目标不一致，你怎么推动大家接受方案？`
-        : `这个方案落地时依赖哪些角色配合？如果业务团队不愿意改接入方式，你会怎么推动？`,
-      `后续有没有把这套能力推广到其他页面或团队？推广过程中遇到的最大阻力是什么？`,
-      `如果让你带一个同学继续维护这块，你会沉淀哪些规范、工具或检查机制？`,
-    ],
-  ];
-
-  const stageIndex = Math.min(candidateRound - 1, stageQuestions.length - 1);
-  return pickUnusedQuestion(stageQuestions[stageIndex], askedQuestions);
-}
-
 function reportToViewModel(reportData, user) {
   const abilityRadar = parseJsonValue(reportData?.ability_radar, {});
   const agentFeedback = parseJsonValue(reportData?.agent_feedback, []);
@@ -1003,8 +728,8 @@ function reportToViewModel(reportData, user) {
       title: `${interviewer} · 问答复盘`,
       question,
       answer: item.answer_preview || item.content_preview,
-      review: reportScore(item.score) !== null ? `本题得分 ${item.score}/100。建议结合报告中的能力维度和训练任务继续优化。` : '本题暂无单独评分。',
-      score: reportScore(item.score),
+      ...roundAssessment(item),
+      review: '本题暂无详细评价。',
       strengths: item.strengths || '',
       issues: item.issues || '',
       suggestion: item.suggestions || '',
@@ -1014,14 +739,14 @@ function reportToViewModel(reportData, user) {
 
   // Older reports may have been saved as "succeeded" even though no candidate
   // answer existed. The deterministic timeline is the evidence source of truth.
-  const hasEvidence = reportData?.generation_status !== 'insufficient_evidence' && timeline.length > 0;
+  const hasEvidence = visibleReportScore(reportData || {}) !== null && (reportData?.scored_answer_count > 0 || timeline.length > 0);
 
   return {
     candidate: user?.name || '候选人',
     role: reportData?.target_role || '目标岗位',
     result: hasEvidence ? (recommendationLabels[reportData?.pass_recommendation] || '待判断') : '证据不足',
     grade: hasEvidence ? (reportData?.grade || '-') : '-',
-    score: hasEvidence ? (reportData?.total_score || 0) : 0,
+    score: hasEvidence ? visibleReportScore(reportData) : null,
     generatedAt: formatDateTime(reportData?.updated_at || reportData?.created_at),
     interviewId: reportData?.interview_id || '-',
     provider: reportData?.provider || 'local',
@@ -1032,13 +757,13 @@ function reportToViewModel(reportData, user) {
     fallback: Boolean(reportData?.fallback),
     hasEvidence,
     generationError: reportData?.generation_error || '',
-    summary: hasEvidence ? (reportData?.summary || '暂无报告摘要。') : '本次面试未记录到候选人回答，缺少可用于评分和复盘的证据，因此不生成综合评分、能力指标或推进建议。',
+    summary: hasEvidence || timeline.length ? (reportData?.summary || '暂无报告摘要。') : '本次面试缺少可用于评分的回答。',
     suggestions: hasEvidence ? suggestions : [],
     radar: (hasEvidence ? Object.entries(abilityRadar) : []).filter(([, value]) => reportScore(value) !== null).map(([key, value]) => ({
       subject: dimensionLabels[key] || key,
       value: reportScore(value),
     })),
-    metrics: (hasEvidence ? Object.entries(abilityRadar) : []).map(([key, value]) => ({
+    metrics: (hasEvidence ? Object.entries(abilityRadar) : []).filter(([, value]) => reportScore(value) !== null).map(([key, value]) => ({
       label: dimensionLabels[key] || key,
       value: reportScore(value),
       note: `本场${dimensionLabels[key] || key}表现为 ${Number(value) || 0}/100，综合单题回答证据生成。`,
@@ -1048,6 +773,7 @@ function reportToViewModel(reportData, user) {
       return {
         name: item.agent_name,
         evaluated: hasEvidence && hasScore,
+        roundSummary: item.round_summary,
         decision: hasEvidence && hasScore ? (item.score >= 80 ? '表现稳定' : item.score >= 70 ? '继续观察' : '需要加强') : '证据不足',
         color: hasEvidence && hasScore ? (item.score >= 80 ? 'green' : item.score >= 70 ? 'blue' : 'amber') : 'blue',
         text: hasEvidence ? item.comment : '未记录到候选人回答，无法形成可靠评价。',
@@ -1351,7 +1077,7 @@ function CompetencyRadar({ data }) {
   );
 }
 
-function TimelineItem({ item, index }) {
+function TimelineItem({ item, index, onRetry, busy }) {
   const [open, setOpen] = useState(false);
   const Icon = item.type === 'hr' ? BriefcaseBusiness : item.type === 'business' ? MessageSquareText : Wrench;
 
@@ -1365,7 +1091,7 @@ function TimelineItem({ item, index }) {
           <small>第 {index + 1} 题 · {item.title.replace(' · 问答复盘', '')}</small>
           <strong className="report-question-preview">{item.question || '未记录对应问题'}</strong>
         </span>
-        <span className="timeline-score">{item.score !== null && item.score !== undefined ? `${item.score} 分` : '未评分'}</span>
+        <span className="timeline-score">{item.scoreLabel}</span>
         <ChevronDown className="chevron" size={18} />
       </button>
       {open && (
@@ -1380,13 +1106,15 @@ function TimelineItem({ item, index }) {
           </div>
           <div className="review-block">
             <h3>AI 导师复盘意见</h3>
+            {item.evidence.map(([key, quote]) => <blockquote key={key}><strong>{dimensionLabels[key] || key}</strong><p>{quote}</p></blockquote>)}
+            {item.retryId && <button className="secondary-action" type="button" disabled={busy} onClick={() => onRetry(item.retryId)}>{busy ? '处理中…' : '重新评价本题'}</button>}
             {item.strengths || item.issues || item.suggestion ? (
               <div className="review-evidence">
                 {item.strengths && <p><strong>回答亮点</strong><span>{item.strengths}</span></p>}
                 {item.issues && <p><strong>主要问题</strong><span>{item.issues}</span></p>}
                 {item.suggestion && <p><strong>改进建议</strong><span>{item.suggestion}</span></p>}
               </div>
-            ) : <p>{item.review}</p>}
+            ) : !item.evidence.length && <p>{item.review}</p>}
           </div>
         </div>
       )}
@@ -3870,7 +3598,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const [aliyunRtcRemoteUsers, setAliyunRtcRemoteUsers] = useState(0);
   const [aliyunAgentStatus, setAliyunAgentStatus] = useState('disabled');
   const [aliyunAgentTranscript, setAliyunAgentTranscript] = useState(null);
-  const [aliyunSpokenQuestion, setAliyunSpokenQuestion] = useState('');
   const [aliyunRtcSwitching, setAliyunRtcSwitching] = useState(false);
 
   useEffect(() => {
@@ -3928,101 +3655,100 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const aliyunRtcChannelRef = useRef('');
   const aliyunRtcAgentTaskRef = useRef('');
   const aliyunRtcHeartbeatIntervalRef = useRef(15000);
-  const aliyunRtcTranscriptAssemblerRef = useRef(null);
-  if (!aliyunRtcTranscriptAssemblerRef.current) {
-    aliyunRtcTranscriptAssemblerRef.current = createAliyunRtcTranscriptAssembler();
+  const rtcCaptionsRef = useRef(null);
+  const rtcEpochRef = useRef(0);
+  const rtcWritesRef = useRef(null);
+  if (!rtcWritesRef.current) {
+    rtcWritesRef.current = createRtcWriteQueue(error => {
+      setError(error.message || '语音同步失败，切回文字或重新连接可重试。');
+    });
   }
-  const aliyunRtcProcessedTurnsRef = useRef(new Set());
-  const aliyunRtcSubmissionQueueRef = useRef(Promise.resolve());
-  const aliyunRtcAgentSubmissionQueueRef = useRef(Promise.resolve());
-  const aliyunRtcSubmissionErrorRef = useRef(null);
-  const aliyunRtcNextActionRef = useRef('ask_follow_up');
+  const finishRequestRef = useRef(null);
+  const recoveredDraftRef = useRef(false);
   const pendingEvaluationRequestsRef = useRef(new Set());
-  const activeAgentRef = useRef(null);
+  const [progress, setProgress] = useState(null);
+  const progressRef = useRef(null);
+  const textAttemptRef = useRef(null);
+  const textSubmittingRef = useRef(false);
+  const applyProgress = (state) => {
+    if (progressRef.current?.question?.id !== state.question?.id) {
+      setAnswer('');
+      textAttemptRef.current = null;
+    }
+    progressRef.current = state;
+    setProgress(state);
+  };
+  const readCurrentQuestion = (recoverSpoken = true) => apiRequest(
+    `/api/interviews/${interviewId}/current-question`,
+    { method: 'POST', body: JSON.stringify({ recover_spoken: recoverSpoken }) }
+  );
   const handleSubmitAnswerRef = useRef(null);
 
   const enqueueAliyunRtcCandidateTurn = (turn) => {
     if (!turn?.text || turn.speaker !== 'candidate' || !turn.end) return;
-    const processedKey = `candidate:${turn.turnId}`;
-    if (aliyunRtcProcessedTurnsRef.current.has(processedKey)) return;
-    aliyunRtcProcessedTurnsRef.current.add(processedKey);
-    aliyunRtcNextActionRef.current = 'pending';
-    setAliyunRtcMessage('已识别到回答，正在保存并生成下一题');
-    recordAliyunRtcDiagnostic('candidate_turn_finalized', {
-      message: 'RTC 候选人转写已收口，开始提交业务回答',
-      metadata: { text_length: turn.text.length },
-    });
-    aliyunRtcSubmissionQueueRef.current = aliyunRtcSubmissionQueueRef.current
-      .then(() => handleSubmitAnswerRef.current?.(turn.text, {
-        source: 'aliyun_rtc',
-        sourceRef: turn.turnId,
-        transcriptText: turn.text,
-      }))
-      .then(() => {
-        aliyunRtcSubmissionErrorRef.current = null;
-      })
-      .catch((submitError) => {
-        aliyunRtcProcessedTurnsRef.current.delete(processedKey);
-        aliyunRtcSubmissionErrorRef.current = submitError;
-        aliyunRtcNextActionRef.current = 'error';
-        setError(submitError.message || 'RTC 语音回答保存失败');
-        setAliyunRtcMessage('RTC 回答保存失败，请先不要结束面试');
+    const epoch = rtcEpochRef.current;
+    let question;
+    rtcWritesRef.current.enqueue(async () => {
+      if (epoch !== rtcEpochRef.current) return;
+      if (!question && !progressRef.current?.question && progressRef.current?.pending_spoken_submission_id) {
+        await stopAliyunRtcCall('语音题目未同步，已转入文字面试', { flushCandidate: false });
+        const state = await readCurrentQuestion();
+        await Promise.all([reloadMessages(), reloadAgents()]);
+        rtcEpochRef.current++;
+        applyProgress(state);
+        if (state.action === 'finish_interview') {
+          await finishAndOpenReport();
+          return;
+        }
+        recoveredDraftRef.current = true;
+        setAnswer(turn.text);
+        setInterviewMode('text');
+        setError('语音追问未同步。已保留回答草稿，请核对当前题目后发送。');
+        return;
+      }
+      question ||= progressRef.current?.question;
+      if (!question) return;
+      await handleSubmitAnswerRef.current(turn.text, {
+        source: 'aliyun_rtc', sourceRef: turn.turnId, question,
       });
+    });
   };
 
-  const enqueueAliyunRtcAgentTurn = (turn) => {
-    if (!turn?.text || turn.speaker !== 'agent' || !turn.end) return;
-    if (aliyunRtcNextActionRef.current === 'opening') return;
-    const processedKey = `agent:${turn.turnId}`;
-    if (aliyunRtcProcessedTurnsRef.current.has(processedKey)) return;
-    aliyunRtcProcessedTurnsRef.current.add(processedKey);
-    const candidateSubmission = aliyunRtcSubmissionQueueRef.current;
-    const agentId = activeAgentRef.current?.id || '';
-    const callAttempt = aliyunRtcAttemptRef.current;
-    aliyunRtcAgentSubmissionQueueRef.current = aliyunRtcAgentSubmissionQueueRef.current
-      .then(async () => {
-        // Cloud speech can finish before the candidate answer has committed.
-        // Wait so the actual question keeps the right message order. Evaluation
-        // continues independently and must not delay the next spoken question.
-        await candidateSubmission;
-        if (aliyunRtcAttemptRef.current !== callAttempt) return;
-        const latestMessages = await reloadMessages();
-        if (aliyunRtcAttemptRef.current !== callAttempt || activeAgentRef.current?.id !== agentId) return;
-        const latestQuestion = findLatestInterviewQuestion(latestMessages);
-        if (!shouldPersistAliyunAgentTurn(
-          turn,
-          latestQuestion,
-          aliyunRtcNextActionRef.current
-        )) return;
-        if (!agentId) throw new Error('无法确定 RTC 面试官，实际追问未保存');
-        const spokenQuestion = extractQuestionFromAgentTranscript(turn.text);
-        await apiRequest(`/api/interviews/${interviewId}/messages`, {
-          method: 'POST',
-          body: JSON.stringify({
-            agent_id: agentId,
-            sender_type: 'agent',
-            message_type: 'follow_up',
-            content: spokenQuestion,
-            transcript_text: turn.text,
-            source: 'aliyun_rtc',
-            source_ref: `agent:${turn.turnId}`,
-          }),
-        });
-        await reloadMessages();
-        recordAliyunRtcDiagnostic('agent_turn_persisted', {
-          message: 'RTC AI 实际追问已同步到当前问题',
-          metadata: { text_length: spokenQuestion.length },
-        });
-      })
-      .catch((submitError) => {
-        aliyunRtcProcessedTurnsRef.current.delete(processedKey);
-        setError(submitError.message || 'RTC AI 实际追问同步失败');
-        recordAliyunRtcDiagnostic('agent_turn_persist_failed', {
-          level: 'warning',
-          message: 'RTC AI 实际追问未能同步到消息流',
-          metadata: { error_name: submitError?.name || 'Error' },
-        });
-      });
+  const enqueueAliyunRtcAgentTurn = (turn, submissionId) => {
+    if (!submissionId || !turn?.end) return;
+    const epoch = rtcEpochRef.current;
+    rtcWritesRef.current.enqueue(async () => {
+      const current = progressRef.current;
+      if (epoch !== rtcEpochRef.current || current?.pending_spoken_submission_id !== submissionId
+          || !shouldPersistAliyunAgentTurn(turn, current.answeredQuestion, current.action)) return;
+      const payload = {
+        content: extractQuestionFromAgentTranscript(turn.text),
+        transcript_text: turn.text,
+        source_ref: `agent:${turn.turnId}`,
+      };
+      let question;
+      try {
+        ({ question } = await postInterviewTurn(body => apiRequest(
+          `/api/interviews/${interviewId}/turns/${encodeURIComponent(submissionId)}/spoken-question`,
+          { method: 'POST', body: JSON.stringify(body) }
+        ), payload, response => response.question?.id));
+      } catch (error) {
+        if (error.status !== 409) throw error;
+        rtcEpochRef.current++;
+        await stopAliyunRtcCall('题目进度已变化，请重新连接', { flushCandidate: false });
+        const state = await readCurrentQuestion();
+        applyProgress(state);
+        if (state.action === 'finish_interview') await finishAndOpenReport();
+        else await Promise.all([reloadMessages(), reloadAgents()]);
+        return;
+      }
+      if (question.source_ref !== payload.source_ref && question.content !== payload.content) {
+        rtcEpochRef.current++;
+        await stopAliyunRtcCall('当前追问已由其他页面恢复，请重新连接', { flushCandidate: false });
+      }
+      applyProgress({ ...current, question, pending_spoken_submission_id: null });
+      await reloadMessages();
+    });
   };
 
   const recordOmniWebrtcDiagnostic = (eventType, {
@@ -4079,12 +3805,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     });
   };
 
-  const stopAliyunRtcAgentTask = async (_taskId) => {
-    if (!interviewId) return null;
+  const stopAliyunRtcAgentTask = async (taskId) => {
+    if (!interviewId || !taskId) return { status: 'stopped' };
     try {
       let result = await apiRequest(`/api/interviews/${interviewId}/rtc/agent/stop`, {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify({ expected_task_id: taskId }),
       });
       // A concurrent server-side finish may observe the persisted stop intent
       // before StopAgent returns. Wait briefly for the authoritative terminal
@@ -4124,7 +3850,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     // Some provider sessions do not emit a final end=true caption. Preserve
     // any buffered candidate speech before pausing or leaving the channel.
     if (flushCandidate) {
-      enqueueAliyunRtcCandidateTurn(aliyunRtcTranscriptAssemblerRef.current.finalize('candidate'));
+      rtcCaptionsRef.current?.flush();
     }
     aliyunRtcAttemptRef.current += 1;
     const agentTaskId = aliyunRtcAgentTaskRef.current;
@@ -4136,6 +3862,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setAliyunRtcRemoteUsers(0);
     setAliyunAgentStatus('disabled');
     setAliyunAgentTranscript(null);
+    rtcCaptionsRef.current = null;
     const leavePromise = session ? session.leave() : Promise.resolve();
     const stopPromise = stopAliyunRtcAgentTask(agentTaskId);
     const [, stopped] = await Promise.allSettled([leavePromise, stopPromise]);
@@ -4143,7 +3870,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       recordAliyunRtcDiagnostic('call_stopped', { message: '用户已退出阿里云 RTC 频道' });
     }
     aliyunRtcChannelRef.current = '';
-    aliyunRtcTranscriptAssemblerRef.current.reset();
     return stopped.status === 'fulfilled' ? stopped.value : null;
   };
 
@@ -4197,19 +3923,27 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setAliyunRtcRemoteUsers(0);
     setAliyunAgentStatus('disabled');
     setAliyunAgentTranscript(null);
-    setAliyunSpokenQuestion('');
-    aliyunRtcTranscriptAssemblerRef.current.reset();
-    aliyunRtcProcessedTurnsRef.current.clear();
-    aliyunRtcSubmissionErrorRef.current = null;
-    aliyunRtcNextActionRef.current = 'opening';
+
 
     let startupPhase = 'messages';
     const startupStartedAt = Date.now();
     try {
       // A reconnect must use the database-backed question instead of the
       // messages captured by the render that created this callback.
-      const latestMessages = await reloadMessages();
-      const latestQuestion = findLatestInterviewQuestion(latestMessages);
+      if (!afterHandoff) await rtcWritesRef.current.drain();
+      if (aliyunRtcAttemptRef.current !== attempt) return;
+      rtcEpochRef.current++;
+      rtcCaptionsRef.current = createRtcCaptionStream(enqueueAliyunRtcCandidateTurn, enqueueAliyunRtcAgentTurn);
+      const current = await readCurrentQuestion();
+      if (aliyunRtcAttemptRef.current !== attempt) return;
+      applyProgress(current);
+      if (current.action === 'finish_interview') {
+        await finishAndOpenReport();
+        return;
+      }
+      const latestQuestion = current.question;
+      if (!latestQuestion?.id) throw new Error('当前题目尚未就绪，请重新连接。');
+      await Promise.all([reloadMessages(), reloadAgents()]);
       startupPhase = 'token';
       const credentials = await apiRequest(`/api/interviews/${interviewId}/rtc/token`, {
         method: 'POST',
@@ -4287,11 +4021,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         },
         onAgentStatus: (status) => {
           if (aliyunRtcAttemptRef.current !== attempt) return;
-          if (['thinking', 'processing', 'responding'].includes(status)) {
-            enqueueAliyunRtcCandidateTurn(
-              aliyunRtcTranscriptAssemblerRef.current.finalize('candidate')
-            );
-          }
           setAliyunAgentStatus(status);
           const statusMessages = {
             listening: 'AI 面试官正在聆听',
@@ -4316,23 +4045,13 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               text_length: String(message?.message || '').trim().length,
             },
           });
-          if (message?.userType === 'agent' && !message?.reasoning) {
-            enqueueAliyunRtcCandidateTurn(
-              aliyunRtcTranscriptAssemblerRef.current.finalize('candidate')
-            );
-          }
-          const turn = aliyunRtcTranscriptAssemblerRef.current.consume(message);
+          const turn = rtcCaptionsRef.current.consume(message);
           if (!turn) return;
           setAliyunAgentTranscript({
             text: turn.text,
             speaker: turn.speaker === 'candidate' ? '候选人' : 'AI 面试官',
             end: turn.end,
           });
-          if (turn.speaker === 'agent') {
-            setAliyunSpokenQuestion(extractQuestionFromAgentTranscript(turn.text));
-            enqueueAliyunRtcAgentTurn(turn);
-          }
-          enqueueAliyunRtcCandidateTurn(turn);
         },
       });
 
@@ -4378,6 +4097,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         // A newly created provider task receives the current question as its
         // StartAgent greeting from the backend. Only an already-running task
         // needs an explicit replay when the browser reconnects.
+        if (agentSession.current_question_id && agentSession.current_question_id !== latestQuestion.id) {
+          await stopAliyunRtcCall('题目已更新，请重新连接当前面试官', { flushCandidate: false });
+          applyProgress(await readCurrentQuestion());
+          await Promise.all([reloadMessages(), reloadAgents()]);
+          return;
+        }
         if (agentSession.idempotent && latestQuestion?.id) {
           void apiRequest(`/api/interviews/${interviewId}/rtc/agent/notify`, {
             method: 'POST',
@@ -4446,14 +4171,10 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     };
   }, [interviewId, aliyunRtcStatus]);
 
-  const activeAgent = agents.find((agent) => agent.status === 'active') || agents.find((agent) => agent.status !== 'completed') || agents[0] || null;
-  activeAgentRef.current = activeAgent;
+  const activeAgent = progress?.active_agent;
   const currentAgentName = activeAgent?.agent_name || liveInterview.currentAgent;
-  const latestInterviewQuestion = findLatestInterviewQuestion(messages);
-  const persistedQuestion = latestInterviewQuestion?.content || createInitialQuestion(interview, activeAgent);
-  const currentQuestion = voiceProvider === 'aliyun-rtc' && aliyunSpokenQuestion
-    ? aliyunSpokenQuestion
-    : persistedQuestion;
+  const persistedQuestion = progress?.question?.content || '正在准备下一题…';
+  const currentQuestion = persistedQuestion;
 
   const reloadMessages = async () => {
     console.info('reloadMessages', {
@@ -4470,14 +4191,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     const data = await apiRequest(`/api/interviews/${interviewId}/agents`);
     setAgents(data.agents || []);
     return data.agents || [];
-  };
-
-  const updateAgentStatus = async (agent, status) => {
-    if (!agent?.id) return null;
-    return apiRequest(`/api/interviews/${interviewId}/agents/${agent.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status }),
-    });
   };
 
   const setRealtimeMicrophoneEnabled = (enabled) => {
@@ -5836,47 +5549,21 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       setError('');
 
       try {
-        const [interviewData, agentData, messageData] = await Promise.all([
-          apiRequest(`/api/interviews/${interviewId}`),
-          apiRequest(`/api/interviews/${interviewId}/agents`),
-          apiRequest(`/api/interviews/${interviewId}/messages`),
-        ]);
-
+        const interviewData = await apiRequest(`/api/interviews/${interviewId}`);
         if (!mounted) return;
         if (interviewData.interview?.status === 'completed') {
           onReportReady(interviewId);
           return;
         }
-
+        const current = await readCurrentQuestion();
+        if (!mounted) return;
         setInterview(interviewData.interview);
-        setAgents(agentData.agents || []);
-
-        let nextMessages = messageData.messages || [];
-        if (nextMessages.length === 0 && agentData.agents?.[0]) {
-          let openingQuestion = createInitialQuestion(interviewData.interview, agentData.agents[0]);
-          try {
-            const opening = await apiRequest(`/api/interviews/${interviewId}/opening-question`, {
-              method: 'POST',
-            });
-            if (opening.question) {
-              openingQuestion = opening.question;
-            }
-          } catch (openingError) {
-            setQwenMessage('AI 首问生成失败，已使用本地首问兜底');
-          }
-          const created = await apiRequest(`/api/interviews/${interviewId}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-              agent_id: agentData.agents[0].id,
-              sender_type: 'agent',
-              message_type: 'question',
-              content: openingQuestion,
-            }),
-          });
-          nextMessages = [created.message];
+        applyProgress(current);
+        if (current.action === 'finish_interview') {
+          await finishAndOpenReport();
+          return;
         }
-
-        if (mounted) setMessages(nextMessages);
+        await Promise.all([reloadMessages(), reloadAgents()]);
       } catch (requestError) {
         if (mounted) setError(requestError.message);
       } finally {
@@ -5974,7 +5661,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       .catch((evaluationError) => {
         // A missing per-question evaluation should not hold the candidate on
         // the current screen. The final report still waits for tracked work,
-        // and the backend supplies a local fallback for provider failures.
+        // and pending evaluations can be retried from the report.
         console.warn('Background answer evaluation failed:', evaluationError);
         return null;
       })
@@ -5989,165 +5676,144 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
   };
 
-  const handleSubmitAnswer = async (submittedAnswer = null, options = {}) => {
-    const content = typeof submittedAnswer === 'string' ? submittedAnswer.trim() : answer.trim();
-    if (!content || !interviewId || (submitting && options.source !== 'aliyun_rtc')) return;
-
-    setSubmitting(true);
-    setError('');
-    setProcessingStage('正在保存本轮回答');
-
-    try {
-      const answerData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
-        method: 'POST',
-        body: JSON.stringify({
-          sender_type: 'candidate',
-          message_type: 'answer',
-          content,
-          transcript_text: options.transcriptText || '',
-          source: options.source || 'text',
-          source_ref: options.sourceRef || '',
-        }),
-      });
-      if (answerData.duplicate) setProcessingStage('本轮语音回答已保存，正在继续生成下一题');
-      const evaluationRequest = evaluateAnswerInBackground(answerData.message.id);
-      const nextAction = decideNextInterviewAction({
-        interview,
-        agents,
-        messages,
-        activeAgent,
-        lastAnswer: content,
-      });
-      if (options.source === 'aliyun_rtc') {
-        aliyunRtcNextActionRef.current = nextAction.action;
-      }
-
-      if (nextAction.action === 'ask_follow_up' && activeAgent) {
-        if (options.source === 'aliyun_rtc') {
-          // Alibaba's cloud Agent is already generating and speaking this
-          // follow-up. Its final caption is the source of truth and is saved by
-          // enqueueAliyunRtcAgentTurn; creating another question here caused
-          // the card and the actual voice to diverge.
-          setProcessingStage('正在等待 RTC AI 面试官的实际追问');
-        } else {
-          setProcessingStage('正在生成下一条智能追问');
-          let followUpQuestion = nextAction.question;
-          try {
-            const followUp = await apiRequest(`/api/interviews/${interviewId}/follow-up`, {
-              method: 'POST',
-              body: JSON.stringify({ last_answer: content }),
-            });
-            if (followUp.question) {
-              followUpQuestion = followUp.question;
-            }
-          } catch (followUpError) {
-            setQwenMessage('Kimi 追问生成失败，已使用本地追问兜底');
-          }
-          const followUpData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-              agent_id: activeAgent.id,
-              sender_type: 'agent',
-              message_type: 'follow_up',
-              content: followUpQuestion,
-            }),
-          });
-          if (voiceProvider === 'qwen') {
-            playQwenSpeechInBackground(followUpData.message.content);
-          }
-          if (voiceProvider === 'aliyun-rtc') {
-            await speakAliyunRtcMessage(followUpData.message);
-          }
-        }
-      }
-      if (nextAction.action === 'switch_agent' && activeAgent && nextAction.nextAgent) {
-        const prepareNextAgent = async () => {
-          setProcessingStage(`正在切换到${nextAction.nextAgent.agent_name || '下一位面试官'}`);
-          await apiRequest(`/api/interviews/${interviewId}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-              agent_id: activeAgent.id,
-              sender_type: 'agent',
-              message_type: 'system',
-              content: nextAction.closing,
-            }),
-          });
-          await updateAgentStatus(activeAgent, 'completed');
-          await updateAgentStatus(nextAction.nextAgent, 'active');
-          const openingData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-              agent_id: nextAction.nextAgent.id,
-              sender_type: 'agent',
-              message_type: 'question',
-              content: nextAction.opening,
-            }),
-          });
-          await reloadAgents();
-          await reloadMessages();
-          if (voiceProvider === 'qwen') playQwenSpeechInBackground(openingData.message.content);
-        };
-        if (voiceProvider === 'aliyun-rtc' && aliyunRtcSessionRef.current) {
-          setAliyunRtcSwitching(true);
-          aliyunRtcNextActionRef.current = 'switch_agent';
-          // stop increments the generation once; further stop/navigation cancels
-          // reconnect. A fresh client also fences out the old Agent's captions.
-          const handoffAttempt = aliyunRtcAttemptRef.current + 1;
-          try {
-            setProcessingStage('正在结束上一位语音面试官的对话');
-            await handoffAliyunRtcSession({
-              // The answer triggering this handoff is already saved. Do not
-              // submit late partial captions as an answer to the new role.
-              stop: () => stopAliyunRtcCall('正在切换语音面试官', { flushCandidate: false }),
-              prepare: prepareNextAgent,
-              isCancelled: () => aliyunRtcAttemptRef.current !== handoffAttempt,
-              start: () => startAliyunRtcCall({ afterHandoff: true }),
-            });
-          } finally {
-            setAliyunRtcSwitching(false);
-          }
-        } else {
-          await prepareNextAgent();
-        }
-      }
-      if (nextAction.action === 'finish_interview') {
-        setProcessingStage('三轮面试已完成，正在收尾评价');
-        await evaluationRequest;
+  const finishAndOpenReport = async () => {
+    if (!finishRequestRef.current) {
+      finishRequestRef.current = (async () => {
         await waitForPendingEvaluations();
-        setProcessingStage('正在生成综合报告');
-        await stopAliyunRtcCall('面试已完成');
-        stopRealtimeCall();
-        stopOmniRealtimeCall();
-        stopOmniWebrtcCall();
-        stopQwenRecognition();
-        stopQwenSpeech();
-        if (activeAgent) {
-          await apiRequest(`/api/interviews/${interviewId}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-              agent_id: activeAgent.id,
-              sender_type: 'agent',
-              message_type: 'system',
-              content: nextAction.closing,
-            }),
-          });
-          await updateAgentStatus(activeAgent, 'completed');
-        }
         await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
         onReportReady(interviewId);
+      })().catch(error => {
+        finishRequestRef.current = null;
+        throw error;
+      });
+    }
+    return finishRequestRef.current;
+  };
+
+  const handleSubmitAnswer = async (submittedAnswer = null, options = {}) => {
+    const content = typeof submittedAnswer === 'string' ? submittedAnswer.trim() : answer.trim();
+    const isRtc = options.source === 'aliyun_rtc';
+    if (!content || !interviewId || (!isRtc && textSubmittingRef.current)) return;
+    const question = options.question || progressRef.current?.question;
+    if (!question?.id) {
+      const message = '请等待当前问题同步后再回答，或重新连接以恢复题目。';
+      if (isRtc) throw new Error(message);
+      setError(message);
+      return;
+    }
+    if (!isRtc) textSubmittingRef.current = true;
+    setSubmitting(true);
+    setError('');
+    setProcessingStage('正在保存回答并确认下一题');
+
+    try {
+      // A timed-out POST may already be committed. Reuse its ID for this answer.
+      const submission = createAnswerSubmission({
+        questionId: question.id, content, sourceRef: options.sourceRef, previous: textAttemptRef.current,
+      });
+      if (!isRtc) textAttemptRef.current = submission;
+      const result = await postInterviewTurn(
+        (body) => apiRequest(`/api/interviews/${interviewId}/turns`, { method: 'POST', body: JSON.stringify(body) }),
+        submission, response => response.answer?.id && response.action
+      );
+      const state = result.duplicate ? await readCurrentQuestion(!isRtc) : {
+        ...result,
+        pending_spoken_submission_id: isRtc && result.action === 'ask_follow_up' && !result.question
+          ? submission.submission_id : null,
+      };
+      applyProgress({ ...state, answeredQuestion: question });
+      if (!isRtc) {
+        recoveredDraftRef.current = false;
+        textAttemptRef.current = null;
+        setAnswer('');
+      }
+      evaluateAnswerInBackground(result.answer.id);
+      if (state.action === 'finish_interview') {
+        rtcEpochRef.current++;
+        setProcessingStage('正在结束面试并生成综合报告');
+        await stopAliyunRtcCall('面试已完成', { flushCandidate: false });
+        await finishAndOpenReport();
         return;
       }
-      setAnswer('');
-      await reloadMessages();
+      const changedRole = state.active_agent?.id !== question.agent_id;
+      const advancedElsewhere = result.duplicate && (
+        state.pending_spoken_submission_id
+          ? state.pending_spoken_submission_id !== submission.submission_id
+          : state.question?.id !== result.question?.id
+      );
+      if (changedRole || advancedElsewhere) rtcEpochRef.current++;
+      if (isRtc && advancedElsewhere) {
+        await stopAliyunRtcCall('其他页面已更新题目，请重新连接', { flushCandidate: false });
+        const latest = await readCurrentQuestion();
+        applyProgress(latest);
+        if (latest.action === 'finish_interview') await finishAndOpenReport();
+        else await Promise.all([reloadMessages(), reloadAgents()]);
+        return;
+      }
+      if (changedRole && aliyunRtcSessionRef.current) {
+        setAliyunRtcSwitching(true);
+        const handoffAttempt = aliyunRtcAttemptRef.current + 1;
+        try {
+          await handoffAliyunRtcSession({
+            stop: () => stopAliyunRtcCall('正在切换语音面试官', { flushCandidate: false }),
+            prepare: () => Promise.all([reloadAgents(), reloadMessages()]),
+            isCancelled: () => aliyunRtcAttemptRef.current !== handoffAttempt,
+            start: () => startAliyunRtcCall({ afterHandoff: true }),
+          });
+        } finally {
+          setAliyunRtcSwitching(false);
+        }
+      } else {
+        await Promise.all([reloadMessages(), (state.action === 'switch_agent' || result.duplicate) && reloadAgents()]);
+        if (state.question && !isRtc) {
+          if (voiceProvider === 'qwen') playQwenSpeechInBackground(state.question.content);
+          await speakAliyunRtcMessage(state.question);
+        }
+      }
     } catch (requestError) {
+      if (requestError.status === 409) {
+        if (isRtc) {
+          rtcEpochRef.current++;
+          await stopAliyunRtcCall('题目进度已变化，请重新连接', { flushCandidate: false });
+        }
+        const current = await readCurrentQuestion();
+        applyProgress(current);
+        if (current.action === 'finish_interview') {
+          await finishAndOpenReport();
+          return;
+        }
+        await Promise.all([reloadMessages(), reloadAgents()]);
+        if (!isRtc && current.question?.id !== question.id) setAnswer('');
+      }
       setError(requestError.message);
-      if (options.source === 'aliyun_rtc') throw requestError;
+      if (isRtc && requestError.status !== 409) throw requestError;
     } finally {
+      if (!isRtc) textSubmittingRef.current = false;
       setSubmitting(false);
       setProcessingStage('');
     }
   };
   handleSubmitAnswerRef.current = handleSubmitAnswer;
+
+  const switchToText = async () => {
+    setProcessingStage('正在同步语音面试进度');
+    try {
+      await stopAliyunRtcCall();
+      await rtcWritesRef.current.drain();
+      const current = await readCurrentQuestion();
+      applyProgress(current);
+      if (current.action === 'finish_interview') {
+        await finishAndOpenReport();
+        return;
+      }
+      await Promise.all([reloadMessages(), reloadAgents()]);
+      setInterviewMode('text');
+    } catch (syncError) {
+      setError(syncError.message);
+    } finally {
+      setProcessingStage('');
+    }
+  };
 
   const handleFinish = async () => {
     if (!interviewId || finishing) return;
@@ -6156,13 +5822,13 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setProcessingStage('正在保存最后一条回答');
 
     try {
-      if (voiceProvider === 'aliyun-rtc') {
-        const pendingTurn = aliyunRtcTranscriptAssemblerRef.current.finalize('candidate');
-        enqueueAliyunRtcCandidateTurn(pendingTurn);
-        await aliyunRtcSubmissionQueueRef.current;
-        if (aliyunRtcSubmissionErrorRef.current) throw aliyunRtcSubmissionErrorRef.current;
-      }
       await stopAliyunRtcCall();
+      await rtcWritesRef.current.drain();
+      if (recoveredDraftRef.current) {
+        recoveredDraftRef.current = false;
+        setError('最后一条语音回答仍是草稿。请先核对并发送，或再次结束面试。');
+        return;
+      }
       stopRealtimeCall();
       stopOmniRealtimeCall();
       stopOmniWebrtcCall();
@@ -6177,8 +5843,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         await waitForPendingEvaluations();
       }
       setProcessingStage('正在结束面试并生成综合报告');
-      await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
-      onReportReady(interviewId);
+      await finishAndOpenReport();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -6213,7 +5878,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         : voiceProvider === 'omni-webrtc'
           ? startOmniWebrtcCall
           : startOmniRealtimeCall;
-  const voiceActionDisabled = finishing
+  const voiceActionDisabled = finishing || submitting || Boolean(processingStage)
     || aliyunRtcSwitching
     || interview?.status === 'completed'
     || (voiceProvider === 'openai' && voiceStatus === 'connecting')
@@ -6274,7 +5939,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         eyebrow={interviewMode === 'text' ? 'A CONVERSATION FOR GROWTH' : ''}
         title={interviewMode === 'text' ? '专注此刻，自信表达。' : '听见问题，从容作答。'}
         description={interviewMode === 'text' ? `${interview?.target_role || '面试练习'} · ${interview?.interview_type || '综合模拟'} · 本场内容实时保存` : undefined}
-        action={interviewMode === 'text' ? <button className="v4-outline-action" type="button" onClick={handleFinish} disabled={finishing || submitting}>{finishing ? '正在结束…' : '结束面试 ↗'}</button> : <button className="v4-outline-action" type="button" onClick={() => setInterviewMode('text')}>转聊天框 ▤</button>}
+        action={interviewMode === 'text' ? <button className="v4-outline-action" type="button" onClick={handleFinish} disabled={finishing || submitting}>{finishing ? '正在结束…' : '结束面试 ↗'}</button> : <button className="v4-outline-action" type="button" onClick={switchToText} disabled={submitting || finishing || Boolean(processingStage)}>转聊天框 ▤</button>}
       />
       {error && <div className="profile-message error">{error}</div>}
 
@@ -6286,7 +5951,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               <strong>{currentAgentName}</strong>
               <small>/ {interview?.experience_level || '标准'} · {interview?.interview_type || '综合模拟'}</small>
             </div>
-            <button className="v4-outline-action" type="button" onClick={() => setInterviewMode('voice')}>转语音 ♪</button>
+            <button className="v4-outline-action" type="button" onClick={() => setInterviewMode('voice')} disabled={submitting || finishing}>转语音 ♪</button>
           </header>
           <div className="v4-chat-messages">
             {messages.map((item) => {
@@ -6312,7 +5977,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               onChange={(event) => setAnswer(event.target.value)}
               placeholder="输入你的回答，让面试官了解你的思考…"
             />
-            <button type="button" onClick={handleSubmitAnswer} disabled={submitting || finishing || !answer.trim()}>
+            <button type="button" onClick={handleSubmitAnswer} disabled={submitting || finishing || !progress?.question?.id || !answer.trim()}>
               <span>发送</span><Send size={16} />
             </button>
           </div>
@@ -6439,11 +6104,17 @@ function ReportPage({ interviewId, user, onBackToList }) {
     };
   }, [interviewId]);
 
-  const regenerateReport = async () => {
+  const regenerateReport = async (messageId = null) => {
     if (!interviewId || regenerating) return;
     setRegenerating(true);
     setRetryError('');
     try {
+      if (messageId) {
+        const result = await apiRequest(`/api/interviews/${interviewId}/evaluations`, {
+          method: 'POST', body: JSON.stringify({ message_id: messageId, force: true }),
+        });
+        if (result.evaluation?.generation_status === 'pending_retry') setRetryError('本题仍未取得有效评分，可稍后再次补评。');
+      }
       const data = await apiRequest(`/api/interviews/${interviewId}/report`, { method: 'POST' });
       setReportData(data.report);
     } catch (requestError) {
@@ -6477,20 +6148,13 @@ function ReportPage({ interviewId, user, onBackToList }) {
   }
 
   if (reportData?.generation_status === 'failed') {
-    return <div className="v4-report-wait" role="alert"><AlertTriangle size={24} /><strong>报告生成失败</strong><span>面试记录已经保存，可以重试生成报告。</span><button type="button" className="primary-action" onClick={regenerateReport} disabled={regenerating}>{regenerating ? '重试中…' : '重新生成报告'}</button>{retryError && <span>{retryError}</span>}</div>;
+    return <div className="v4-report-wait" role="alert"><AlertTriangle size={24} /><strong>报告生成失败</strong><span>面试记录已经保存，可以重试生成报告。</span><button type="button" className="primary-action" onClick={() => regenerateReport()} disabled={regenerating}>{regenerating ? '重试中…' : '重新生成报告'}</button>{retryError && <span>{retryError}</span>}</div>;
   }
 
   const currentReport = reportToViewModel(reportData, user);
   const radarData = currentReport.radar;
   const metrics = currentReport.metrics;
-  const reportStatusLabel = !currentReport.hasEvidence
-    ? '证据不足，未评分'
-    : currentReport.generationStatus === 'degraded'
-    ? '已降级为本地规则'
-    : currentReport.generationStatus === 'succeeded'
-      ? (currentReport.fallback ? '已生成（兜底）' : 'AI 已生成')
-      : currentReport.generationStatus;
-
+  const reportStatusLabel = reportStatusText({ ...reportData, total_score: currentReport.score });
   const evaluatedInterviewers = currentReport.interviewers.filter((item) => item.evaluated);
   const unevaluatedInterviewers = currentReport.interviewers.filter((item) => !item.evaluated);
   const evidenceNote = reportEvidenceNote(currentReport.timeline);
@@ -6515,12 +6179,12 @@ function ReportPage({ interviewId, user, onBackToList }) {
         <div className="report-score-card">
           <span>本次作答评分</span>
           <div><strong>{currentReport.hasEvidence ? currentReport.score : '—'}</strong>{currentReport.hasEvidence && <small>/ 100</small>}</div>
-          <span className="report-grade">{currentReport.hasEvidence ? `等级 ${currentReport.grade} · ${currentReport.result}` : '证据不足 · 未评分'}</span>
-          <p>{currentReport.timeline.length} 条已保存回答 · {evaluatedInterviewers.length} 位面试官有评价</p>
+          <span className="report-grade">{currentReport.hasEvidence ? `等级 ${currentReport.grade} · ${currentReport.result}` : reportStatusLabel}</span>
+          <p>{coverageLabel(reportData || {}) || `${currentReport.timeline.length} 条已保存回答 · 有效覆盖未记录`} · {evaluatedInterviewers.length} 位面试官有评价</p>
         </div>
       </header>
 
-      {currentReport.fallback && <div className="report-fallback-notice"><div><strong>当前为本地规则评分</strong><span>AI 服务暂时不可用，可保留本次复盘或重新生成。</span></div><button type="button" onClick={regenerateReport} disabled={regenerating}>{regenerating ? '正在重新生成…' : '重新尝试 AI 生成'}</button></div>}
+      {currentReport.fallback && <div className="report-fallback-notice"><div><strong>{reportStatusLabel}</strong><span>可重新尝试生成报告文字。</span></div><button type="button" onClick={() => regenerateReport()} disabled={regenerating}>{regenerating ? '正在重新生成…' : '重新尝试 AI 生成'}</button></div>}
       {retryError && <p className="profile-message error">{retryError}</p>}
 
       <section className="report-next-steps" aria-label="下一步练习建议">
@@ -6551,16 +6215,16 @@ function ReportPage({ interviewId, user, onBackToList }) {
       <section className="report-feedback-section">
         <div className="report-section-heading"><div><span className="report-kicker">03 / INTERVIEWER NOTES</span><h2>面试官反馈</h2></div><span>{evaluatedInterviewers.length} 位已形成评价</span></div>
         <div className="report-feedback-grid">
-          {evaluatedInterviewers.map((item, index) => <article className="report-feedback" key={item.name}><div className="report-feedback-head"><span className="report-agent-icon"><UserRound size={19} /></span><h3>{item.name}</h3><span className="report-feedback-decision">{item.decision}</span></div><p>{item.text}</p></article>)}
+          {evaluatedInterviewers.map((item, index) => <article className="report-feedback" key={item.name}><div className="report-feedback-head"><span className="report-agent-icon"><UserRound size={19} /></span><h3>{item.name}</h3><span className="report-feedback-decision">{item.decision}</span></div><p>{item.text}</p>{item.roundSummary && <p>{item.roundSummary}</p>}</article>)}
           {!evaluatedInterviewers.length && <p className="report-muted">暂无基于单题回答形成的面试官评价。</p>}
         </div>
-        {!!unevaluatedInterviewers.length && <div className="report-unassessed"><span>暂无评价</span>{unevaluatedInterviewers.map((item) => <span key={item.name}>{item.name}</span>)}<small>未关联单题评价，不作表现判断。</small></div>}
+        {!!unevaluatedInterviewers.length && <div className="report-unassessed"><span>暂无评价</span>{unevaluatedInterviewers.map((item) => <span key={item.name}>{item.name}{item.roundSummary && ` · ${item.roundSummary}`}</span>)}<small>未关联单题评价，不作表现判断。</small></div>}
       </section>
 
       <section className="report-rounds">
         <div className="report-section-heading"><div><span className="report-kicker">04 / CONVERSATION REVIEW</span><h2>逐题复盘</h2></div><span>共 {currentReport.timeline.length} 题 · 点击展开</span></div>
         <div className="timeline">
-          {currentReport.timeline.length ? currentReport.timeline.map((item, index) => <TimelineItem key={item.id || index} item={item} index={index} />) : <p className="report-muted">本场没有已保存的问答记录。</p>}
+          {currentReport.timeline.length ? currentReport.timeline.map((item, index) => <TimelineItem key={item.id || index} item={item} index={index} onRetry={regenerateReport} busy={regenerating} />) : <p className="report-muted">本场没有已保存的问答记录。</p>}
         </div>
       </section>
 
@@ -6616,13 +6280,13 @@ function HistoryPage({ onOpenReport }) {
                 <strong>{item.target_role}</strong>
                 <span>{item.interview_type || '综合模拟'} · {formatDateTime(item.updated_at || item.created_at)}</span>
                 <span>
-                  提问 {item.question_count ?? 0} · 回答 {item.candidate_answer_count ?? 0} · 单轮评价 {item.evaluation_count ?? 0}
+                  提问 {item.question_count ?? '—'} · 回答 {item.answer_count ?? item.candidate_answer_count ?? '—'} · {coverageLabel(item) || '历史报告未记录有效覆盖'}
                 </span>
                 <p>{item.summary}</p>
               </div>
               <div className="history-score">
-                <strong>{item.generation_status === 'queued' ? '…' : item.has_candidate_answer ? item.total_score : '—'}</strong>
-                <span>{item.generation_status === 'queued' ? '生成中' : item.generation_status === 'failed' ? '生成失败' : item.has_candidate_answer ? item.grade : '未评分'}</span>
+                <strong>{item.generation_status === 'queued' ? '…' : (visibleReportScore(item) ?? '—')}</strong>
+                <span>{[reportStatusText(item), visibleReportScore(item) !== null && item.grade].filter(Boolean).join(' · ')}</span>
                 <button className="secondary-action" onClick={() => onOpenReport(item.interview_id)}>
                   查看报告
                 </button>
@@ -6744,7 +6408,7 @@ function StatsPage({ onStartTraining, onOpenReport }) {
           apiRequest('/api/reports'),
         ]);
         if (!mounted) return;
-        const reportItems = (reportsData.reports || []).filter(isAbilityReport);
+        const reportItems = comparableReports(reportsData.reports || [], statsData.stats);
         setStats(statsData.stats);
         setDimensions(dimensionData.dimensions || []);
         setReports(reportItems);
@@ -6776,9 +6440,9 @@ function StatsPage({ onStartTraining, onOpenReport }) {
   const priorityDimensions = [...validDimensions]
     .sort((a, b) => Number(a.average_score) - Number(b.average_score))
     .slice(0, 3);
-  const overallScore = Number(stats?.average_total_score) || 0;
+  const validReportCount = stats?.valid_report_count ?? reports.length;
+  const overallScore = validReportCount > 0 ? reportScore(stats?.average_total_score) : null;
   const completedCount = Number(stats?.completed_interviews) || 0;
-  const validReportCount = reports.length;
   const latestScore = reports[0] ? reportScore(reports[0].total_score) : null;
   const previousScore = reports[1] ? reportScore(reports[1].total_score) : null;
   const scoreDelta = latestScore !== null && previousScore !== null ? latestScore - previousScore : null;
@@ -6787,7 +6451,9 @@ function StatsPage({ onStartTraining, onOpenReport }) {
   const interviewTypeCount = new Set(reports.map((item) => item.interview_type).filter(Boolean)).size;
   const coverage = Math.min(100, Math.round((validDimensions.length / Object.keys(dimensionLabels).length) * 100));
   const latestEvidence = parseJsonValue(latestReport?.timeline_review, [])
-    .filter((item) => item.sender_type === 'candidate' && (item.issues || item.suggestions))
+    .filter((item) => item.sender_type === 'candidate')
+    .map((item) => ({ ...item, ...roundAssessment(item) }))
+    .filter((item) => item.score !== null && (item.evidence.length || item.issues || item.suggestions))
     .slice(-2)
     .reverse();
   const reportSuggestions = String(latestReport?.suggestions || '')
@@ -6802,7 +6468,7 @@ function StatsPage({ onStartTraining, onOpenReport }) {
   }));
   const heroTitle = validReportCount === 0
     ? '完成首次有效作答，建立你的能力基线'
-    : overallScore === 0
+    : overallScore === null
       ? '能力基线已建立，继续积累回答证据'
     : targetGap > 0
       ? `距离建议目标还有 ${targetGap} 分`
@@ -6812,17 +6478,17 @@ function StatsPage({ onStartTraining, onOpenReport }) {
     <section className="stats-page v4-stats-page">
       <V4PageHeading eyebrow="A CLEARER PICTURE OF YOU" title="让成长，有迹可循。" description="从已经完成的面试中，查看能力变化与训练方向。" />
       <section className="stats-overview">
-        <div className="stats-score-ring" style={{ '--score': overallScore }} aria-label={`综合能力 ${overallScore} 分`}>
+        <div className="stats-score-ring" style={{ '--score': overallScore }} aria-label={overallScore === null ? '尚无综合评分' : `综合能力 ${overallScore} 分`}>
           <div>
-            <strong>{overallScore}</strong>
-            <span>/ 100</span>
+            <strong>{overallScore ?? '—'}</strong>
+            {overallScore !== null && <span>/ 100</span>}
           </div>
         </div>
         <div className="stats-overview-copy">
           <p className="eyebrow">LONG-TERM SKILL PROFILE</p>
           <h1>{heroTitle}</h1>
           <p>
-            已完成 {completedCount} 场面试，其中 {validReportCount} 份报告包含可评分回答。画像只使用生成成功或本地降级完成的有效报告。
+            已完成 {completedCount} 场面试，其中 {validReportCount} 份报告纳入本次统计。趋势仅比较同岗位、同难度及同一评分版本的有效报告。
           </p>
           <div className="stats-overview-meta">
             <span><Target size={14} />目标岗位：{stats?.recent_training_focus || '待设置'}</span>
@@ -6935,8 +6601,8 @@ function StatsPage({ onStartTraining, onOpenReport }) {
                   {latestEvidence.length > 0 ? latestEvidence.map((item, index) => (
                     <article key={item.message_id || index}>
                       <span>证据 {index + 1}</span>
-                      <p>{item.issues || item.suggestions}</p>
-                      <small>{item.agent_name || 'AI 面试官'} · 本题 {reportScore(item.score) === null ? '未评分' : `${reportScore(item.score)} 分`}</small>
+                      <p>{item.evidence.length ? `${dimensionLabels[item.evidence[0][0]] || item.evidence[0][0]} · “${item.evidence[0][1]}”` : item.issues || item.suggestions}</p>
+                      <small>{item.agent_name || 'AI 面试官'} · 本题 {item.scoreLabel}</small>
                     </article>
                   )) : (
                     <article>
@@ -7006,7 +6672,7 @@ function V4HomePage({ user, onNavigate, onOpenReport }) {
       <div className="v4-recent">
         {loading ? <p>正在读取练习记录…</p> : loadError ? <p role="alert">练习记录暂时无法读取：{loadError}</p> : recent.length ? recent.map((item) => (
           <button type="button" className="v4-recent-row" key={item.id} onClick={() => onOpenReport(item.interview_id)}>
-            <Phone size={18} /><span><strong>{item.target_role || '面试练习'}</strong><small>{formatDateTime(item.updated_at || item.created_at)}</small></span><em>{item.interview_type || '综合模拟'}</em><b>{item.generation_status === 'queued' ? '…' : item.has_candidate_answer ? item.total_score : '—'}</b><span aria-hidden="true">↗</span>
+            <Phone size={18} /><span><strong>{item.target_role || '面试练习'}</strong><small>{formatDateTime(item.updated_at || item.created_at)}</small></span><em>{item.interview_type || '综合模拟'}</em><b>{item.generation_status === 'queued' ? '…' : (visibleReportScore(item) ?? '—')}</b><span aria-hidden="true">↗</span>
           </button>
         )) : <p>还没有面试报告。完成第一场面试后，记录会显示在这里。</p>}
       </div>
@@ -7191,7 +6857,7 @@ function App() {
         {view === 'jobcompare' && <JobComparePage />}
         {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
         {view === 'phone' && (
-          <PhoneInterviewPage
+          <PhoneInterviewPage key={activeInterviewId}
             interviewId={activeInterviewId}
             onReportReady={handleOpenReport}
             onBackToSetup={() => setView('setup')}

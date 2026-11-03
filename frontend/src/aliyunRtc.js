@@ -68,7 +68,7 @@ export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnI
 
   return {
     consume(message) {
-      if (message?.reasoning) return null;
+      if (message?.reasoning || !['user', 'agent'].includes(message?.userType)) return null;
       const speaker = message?.userType === 'user' ? 'candidate' : 'agent';
       const text = String(message?.message || '').trim();
       const buffered = turns.get(speaker);
@@ -112,6 +112,54 @@ export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnI
     },
     reset() {
       turns.clear();
+    },
+  };
+}
+
+// The provider can finish a candidate caption while an earlier agent caption
+// is still streaming. Bind each question when it starts, and emit business
+// turns in conversational order regardless of which final marker arrives first.
+export function createRtcCaptionStream(candidate, agent) {
+  const assembler = createAliyunRtcTranscriptAssembler();
+  let lastCandidateId = null;
+  let agentOwner = null;
+  let speakingAgent = false;
+  let deferred = [];
+
+  function emitCandidate(turn) {
+    if (!turn) return;
+    if (speakingAgent && turn.turnId !== agentOwner) deferred.push(turn);
+    else candidate(turn);
+  }
+
+  function finishAgent(turn) {
+    if (!turn) return;
+    if (lastCandidateId === agentOwner) emitCandidate(assembler.finalize('candidate'));
+    agent(turn, agentOwner);
+    speakingAgent = false;
+    deferred.forEach(candidate);
+    deferred = [];
+  }
+
+  return {
+    consume(message) {
+      const turn = assembler.consume(message);
+      if (!turn) return null;
+      if (turn.speaker === 'candidate') {
+        lastCandidateId = turn.turnId;
+        if (turn.end) emitCandidate(turn);
+      } else {
+        if (!speakingAgent) {
+          speakingAgent = true;
+          agentOwner = lastCandidateId;
+        }
+        if (turn.end) finishAgent(turn);
+      }
+      return turn;
+    },
+    flush() {
+      finishAgent(assembler.finalize('agent'));
+      emitCandidate(assembler.finalize('candidate'));
     },
   };
 }

@@ -60,6 +60,7 @@ import { resolveRegistrationCounselor } from './registrationCounselor.js';
 import { registrationAssignmentCounts, registrationAssignmentLabel } from './registrationAssignment.js';
 import RecordFilterFields from './RecordFilterFields.jsx';
 import { matchesRecordFilters } from './recordFilters.js';
+import { coverageLabel, reportStatusText } from '../../frontend/src/reportPresentation.js';
 import ReportReviewSection from './ReportReviewSection.jsx';
 import DashboardPage from './DashboardPage.jsx';
 import { CatalogModule } from './ProgramJobsPage.jsx';
@@ -773,6 +774,7 @@ function formatDetail(type, payload, fallbackRow) {
   }
   if (type === 'report') {
     const report = payload.report || fallbackRow;
+    const score = report.total_score ?? report.score;
     return {
       type: 'report',
       id: report.id || fallbackRow.id,
@@ -781,10 +783,12 @@ function formatDetail(type, payload, fallbackRow) {
         { label: '候选人', value: report.candidate },
         { label: '邮箱', value: report.candidate_email },
         { label: '目标岗位', value: report.target_role || report.role },
-        { label: '总分', value: report.total_score ?? report.score },
-        { label: '等级', value: report.grade },
-        { label: '准备建议', value: report.pass_recommendation || report.recommendation },
-        { label: '生成来源', value: report.fallback ? `本地兜底 · ${report.model || 'rules-v1'}` : `${report.provider || '-'} · ${report.model || '-'}` },
+        { label: '总分', value: score },
+        { label: '评分状态', value: reportStatusText({ ...report, total_score: score }) },
+        { label: '评分覆盖', value: coverageLabel(report) || '未记录' },
+        { label: '等级', value: score == null ? '—' : report.grade },
+        { label: '准备建议', value: score == null ? '—' : report.pass_recommendation || report.recommendation },
+        { label: '生成来源', value: report.fallback ? `降级生成 · ${report.model || 'rules-v1'}` : `${report.provider || '-'} · ${report.model || '-'}` },
         { label: '复核状态', value: report.review_status || report.reviewStatus || 'pending' },
         { label: '生成时间', value: report.created_at || report.createdAt },
       ],
@@ -968,9 +972,11 @@ function ReportsPage({ data, onView, query, onQueryChange, presetFilter }) {
     { key: 'id', label: '报告 ID', sortable: false, render: (row) => <CompactId value={row.id} /> },
     { key: 'candidate', label: '学生' },
     { key: 'role', label: '目标岗位' },
-    { key: 'score', label: '总分', render: (row) => <strong className={Number(row.score) < 70 ? 'score-alert' : ''}>{row.score ?? '-'}</strong> },
-    { key: 'grade', label: '等级' },
-    { key: 'recommendation', label: '准备建议' },
+    { key: 'score', label: '总分', render: (row) => <strong className={isLowScoreReport(row) ? 'score-alert' : ''}>{row.score ?? '-'}</strong> },
+    { key: 'generation_status', label: '评分状态', render: (row) => reportStatusText({ ...row, total_score: row.score }) },
+    { key: 'scored_answer_count', label: '评分覆盖', render: (row) => coverageLabel(row) || '未记录' },
+    { key: 'grade', label: '等级', render: (row) => row.score == null ? '—' : row.grade },
+    { key: 'recommendation', label: '准备建议', render: (row) => row.score == null ? '—' : row.recommendation },
     { key: 'reviewStatus', label: '复核状态', render: (row) => <StatusBadge>{row.reviewStatus}</StatusBadge> },
     { key: 'createdAt', label: '生成时间' },
   ];
@@ -2038,7 +2044,7 @@ function OrganizationPage({ onView, admin, presetFilter = '', revision = 0, canM
                   <tr key={student.id} className="data-row" onClick={() => openStudent(student)}>
                     <td><div className="student-identity"><span className="student-identity-name"><strong>{student.name}</strong>{student.registrationRemoved && <em className="student-removed-tag">名单已删除</em>}{student.pending && <em className="student-pending-tag">未激活</em>}</span><span>{student.studentNo !== '-' ? student.studentNo : student.email}</span></div></td>
                     <td>{student.targetRole}</td>
-                    <td><strong className={student.readiness < 60 && student.interviews > 0 ? 'score-alert' : ''}>{student.interviews ? `${student.readiness}分` : '-'}</strong></td>
+                    <td><strong className={student.readiness != null && student.readiness < 60 ? 'score-alert' : ''}>{student.readiness != null ? `${student.readiness}分` : '-'}</strong></td>
                     <td>{student.interviews} 次</td>
                     <td><StatusBadge>{student.growthStatus}</StatusBadge></td>
                     <td className={student.className === '未归班' ? 'cell-unassigned' : ''}>{student.className}</td>

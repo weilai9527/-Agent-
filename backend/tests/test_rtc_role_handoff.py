@@ -31,7 +31,11 @@ def test_new_rtc_task_uses_current_role_question_and_bounded_opening_context(tmp
             calls.append(kwargs)
             return {'task_id': kwargs['task_id'], 'request_id': 'start'}
         main.start_rtc_ai_agent = start
-        main.stop_rtc_ai_agent = lambda **kwargs: {'request_id': 'stop'}
+        stops = []
+        def stop(**kwargs):
+            stops.append(kwargs['task_id'])
+            return {'request_id': 'stop'}
+        main.stop_rtc_ai_agent = stop
         main.resume_analysis_for_prompt = lambda *args, **kwargs: None
 
         def ask(agent, question):
@@ -48,8 +52,12 @@ def test_new_rtc_task_uses_current_role_question_and_bounded_opening_context(tmp
         assert calls[0]['greeting'] == '请描述你亲自实现的接口。'
 
         for index, question in [(1, '如何设计扩容与回滚？'), (2, '为什么选择这个岗位？')]:
-            stopped = client.post(prefix + '/rtc/agent/stop')
-            assert stopped.json()['status'] == 'stopped', stopped.text
+            old_task = calls[-1]['task_id']
+            if index == 1:
+                stopped = client.post(prefix + '/rtc/agent/stop')
+                assert stopped.json()['status'] == 'stopped', stopped.text
+            # For the HR handoff a refresh interrupted the old browser before
+            # its stop request. Starting the new role must retire the old task.
             for agent, status in [(agents[index - 1], 'completed'), (agents[index], 'active')]:
                 result = client.patch(prefix + f"/agents/{agent['id']}", json={'status': status})
                 assert result.status_code == 200, result.text
@@ -58,6 +66,10 @@ def test_new_rtc_task_uses_current_role_question_and_bounded_opening_context(tmp
             assert result.status_code == 200, result.text
             assert result.json()['idempotent'] is False
             assert calls[-1]['task_id'] != calls[-2]['task_id']
+            assert stops.count(old_task) == 1
+            late_stop = client.post(prefix + '/rtc/agent/stop', json={'expected_task_id': old_task})
+            assert late_stop.json()['rtc_session']['task_id'] == calls[-1]['task_id']
+            assert calls[-1]['task_id'] not in stops
             assert calls[-1]['greeting'] == question
             assert '当前问题：' + question in calls[-1]['prompt']
             assert '当前面试官：' + agents[index]['agent_name'] in calls[-1]['prompt']

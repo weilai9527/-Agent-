@@ -414,3 +414,34 @@ test('registers the AI agent plugin before joining and forwards captions and sta
   assert.equal(calls.plugin.detached, true);
   assert.equal(pluginEvents.size, 0);
 });
+
+test('late agent final is bound to its original candidate, before an overlapping answer', async () => {
+  const { createRtcCaptionStream } = await import('./aliyunRtc.js');
+  const writes = [];
+  const stream = createRtcCaptionStream(turn => writes.push(turn),
+    (turn, owner) => writes.push({ ...turn, owner }));
+  const emit = (userType, message, end) => stream.consume({ userType, message, end });
+  emit('agent', '开场', false);
+  emit('user', '回答一', true);
+  emit('agent', '开场题', true);
+  emit('agent', '第二', false);
+  emit('user', '回答二', true);
+  emit('agent', '第二题？', true);
+  stream.flush();
+  assert.deepEqual(writes.map(turn => turn.text), ['开场题', '回答一', '第二题？', '回答二']);
+  assert.equal(writes[0].owner, null);
+  assert.equal(writes[2].owner, writes[1].turnId);
+});
+
+test('flush preserves partial candidate and agent captions in question order', async () => {
+  const { createRtcCaptionStream } = await import('./aliyunRtc.js');
+  const writes = [];
+  const stream = createRtcCaptionStream(turn => writes.push(turn),
+    (turn, owner) => writes.push({ ...turn, owner }));
+  stream.consume({ userType: 'user', message: '我的回答', end: false });
+  stream.consume({ userType: 'agent', message: '请举例', end: false });
+  stream.flush();
+  stream.flush();
+  assert.deepEqual(writes.map(turn => turn.text), ['我的回答', '请举例']);
+  assert.equal(writes[1].owner, writes[0].turnId);
+});

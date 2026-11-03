@@ -40,7 +40,7 @@ export default function DashboardPage({ data, admin, onNavigate, onView }) {
     ...(canInterviews ? [{ key: 'running', title: '进行中训练', value: model.running.length, unit: '场', note: '查看训练进度', icon: ClipboardList, tone: 'green' }] : []),
   ];
   const queue = [...(activeTab?.rows || [])].filter((row) => [row.name, row.candidate, row.studentNo, row.role].join(' ').toLowerCase().includes(studentSearch.trim().toLowerCase()));
-  if (activeTab?.key === 'review' && lowFirst) queue.sort((a, b) => (Number(a.score) || 0) - (Number(b.score) || 0));
+  if (activeTab?.key === 'review' && lowFirst) queue.sort((a, b) => (a.score ?? Infinity) - (b.score ?? Infinity));
   const hasFilters = filters.college || filters.className || filters.period !== 'all';
   const initial = (name) => String(name || '学').replace(/^测试[·・]?/, '').slice(0, 1);
   return <div className="wb-page">
@@ -84,7 +84,7 @@ export default function DashboardPage({ data, admin, onNavigate, onView }) {
               {activeTab.key === 'unassigned' && <span className="wb-task-note">已开通账号，待确认所属班级</span>}
             </span>
             <span className="wb-task-meta"><span>{activeTab.key === 'running' ? '进行中' : waitingLabel(row.createdAt)}</span>
-              {activeTab.key === 'review' && <strong className={Number(row.score) < 70 ? 'low' : ''}>{row.score ?? '—'}<small> 分</small></strong>}
+              {activeTab.key === 'review' && <strong className={row.score != null && row.score < 70 ? 'low' : ''}>{row.score ?? '未评分'}{row.score != null && <small> 分</small>}</strong>}
             </span><span className="wb-task-action">{activeTab.key === 'review' ? '查看报告' : activeTab.key === 'pending' ? '检查名单' : activeTab.key === 'unassigned' ? '处理归班' : '查看训练'}<ArrowRight size={14} /></span>
           </button>)}
           {queue.length > 5 && <button className="wb-more" type="button" onClick={() => go(activeTab.key)}>查看全部 {queue.length} 条{activeTab.label}事项 <ArrowRight size={14} /></button>}
@@ -92,7 +92,7 @@ export default function DashboardPage({ data, admin, onNavigate, onView }) {
       </Panel>
 
       {canReports && <Panel title="学生训练表现" subtitle="综合报告成绩，了解当前训练情况" className="wb-performance">
-        <div className="wb-score-hero"><div><span>平均报告成绩</span><strong>{model.average ?? '—'}<small>{model.average !== null ? '/100' : ''}</small></strong><p>{model.scored.length ? `来自 ${model.scored.length} 份有评分的报告` : '当前范围暂无评分报告'}</p></div><span className="wb-score-symbol"><GraduationCap size={36} /></span></div>
+        <div className="wb-score-hero"><div><span>平均报告成绩</span><strong>{model.average ?? '—'}<small>{model.average !== null ? '/100' : ''}</small></strong><p>{model.scored.length ? `来自 ${model.scored.length} 份可计入统计的报告` : '当前范围暂无评分报告'}</p></div><span className="wb-score-symbol"><GraduationCap size={36} /></span></div>
         <div className="wb-distribution">
           <div className="wb-stacked-bar" aria-label="报告分数分布">{model.scored.length ? model.bands.map((count, index) => <span className={`band-${index}`} key={index} style={{ width: `${count / model.scored.length * 100}%` }} />) : <span className="band-empty" />}</div>
           <div className="wb-band-legend">{['优秀 · 90 分及以上', '良好 · 80–89 分', '合格 · 70–79 分', '需关注 · 低于 70 分'].map((label, index) => <button type="button" key={label} onClick={() => onNavigate('reports', reviewPreset('', { scoreBand: ['90', '80', '70', 'low'][index] }))}><span><i className={`band-${index}`} />{label}</span><strong>{model.bands[index]}<small> 份</small></strong><ArrowRight size={13} /></button>)}</div>

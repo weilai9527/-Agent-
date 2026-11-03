@@ -6,20 +6,18 @@ from backend.src.ai_evaluation import AiEvaluationError, DIMENSIONS, _call_with_
 from backend.src.kimi_followup import FollowupProvider
 
 
-def test_normalize_evaluation_clamps_scores_and_lists():
+def test_normalize_evaluation_formats_feedback_without_filling_unassessed_dimensions():
     result = normalize_evaluation(
         {
-            "score": 120,
-            "strengths": ["有数据", "有取舍"],
-            "issues": ["风险不足"],
-            "suggestions": "补充回滚方案",
-            "dimension_scores": {"technical_depth": -5, "role_fit": 88},
-        }
+            "question_types": ["technical"], "score": 99,
+            "strengths": ["有数据", "有取舍"], "issues": ["风险不足"], "suggestions": "补充回滚方案",
+            "dimension_scores": {"technical_depth": 70},
+            "dimension_evidence": {"technical_depth": "双写核对"},
+        },
+        answer="我会双写核对。",
     )
-    assert result["score"] == 100
-    assert result["dimension_scores"]["technical_depth"] == 1
-    assert result["dimension_scores"]["role_fit"] == 88
-    assert set(result["dimension_scores"]) == set(DIMENSIONS)
+    assert result["score"] == 70
+    assert result["dimension_scores"] == {"technical_depth": 70}
     assert result["strengths"] == "有数据\n有取舍"
 
 
@@ -44,11 +42,11 @@ def test_normalize_report_rejects_invalid_enums_and_preserves_fallback_shape():
         },
         fallback_report=fallback,
     )
-    assert result["total_score"] == 81
+    assert result["total_score"] == fallback["total_score"]
     assert result["grade"] == "C"
     assert result["pass_recommendation"] == "borderline"
     assert result["agent_feedback"] == fallback["agent_feedback"]
-    assert set(result["ability_radar"]) == set(DIMENSIONS)
+    assert result["ability_radar"] == fallback["ability_radar"]
 
 
 def test_ai_provider_fallback_stops_at_configured_attempt_limit(monkeypatch):
@@ -101,8 +99,6 @@ def test_secondary_ai_provider_is_not_marked_as_local_fallback(monkeypatch):
     result = generate_ai_report(
         interview={"target_role": "后端工程师"},
         agents=[],
-        messages=[],
-        evaluations=[],
         fallback_report=fallback_report,
     )
 
@@ -141,8 +137,6 @@ def test_report_without_repeated_timeline_uses_deterministic_fallback_data(monke
     result = generate_ai_report(
         interview={"target_role": "后端工程师"},
         agents=[],
-        messages=[],
-        evaluations=[],
         fallback_report=fallback_report,
     )
 
@@ -174,8 +168,6 @@ def test_report_prompt_contains_structured_resume_analysis(monkeypatch):
     generate_ai_report(
         interview={"target_role": "RTC 工程师"},
         agents=[],
-        messages=[],
-        evaluations=[],
         fallback_report=fallback_report,
         resume_analysis={
             "candidate_summary": "有实时音视频落地经验",

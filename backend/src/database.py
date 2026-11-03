@@ -463,6 +463,7 @@ def _init_sqlite_db() -> None:
           issues TEXT NOT NULL,
           suggestions TEXT NOT NULL,
           dimension_scores TEXT NOT NULL,
+          dimension_evidence TEXT,
           provider TEXT NOT NULL DEFAULT 'local',
           model TEXT NOT NULL DEFAULT 'rules-v1',
           prompt_version TEXT NOT NULL DEFAULT 'legacy-local-v1',
@@ -486,6 +487,8 @@ def _init_sqlite_db() -> None:
           user_id TEXT NOT NULL,
           interview_id TEXT NOT NULL UNIQUE,
           total_score INTEGER NOT NULL,
+          scored_answer_count INTEGER,
+          answer_count INTEGER,
           grade TEXT NOT NULL,
           pass_recommendation TEXT NOT NULL,
           ability_radar TEXT NOT NULL,
@@ -634,6 +637,9 @@ def _init_sqlite_db() -> None:
     for name, column_type in profile_columns:
         if name not in existing:
             db.execute(f"ALTER TABLE profiles ADD COLUMN {name} {column_type}")
+    rtc_columns = {row["name"] for row in db.execute("PRAGMA table_info(interview_rtc_sessions)").fetchall()}
+    if "round_agent_id" not in rtc_columns:
+        db.execute("ALTER TABLE interview_rtc_sessions ADD COLUMN round_agent_id TEXT")
     interview_columns = [("resume_context", "TEXT")]
     existing = {row["name"] for row in db.execute("PRAGMA table_info(interview_sessions)").fetchall()}
     for name, column_type in interview_columns:
@@ -666,9 +672,12 @@ def _init_sqlite_db() -> None:
         ("reviewed_by", "TEXT"),
         ("reviewed_at", "TEXT"),
     ]
-    for table_name in ("interview_evaluations", "interview_reports"):
+    for table_name, scoring_columns in (
+        ("interview_evaluations", [("dimension_evidence", "TEXT")]),
+        ("interview_reports", [("scored_answer_count", "INTEGER"), ("answer_count", "INTEGER")]),
+    ):
         existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
-        for name, column_type in generated_columns:
+        for name, column_type in generated_columns + scoring_columns:
             if name not in existing:
                 db.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {column_type}")
     db.commit()
@@ -678,9 +687,32 @@ def _init_sqlite_db() -> None:
     ensure_recruitment_schema(db, "sqlite")
 
 
+def _ensure_turn_tables() -> None:
+    _turn_table_options = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" if DB_ENGINE == "mysql" else ""
+    _execute_schema("""
+        CREATE TABLE IF NOT EXISTS interview_progress (
+          interview_id CHAR(36) PRIMARY KEY, question_id CHAR(36), agent_id CHAR(36),
+          last_submission_id VARCHAR(128),
+          FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE
+        )
+    """ + _turn_table_options)
+    _execute_schema("""
+        CREATE TABLE IF NOT EXISTS interview_turns (
+          interview_id CHAR(36) NOT NULL, submission_id VARCHAR(128) NOT NULL,
+          question_id CHAR(36) NOT NULL, agent_id CHAR(36) NOT NULL, answer_id CHAR(36) NOT NULL,
+          next_question_id CHAR(36), next_agent_id CHAR(36), action VARCHAR(32) NOT NULL,
+          decision_json MEDIUMTEXT NOT NULL,
+          PRIMARY KEY (interview_id,submission_id), UNIQUE (interview_id,question_id),
+          FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE
+        )
+    """ + _turn_table_options)
+    db.commit()
+
+
 def init_db() -> None:
     if DB_ENGINE == "sqlite":
         _init_sqlite_db()
+        _ensure_turn_tables()
         return
 
     schema_statements = [
@@ -894,6 +926,7 @@ def init_db() -> None:
           issues MEDIUMTEXT NOT NULL,
           suggestions MEDIUMTEXT NOT NULL,
           dimension_scores TEXT NOT NULL,
+          dimension_evidence TEXT,
           provider VARCHAR(80) NOT NULL DEFAULT 'local',
           model VARCHAR(160) NOT NULL DEFAULT 'rules-v1',
           prompt_version VARCHAR(80) NOT NULL DEFAULT 'legacy-local-v1',
@@ -918,6 +951,8 @@ def init_db() -> None:
           user_id CHAR(36) NOT NULL,
           interview_id CHAR(36) NOT NULL UNIQUE,
           total_score INT NOT NULL,
+          scored_answer_count INT,
+          answer_count INT,
           grade VARCHAR(20) NOT NULL,
           pass_recommendation VARCHAR(40) NOT NULL,
           ability_radar TEXT NOT NULL,
@@ -1044,6 +1079,8 @@ def init_db() -> None:
         if not _column_exists("profiles", name):
             _execute_schema(f"ALTER TABLE profiles ADD COLUMN {name} {column_type}")
 
+    if not _column_exists("interview_rtc_sessions", "round_agent_id"):
+        _execute_schema("ALTER TABLE interview_rtc_sessions ADD COLUMN round_agent_id CHAR(36) NULL")
     interview_columns = [("resume_context", "MEDIUMTEXT")]
     for name, column_type in interview_columns:
         if not _column_exists("interview_sessions", name):
@@ -1071,8 +1108,11 @@ def init_db() -> None:
         ("reviewed_by", "CHAR(36) NULL"),
         ("reviewed_at", "DATETIME NULL"),
     ]
-    for table_name in ("interview_evaluations", "interview_reports"):
-        for name, column_type in generated_columns:
+    for table_name, scoring_columns in (
+        ("interview_evaluations", [("dimension_evidence", "TEXT")]),
+        ("interview_reports", [("scored_answer_count", "INTEGER"), ("answer_count", "INTEGER")]),
+    ):
+        for name, column_type in generated_columns + scoring_columns:
             if not _column_exists(table_name, name):
                 _execute_schema(f"ALTER TABLE {table_name} ADD COLUMN {name} {column_type}")
 
@@ -1110,6 +1150,7 @@ def init_db() -> None:
     from shared.recruitment import ensure_recruitment_schema
 
     ensure_recruitment_schema(db, "mysql")
+    _ensure_turn_tables()
 
 
 def get_database_path() -> str:

@@ -55,7 +55,24 @@ def test_build_user_dimension_stats_aggregates_all_report_dimensions(monkeypatch
 
 def test_skill_report_filter_excludes_unfinished_and_missing_evidence():
     assert main.is_scored_skill_report({"generation_status": "succeeded", "has_candidate_answer": 1, "total_score": 0})
-    assert main.is_scored_skill_report({"generation_status": "degraded", "has_candidate_answer": 1, "total_score": 60})
+    assert not main.is_scored_skill_report({"generation_status": "degraded", "has_candidate_answer": 1, "total_score": 60})
+    covered = {"generation_status": "degraded", "total_score": 60, "answer_count": 2, "scored_answer_count": 2}
+    assert main.is_scored_skill_report(covered)
+    assert not main.is_scored_skill_report({**covered, "scored_answer_count": 1})
     assert not main.is_scored_skill_report({"generation_status": "queued", "has_candidate_answer": 1, "total_score": 0})
     assert not main.is_scored_skill_report({"generation_status": "failed", "has_candidate_answer": 1, "total_score": 80})
     assert not main.is_scored_skill_report({"generation_status": "succeeded", "has_candidate_answer": 0, "total_score": 80})
+
+
+def test_trends_only_compare_latest_role_difficulty_and_scoring_version():
+    target = {
+        "target_role": "算法", "difficulty": "标准", "prompt_version": "report-v5",
+        "generation_status": "succeeded", "total_score": 78,
+        "answer_count": 2, "scored_answer_count": 2,
+    }
+    reports = [
+        {**target, "id": "first"}, {**target, "prompt_version": "report-v4"},
+        {**target, "target_role": "安全"}, {**target, "difficulty": "挑战"},
+        {**target, "id": "latest"}, {**target, "scored_answer_count": 1},
+    ]
+    assert [report["id"] for report in main.comparable_skill_reports(reports)] == ["first", "latest"]

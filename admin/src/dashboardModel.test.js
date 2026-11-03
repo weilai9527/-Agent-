@@ -51,3 +51,10 @@ test('calendar ranges use Shanghai dates across UTC midnight', () => {
   assert.deepEqual(dashboardRange('7', new Date('2026-10-13T18:00:00Z')), { startDate: '2026-10-08', endDate: '2026-10-14' });
   assert.deepEqual(dashboardRange('all', now), {});
 });
+
+test('partial coverage remains reviewable and is excluded from score aggregates', () => {
+  const model = dashboardModel({ ...data, reports: [...data.reports, { score: 100, stat_eligible: false, reviewStatus: '待复核' }] }, {}, now);
+  assert.equal(model.review.length, 3);
+  assert.equal(model.average, 0);
+  assert.deepEqual(model.bands, [0, 0, 0, 1]);
+});

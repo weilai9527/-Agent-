@@ -20,10 +20,19 @@ const server = createServer((req, res) => {
 });
 (async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL });
   const errors = [], unhandled = [];
   let policy = structuredClone(fixture.policy), failSave = true, failRead = false, interview, submitted, resumeRunning = false;
   const agent = { id: 'a1', agent_name: '技术面试官', agent_type: 'technical', status: 'active', agent_role: '项目实践', strategy: '核对具体经历' };
+  const opening = { id: 'm1', sender_type: 'agent', agent_id: 'a1', content: '请介绍你的项目。', message_type: 'question' };
+  const next = { ...opening, id: 'q3', content: '为什么选择这个方案？' };
+  const history = [opening];
+  const secondAgent = { ...agent, id: 'a2', agent_name: '业务面试官' };
+  const handoffQuestion = { ...opening, agent_id: secondAgent.id, id: 'q4', content: '你怎样衡量业务效果？' };
+  let active = agent;
+  let finishes = 0;
+  let question = opening;
+  let firstAttempt;
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
@@ -53,8 +62,47 @@ const server = createServer((req, res) => {
           body = { interview, agents: [agent] };
         } else body = { interviews: resumeRunning && interview ? [interview] : [] };
       } else if (p === '/api/interviews/test-interview' || p.endsWith('/start')) body = { interview };
-      else if (p.endsWith('/agents')) body = { agents: [agent] };
-      else if (p.endsWith('/messages')) body = { messages: [{ id: 'm1', sender_type: 'agent', agent_id: 'a1', content: '请介绍你的项目。', message_type: 'question' }] };
+      else if (p.endsWith('/agents')) body = { agents: [active] };
+      else if (p.endsWith('/messages')) body = { messages: history };
+      else if (p.endsWith('/current-question') && method === 'POST') {
+        body = { question, active_agent: active, action: question === opening ? null : 'ask_follow_up', pending_spoken_submission_id: null };
+      } else if (p.endsWith('/turns') && method === 'POST') {
+        const submission = route.request().postDataJSON();
+        if (!firstAttempt) {
+          assert.equal(submission.question_id, opening.id);
+          assert.equal(submission.source, 'text');
+          firstAttempt = submission;
+          // Another tab has already answered q2 when this client retries.
+          question = next;
+          history.push({ id: 'answer1', sender_type: 'candidate', content: submission.content },
+            { ...opening, id: 'q2', content: '你的个人贡献是什么？' },
+            { id: 'answer2', sender_type: 'candidate', content: '另一个标签页的回答' }, next);
+          return route.abort('connectionreset');
+        }
+        if (submission.submission_id === firstAttempt.submission_id) {
+          assert.deepEqual(submission, firstAttempt);
+          body = { duplicate: true, answer: history[1], question: history[2], active_agent: agent, action: 'ask_follow_up' };
+        } else {
+          assert.equal(submission.question_id, question.id);
+          const answer = { id: submission.submission_id, sender_type: 'candidate', content: submission.content };
+          history.push(answer);
+          if (active === agent) {
+            active = secondAgent;
+            question = handoffQuestion;
+            history.push(question);
+            body = { answer, question, active_agent: active, action: 'switch_agent', duplicate: false };
+          } else {
+            question = null;
+            body = { answer, question, active_agent: null, action: 'finish_interview', duplicate: false };
+          }
+        }
+      } else if (p.endsWith('/finish')) {
+        finishes++;
+        interview.status = 'completed';
+        body = { interview };
+      } else if (p.endsWith('/report')) {
+        body = { report: null };
+      } else if (p.endsWith('/evaluations')) body = { evaluation: {} };
       else unhandled.push(`${method} ${p}`);
       await route.fulfill({ status: 200, json: body });
     });
@@ -100,10 +148,28 @@ const server = createServer((req, res) => {
     await studentPage.locator('.session-strategy-summary').waitFor();
     assert.deepEqual(submitted.interviewer_strategy, { style: '专业严谨', focus: '沟通表达', depth: '连续深挖' });
     assert.ok((await studentPage.locator('.session-strategy-summary').innerText()).includes('连续深挖'));
+    await studentPage.getByLabel('输入面试回答').fill('我负责设计索引');
+    await studentPage.getByRole('button', { name: '发送' }).click();
+    await studentPage.getByText(next.content, { exact: true }).waitFor();
+    await studentPage.getByRole('button', { name: /转语音/ }).click();
+    assert.equal(await studentPage.locator('.v4-voice-question p').innerText(), next.content);
+    await studentPage.getByRole('button', { name: /转聊天框/ }).click();
+    await studentPage.getByLabel('输入面试回答').waitFor();
     resumeRunning = true;
     await studentPage.reload();
     await studentPage.locator('.session-strategy-summary').waitFor();
     assert.ok((await studentPage.locator('.session-strategy-summary').innerText()).includes('连续深挖'));
+    await studentPage.getByText(next.content, { exact: true }).waitFor();
+    await studentPage.getByLabel('输入面试回答').fill('方案具备可验证的指标');
+    await studentPage.getByRole('button', { name: '发送' }).click();
+    await studentPage.getByText(handoffQuestion.content, { exact: true }).waitFor();
+    assert.equal(await studentPage.locator('.v4-text-interview-head strong').innerText(), secondAgent.agent_name);
+    await studentPage.getByLabel('输入面试回答').fill('转化率提升');
+    await Promise.all([
+      studentPage.waitForResponse(response => response.url().endsWith('/report')),
+      studentPage.getByRole('button', { name: '发送' }).click(),
+    ]);
+    assert.equal(finishes, 1);
     resumeRunning = false;
     await adminPage.getByLabel('允许学生在面试前自主选择', { exact: true }).uncheck();
     await adminPage.getByRole('button', { name: '保存面试官策略', exact: true }).click();
@@ -125,6 +191,6 @@ const server = createServer((req, res) => {
     assert.equal(await studentPage.getByLabel('面试官风格', { exact: true }).isDisabled(), true);
     assert.deepEqual(errors, []);
     assert.deepEqual(unhandled, []);
-    console.log('PASS: admin defaults/ranges/role editing, save failure/retry, student choices and payload, reload, locked policy, loading failure/retry, responsive layouts.');
+    console.log('PASS: admin defaults/ranges/role editing, save failure/retry, student choices and payload, lost response replay, authoritative question, text/voice switch, reload, role handoff, finish, locked policy, loading failure/retry, responsive layouts.');
   } finally { await browser.close(); server.close(); }
 })().catch(error => { console.error(error); server.close(); process.exitCode = 1; });

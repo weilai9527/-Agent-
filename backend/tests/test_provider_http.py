@@ -122,3 +122,45 @@ def test_openai_provider_can_reuse_realtime_api_key(monkeypatch):
     assert provider is not None
     assert provider.api_key == "test-realtime-key"
     assert provider.model == "test-model"
+
+
+def test_followup_provider_receives_current_round_guidance(monkeypatch):
+    from backend.src.kimi_followup import generate_kimi_followup
+
+    seen = []
+    monkeypatch.setattr("backend.src.kimi_followup._provider_order", lambda: [_provider()])
+    def respond(provider, messages):
+        seen.extend(messages)
+        return "发现哪种异常时会回滚？"
+    monkeypatch.setattr("backend.src.kimi_followup._call_provider_content", respond)
+    result = generate_kimi_followup(
+        interview={}, active_agent=None, messages=[], last_answer="我负责灰度。",
+        turn_decision={"question": "灰度时如何发现故障？",
+                       "evidence": {"risk": {"status": "mentioned"}, "metrics": {"status": "supported"}}},
+    )
+    assert result["question"] == "发现哪种异常时会回滚？"
+    assert "本轮待核实的维度：risk" in seen[1]["content"] and "metrics" not in seen[1]["content"]
+    assert "灰度时如何发现故障？" in seen[1]["content"] and "我负责灰度。" in seen[1]["content"]
+
+
+def test_empty_provider_choices_fall_back_without_losing_turn(monkeypatch):
+    from backend.src.kimi_followup import KimiFollowupError, generate_kimi_followup, generate_opening_question
+    import pytest
+
+    provider = _provider()
+    class EmptyResponseClient:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def post(self, *args, **kwargs):
+            return httpx.Response(200, json={"choices": []})
+
+    monkeypatch.setattr("backend.src.kimi_followup._provider_order", lambda: [provider])
+    monkeypatch.setattr("backend.src.kimi_followup.httpx.Client", EmptyResponseClient)
+    with pytest.raises(KimiFollowupError):
+        generate_kimi_followup(interview={}, active_agent=None, messages=[], last_answer="测试")
+    opening = generate_opening_question(interview={}, active_agent=None, resume_analysis=None, selected_resume_point={})
+    assert opening["question"] and opening["fallback"]

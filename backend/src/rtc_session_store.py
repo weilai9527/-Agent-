@@ -27,7 +27,7 @@ def get_rtc_session(interview_id: str) -> dict[str, Any] | None:
     return one(
         """
         SELECT id, interview_id, user_id, channel_id, candidate_user_id, agent_user_id,
-               desired_state, state, current_task_id, revision, last_heartbeat_at,
+               desired_state, state, current_task_id, round_agent_id, revision, last_heartbeat_at,
                token_expires_at, next_retry_at, start_attempts, stop_attempts,
                last_request_id, last_error, created_at, updated_at, started_at, stopped_at
         FROM interview_rtc_sessions
@@ -89,7 +89,7 @@ def update_rtc_token_expiry(session_id: str, expires_at: str) -> dict[str, Any] 
     return one("SELECT * FROM interview_rtc_sessions WHERE id = ?", (session_id,))
 
 
-def claim_rtc_start(session_id: str, task_id: str) -> tuple[dict[str, Any], bool]:
+def claim_rtc_start(session_id: str, task_id: str, round_agent_id: str | None = None) -> tuple[dict[str, Any], bool]:
     for _ in range(3):
         current = one("SELECT * FROM interview_rtc_sessions WHERE id = ?", (session_id,))
         if not current:
@@ -102,13 +102,13 @@ def claim_rtc_start(session_id: str, task_id: str) -> tuple[dict[str, Any], bool
             cursor = db.execute(
                 """
                 UPDATE interview_rtc_sessions
-                SET desired_state = 'active', state = 'starting', current_task_id = ?,
+                SET desired_state = 'active', state = 'starting', current_task_id = ?, round_agent_id = ?,
                     revision = revision + 1, start_attempts = ?, stop_attempts = 0,
                     last_error = NULL, next_retry_at = NULL, stopped_at = NULL,
                     last_heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND revision = ? AND state = ?
                 """,
-                (task_id, attempt_number, session_id, current["revision"], current["state"]),
+                (task_id, round_agent_id, attempt_number, session_id, current["revision"], current["state"]),
             )
             claimed = _close(cursor) == 1
             if claimed:
@@ -219,13 +219,15 @@ def defer_rtc_start_reconciliation(session_id: str, task_id: str, message: str) 
     return current
 
 
-def request_rtc_stop(session_id: str) -> tuple[dict[str, Any], bool]:
+def request_rtc_stop(session_id: str, expected_task_id: str | None = None) -> tuple[dict[str, Any], bool]:
     for _ in range(3):
         current = one("SELECT * FROM interview_rtc_sessions WHERE id = ?", (session_id,))
         if not current:
             raise RuntimeError("RTC session does not exist")
         state = current["state"]
         task_id = current.get("current_task_id")
+        if expected_task_id and task_id != expected_task_id:
+            return current, False
 
         if state in {"stopped", "idle", "start_failed"} or not task_id:
             with db:

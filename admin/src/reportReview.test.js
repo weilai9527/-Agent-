@@ -44,3 +44,12 @@ test('empty and damaged data are handled, while legacy plain text remains readab
   assert.equal(timelineView('[{"question":"未结束的数据"').invalid, true);
   for (const value of [null, '', '[]', [], '{}']) assert.equal(timelineView(value).items.length, 0);
 });
+
+test('review timeline displays evidence and distinguishes pending from valid zero', () => {
+  const { items } = timelineView([
+    { answer: '待处理', score: 0, generation_status: 'pending_retry' },
+    { answer: '使用了缓存', score: 0, dimension_evidence: '{"technical_accuracy":"使用了缓存"}' },
+  ]);
+  assert.deepEqual(items.map(({ score, scoreLabel }) => [score, scoreLabel]), [[null, '待补评'], [0, '0 分']]);
+  assert.deepEqual(items[1].evidence, [['technical_accuracy', '使用了缓存']]);
+});

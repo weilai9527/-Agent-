@@ -55,3 +55,24 @@ test('a truncated success response retries the same turn before updating progres
   assert.equal(result, saved);
   assert.equal(attempts, 2);
 });
+
+test('a queued turn polls with the same payload and validates only its final result', async () => {
+  const submission = { question_id: 'q', submission_id: 's', content: 'answer' };
+  const attempts = [], delays = [];
+  let validations = 0;
+  const result = await postInterviewTurn(async body => {
+    attempts.push(body);
+    return attempts.length < 3 ? { processing: true, retry_after_ms: 500 } : { answer: { id: 'a' } };
+  }, submission, response => { validations++; return response.answer?.id; }, { delay: async ms => delays.push(ms) });
+  assert.equal(result.answer.id, 'a');
+  assert.deepEqual(attempts, [submission, submission, submission]);
+  assert.deepEqual(delays, [500, 500]);
+  assert.equal(validations, 1);
+});
+
+test('a queued turn eventually reports a retryable timeout', async () => {
+  let calls = 0;
+  await assert.rejects(postInterviewTurn(async () => { calls++; return { processing: true }; }, {}, undefined,
+    { maxPendingAttempts: 1, delay: async () => {} }), error => error.status === 503);
+  assert.equal(calls, 4);
+});

@@ -1,4 +1,4 @@
-"""Run through the real routes against an isolated database in a fresh interpreter."""
+"""在新解释器进程中，通过真实路由验证独立测试数据库。"""
 import os
 from pathlib import Path
 import subprocess
@@ -25,11 +25,9 @@ def test_progress_is_atomic_and_recovers_awaited_captions(tmp_path):
         first = post(path + '/current-question')['question']
         assert post(path + '/current-question')['question']['id'] == first['id']
         payload = {'question_id':first['id'], 'submission_id':'turn-1', 'content':'还不清楚'}
-        barrier = Barrier(2)
         def follow(**kwargs):
             assert not main.db.connect().in_transaction
             assert kwargs['turn_decision']['question'] and kwargs['turn_decision']['evidence']
-            barrier.wait(timeout=5)
             return {'question':'能举一个例子吗？'}
         main.generate_kimi_followup = follow
         with ThreadPoolExecutor(2) as pool:
@@ -66,7 +64,7 @@ def test_progress_is_atomic_and_recovers_awaited_captions(tmp_path):
                     previous = post(path+'/current-question',{'recover_spoken':True})['question']
                 else:
                     previous = post(endpoint,spoken)['question']
-                    assert previous['content'] == spoken['content']
+                    assert previous['content'] == turn['decision']['question']
                 assert post(endpoint,spoken)['question']['id'] == previous['id']
                 assert client.post(path+'/turns/turn-1/spoken-question',json=spoken).status_code == 409
         assert main.one('SELECT count(*) AS n FROM interview_turns')['n'] == 16
@@ -140,8 +138,9 @@ def test_legacy_adoption_and_fallback(tmp_path):
         session = post('/api/interviews', {'target_role':'后端工程师'})['interview']
         path = '/api/interviews/' + session['id']
         agent = client.get(path+'/agents').json()['agents'][0]
-        question = post(path+'/messages', {'agent_id':agent['id'], 'sender_type':'agent',
-            'message_type':'question', 'content':'请谈谈你的项目。'})['message']
+        question_id = main.append_message(session['id'],agent['id'],'question','请谈谈你的项目。')
+        main.db.commit()
+        question = main.find_message_by_interview_id(question_id,session['id'])
         answer = post(path+'/messages', {'sender_type':'candidate', 'message_type':'answer',
             'content':'我负责设计缓存策略。'})['message']
         main.db.execute('UPDATE interview_messages SET round_agent_id=NULL,reply_to_message_id=NULL WHERE id=?',
@@ -184,7 +183,8 @@ def test_concurrent_opening_and_distinct_submissions(tmp_path):
         together = Barrier(2)
         def generate(**kwargs):
             assert not main.db.connect().in_transaction
-            together.wait(5)
+            if 'turn_decision' not in kwargs:
+                together.wait(5)
             return {'question':'请描述一次具体的优化。'}
         main.generate_opening_question = main.generate_kimi_followup = generate
         with ThreadPoolExecutor(2) as pool:
@@ -213,8 +213,9 @@ def test_interrupted_legacy_role_switch_and_terminal_recovery(tmp_path):
             session = post('/api/interviews', {'target_role':'后端工程师'})['interview']
             path = '/api/interviews/' + session['id']
             agents = client.get(path+'/agents').json()['agents']
-            old = post(path+'/messages', {'agent_id':agents[0]['id'],'sender_type':'agent',
-                       'message_type':'question','content':'上轮的问题？'})['message']
+            old_id = main.append_message(session['id'],agents[0]['id'],'question','上轮的问题？')
+            main.db.commit()
+            old = main.find_message_by_interview_id(old_id,session['id'])
             if terminal:
                 main.db.execute("UPDATE interview_agents SET status='completed' WHERE interview_id=?", (session['id'],))
             else:

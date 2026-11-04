@@ -197,7 +197,8 @@ class AdminAuthTests(unittest.TestCase):
 
         review = self.client.patch(
             f"/api/admin/reports/{report_id}/review",
-            headers={"Origin": TRUSTED_ORIGIN}, json={"status": "approved"},
+            headers={"Origin": TRUSTED_ORIGIN}, json={"status": "approved", **{
+                key: response.json()["reviewReport"][key] for key in ("source_revision", "review_token")}},
         )
         self.assertEqual(review.status_code, 200, review.text)
         self.assertEqual(
@@ -206,7 +207,7 @@ class AdminAuthTests(unittest.TestCase):
         )
 
     def insert_candidate_user(self, user_id: str, email: str, name: str) -> None:
-        """Keep admin tests independent from candidate-backend import order."""
+        """让管理端测试不依赖候选人后端的导入顺序。"""
         columns = {
             row[1]
             for row in admin_main.db.execute("PRAGMA table_info(users)").fetchall()
@@ -446,7 +447,7 @@ class AdminAuthTests(unittest.TestCase):
         second_id = str(uuid4())
         self.insert_candidate_user(first_id, "campus-student-1@example.com", "Campus Student One")
         self.insert_candidate_user(second_id, "campus-student-2@example.com", "Campus Student Two")
-        # The student overview includes only accounts linked to an active registration.
+        # 学生概览仅包含关联有效注册记录的账号。
         for user_id, student_no, name in (
             (first_id, "20270001", "Campus Student One"),
             (second_id, "20270002", "Campus Student Two"),

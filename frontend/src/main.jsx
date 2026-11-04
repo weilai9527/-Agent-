@@ -737,8 +737,8 @@ function reportToViewModel(reportData, user) {
     latestQuestion = null;
   });
 
-  // Older reports may have been saved as "succeeded" even though no candidate
-  // answer existed. The deterministic timeline is the evidence source of truth.
+  // 旧报告可能在没有候选人回答时就保存为成功状态；
+  // 应以程序确定的问答时间线作为证据来源。
   const hasEvidence = visibleReportScore(reportData || {}) !== null && (reportData?.scored_answer_count > 0 || timeline.length > 0);
 
   return {
@@ -1634,7 +1634,7 @@ const RESUME_FORM_FIELDS = [
 ];
 const EMPTY_RESUME_FORM = Object.fromEntries(RESUME_FORM_FIELDS.map(([field]) => [field, '']));
 
-/* ================= Resume form entry pickers ================= */
+/* ================= 简历表单入口选择器 ================= */
 
 function SkillModal({ title, description, onClose, footer, wide, children }) {
   return (
@@ -1971,7 +1971,7 @@ function HonorsPicker({ value, onChange }) {
 /* ---------- 通用：多项目列表弹窗 ---------- */
 function ProjectsPicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(null); // null | {index, item}
+  const [editing, setEditing] = useState(null); // 为空，或保存当前编辑项的序号和内容。
   const [items, setItems] = useState(() => parseProjects(value));
   const addNew = () => setEditing({ index: -1, item: { name: '', time: '', belong: '', desc: '' } });
   const handleSaveEntry = (item) => {
@@ -2385,7 +2385,7 @@ function ResumeDownloader({ text, name }) {
       document.body.removeChild(link);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } finally {
-      // noop
+      // 此处无需额外处理。
     }
   };
   return (
@@ -3742,9 +3742,11 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         else await Promise.all([reloadMessages(), reloadAgents()]);
         return;
       }
-      if (question.source_ref !== payload.source_ref && question.content !== payload.content) {
+      if (question.content !== payload.content) {
         rtcEpochRef.current++;
         await stopAliyunRtcCall('当前追问已由其他页面恢复，请重新连接', { flushCandidate: false });
+        setInterviewMode('text');
+        setError('语音追问与服务端题目不同，已切换文字面试，请按当前显示的题目作答。');
       }
       applyProgress({ ...current, question, pending_spoken_submission_id: null });
       await reloadMessages();
@@ -3777,7 +3779,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         client_created_at: new Date().toISOString(),
       }),
     }).catch(() => {
-      // Diagnostics must never interrupt the interview flow.
+      // 诊断上报不能中断面试流程。
     });
   };
 
@@ -3801,7 +3803,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         client_created_at: new Date().toISOString(),
       }),
     }).catch(() => {
-      // Diagnostics must never interrupt the interview flow.
+      // 诊断上报不能中断面试流程。
     });
   };
 
@@ -3812,9 +3814,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         method: 'POST',
         body: JSON.stringify({ expected_task_id: taskId }),
       });
-      // A concurrent server-side finish may observe the persisted stop intent
-      // before StopAgent returns. Wait briefly for the authoritative terminal
-      // state instead of navigating away while the Agent is still speaking.
+      // 服务端并发结束面试时，可能在 StopAgent 返回前就读到
+      // 已保存的停止意图。应短暂等待服务端确认终态，
+      // 避免面试官仍在说话时就跳转页面。
       for (let poll = 0; result.status !== 'stopped' && poll < 12; poll += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         const statusResult = await apiRequest(`/api/interviews/${interviewId}/rtc/session`);
@@ -3847,8 +3849,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   };
 
   const stopAliyunRtcCall = async (message = '阿里云 RTC 通话已断开', { flushCandidate = true } = {}) => {
-    // Some provider sessions do not emit a final end=true caption. Preserve
-    // any buffered candidate speech before pausing or leaving the channel.
+    // 部分供应商会话不会发送带 end=true 的最终字幕；
+    // 暂停或离开频道前，先保存缓冲中的候选人语音转写。
     if (flushCandidate) {
       rtcCaptionsRef.current?.flush();
     }
@@ -3928,8 +3930,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     let startupPhase = 'messages';
     const startupStartedAt = Date.now();
     try {
-      // A reconnect must use the database-backed question instead of the
-      // messages captured by the render that created this callback.
+      // 重连时必须使用数据库保存的题目，
+      // 不能使用创建本次回调时捕获的旧页面消息。
       if (!afterHandoff) await rtcWritesRef.current.drain();
       if (aliyunRtcAttemptRef.current !== attempt) return;
       rtcEpochRef.current++;
@@ -4094,9 +4096,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         recordAliyunRtcDiagnostic('ai_agent_started', {
           message: 'RTC AI 智能体启动请求成功',
         });
-        // A newly created provider task receives the current question as its
-        // StartAgent greeting from the backend. Only an already-running task
-        // needs an explicit replay when the browser reconnects.
+        // 新建供应商任务时，后端已经通过 StartAgent 的开场白
+        // 传入当前题目。只有复用正在运行的任务且浏览器重连时，
+        // 才需要明确重播当前题目。
         if (agentSession.current_question_id && agentSession.current_question_id !== latestQuestion.id) {
           await stopAliyunRtcCall('题目已更新，请重新连接当前面试官', { flushCandidate: false });
           applyProgress(await readCurrentQuestion());
@@ -4253,7 +4255,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       try {
         source.stop();
       } catch {
-        // Source may have already finished.
+        // 音频源可能已经播放结束。
       }
       source.disconnect();
     });
@@ -4376,7 +4378,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       try {
         omniRecognitionRef.current.stop();
       } catch {
-        // Recognition can already be stopped by the browser.
+        // 浏览器可能已经停止语音识别。
       }
     }
     omniRecognitionRef.current = null;
@@ -4451,7 +4453,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           recognition.start();
           omniRecognitionRef.current = recognition;
         } catch {
-          // Chrome may throttle immediate restarts; keep the audio submission path alive.
+          // 浏览器可能限制立即重启识别；仍需保留录音提交路径。
         }
       }
     };
@@ -5439,7 +5441,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         try {
           message = JSON.parse(responseBody).error || message;
         } catch {
-          // Keep the raw server message.
+          // 保留服务端返回的原始消息。
         }
         throw new Error(message);
       }
@@ -5659,9 +5661,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       body: JSON.stringify({ message_id: messageId }),
     })
       .catch((evaluationError) => {
-        // A missing per-question evaluation should not hold the candidate on
-        // the current screen. The final report still waits for tracked work,
-        // and pending evaluations can be retried from the report.
+        // 单题评分缺失不应把候选人卡在当前页面；
+        // 最终报告仍等待已跟踪的任务完成，
+        // 未完成的单题评分可在报告页面重试。
         console.warn('Background answer evaluation failed:', evaluationError);
         return null;
       })
@@ -5707,7 +5709,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setProcessingStage('正在保存回答并确认下一题');
 
     try {
-      // A timed-out POST may already be committed. Reuse its ID for this answer.
+      // 提交请求超时时可能已经写入成功，因此同一回答要复用原提交标识。
       const submission = createAnswerSubmission({
         questionId: question.id, content, sourceRef: options.sourceRef, previous: textAttemptRef.current,
       });

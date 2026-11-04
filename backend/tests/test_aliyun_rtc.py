@@ -245,16 +245,8 @@ def test_rtc_token_endpoint_is_authenticated_and_interview_scoped(tmp_path):
         assert credentials["ai_agent"]["user_id"] == f"agent_{interview_id}"
 
         agents = owner.get(f"/api/interviews/{interview_id}/agents").json()["agents"]
-        question = owner.post(
-            f"/api/interviews/{interview_id}/messages",
-            json={
-                "agent_id": agents[0]["id"],
-                "sender_type": "agent",
-                "message_type": "question",
-                "content": "请介绍一个你负责的核心项目。",
-            },
-        )
-        assert question.status_code == 201, question.text
+        question_id = main.append_message(interview_id, agents[0]["id"], "question", "请介绍一个你负责的核心项目。")
+        main.db.commit()
         rtc_answer_payload = {
             "sender_type": "candidate",
             "message_type": "answer",
@@ -266,7 +258,7 @@ def test_rtc_token_endpoint_is_authenticated_and_interview_scoped(tmp_path):
         first_answer = owner.post(f"/api/interviews/{interview_id}/messages", json=rtc_answer_payload)
         assert first_answer.status_code == 201, first_answer.text
         assert first_answer.json()["duplicate"] is False
-        assert first_answer.json()["message"]["reply_to_message_id"] == question.json()["message"]["id"]
+        assert first_answer.json()["message"]["reply_to_message_id"] == question_id
         assert first_answer.json()["message"]["round_agent_id"] == agents[0]["id"]
         duplicate_answer = owner.post(f"/api/interviews/{interview_id}/messages", json=rtc_answer_payload)
         assert duplicate_answer.status_code == 200, duplicate_answer.text
@@ -314,7 +306,7 @@ def test_rtc_token_endpoint_is_authenticated_and_interview_scoped(tmp_path):
         assert "候选人结构化简历分析" in calls["started"]["prompt"]
         assert "RTC 智能面试项目" in calls["started"]["prompt"]
         assert agent_started.json()["resume_analysis_injected"] is True
-        assert agent_started.json()["current_question_id"] == question.json()["message"]["id"]
+        assert agent_started.json()["current_question_id"] == question_id
         duplicate_start = owner.post(f"/api/interviews/{interview_id}/rtc/agent/start")
         assert duplicate_start.status_code == 200, duplicate_start.text
         assert duplicate_start.json()["task_id"] == agent_task_id
@@ -327,7 +319,7 @@ def test_rtc_token_endpoint_is_authenticated_and_interview_scoped(tmp_path):
 
         agent_notified = owner.post(
             f"/api/interviews/{interview_id}/rtc/agent/notify",
-            json={"task_id": agent_task_id, "message_id": question.json()["message"]["id"]},
+            json={"task_id": agent_task_id, "message_id": question_id},
         )
         assert agent_notified.status_code == 200, agent_notified.text
         assert calls["notified"]["message"] == "请介绍一个你负责的核心项目。"

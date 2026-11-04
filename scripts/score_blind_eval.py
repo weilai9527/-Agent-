@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare blind reviewer sheets and compare two scoring versions on the same answers."""
+"""生成盲评表，并比较两版评分对同一批回答的评价结果。"""
 
 import argparse
 import csv
@@ -61,7 +61,20 @@ def load_samples(args):
     return selected
 
 
+def spreadsheet_unsafe(value):
+    text = str(value)
+    return text.startswith(("\t", "\r", "\n")) or text.lstrip("\x00\t\r\n ").startswith(("=", "+", "-", "@"))
+
+
+def spreadsheet_text(value):
+    text = str(value)
+    return "'" + text if spreadsheet_unsafe(text) else text
+
+
 def prepare(samples, args):
+    # 样本标识是导出与回填的关联键；应校验，不应悄悄改写。
+    if any(spreadsheet_unsafe(key) for key in samples):
+        raise ValueError("sample_id must be an anonymous stable ID without formula prefixes")
     paths = [args.out / f"reviewer_{reviewer}.csv" for reviewer in ("a", "b")]
     if any(path.exists() for path in paths):
         raise ValueError("review sheets already exist; choose a new output directory")
@@ -73,7 +86,8 @@ def prepare(samples, args):
             writer.writeheader()
             for key in sorted(samples, key=lambda k: stable_hash(f"{args.seed}/{path.name}/{k}")):
                 row = samples[key]
-                writer.writerow({field: row.get(field, "") for field in fields[:4]})
+                writer.writerow({field: spreadsheet_text(key if field == "sample_id" else row.get(field, ""))
+                                 for field in fields[:4]})
     print(f"{len(samples)} samples per reviewer in {args.out}")
 
 
@@ -110,7 +124,7 @@ def rate(numerator, denominator):
 
 
 def agreement(pairs):
-    # With linear weights the common distance scale factor cancels in kappa.
+    # 使用线性权重时，公共距离比例因子会在一致性系数计算中抵消。
     n = len(pairs)
     actual = [0] * 5
     predicted = [0] * 5

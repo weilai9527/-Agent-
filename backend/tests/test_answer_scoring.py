@@ -47,6 +47,10 @@ def test_retry_reuses_record_and_freezes_conversation(tmp_path):
         path = '/api/interviews/' + interview['id']
         agent = client.get(path + '/agents').json()['agents'][0]
         def message(sender, kind, content):
+            if sender == 'agent':
+                message_id = main.append_message(interview['id'], agent['id'], kind, content)
+                main.db.commit()
+                return main.find_message_by_interview_id(message_id, interview['id'])
             return post(path + '/messages', {'sender_type': sender, 'message_type': kind, 'content': content,
                                               'agent_id': agent['id'] if sender == 'agent' else None})['message']
         message('agent', 'question', '解释算法复杂度。')

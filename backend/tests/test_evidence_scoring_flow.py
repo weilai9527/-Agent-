@@ -1,4 +1,4 @@
-"""Exercise answer scoring, repair, report generation and history through the HTTP API."""
+"""通过真实接口验证回答评分、补评、报告生成及历史记录。"""
 
 import json
 import os
@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 
 def test_evidence_scoring_flow(tmp_path):
-    # The application binds its database at import time. A fresh process also
-    # isolates the HTTP worker threads from the rest of the test suite.
+    # 应用在导入时绑定数据库；使用新进程还可以
+    # 将接口工作线程与其余测试隔离。
     environment = {
         **os.environ, "APP_ENV": "test", "DB_ENGINE": "sqlite",
         "SQLITE_PATH": str(tmp_path / "scoring.sqlite"),
@@ -44,8 +44,8 @@ def run_flow():
     agent_id = interview["agents"][0]["id"]
 
     def add_answer(question, answer):
-        post(path + "/messages", agent_id=agent_id, sender_type="agent",
-             message_type="question", content=question)
+        main.append_message(interview["interview"]["id"], agent_id, "question", question)
+        main.db.commit()
         return post(path + "/messages", sender_type="candidate",
                     message_type="answer", content=answer)["message"]["id"]
 
@@ -65,7 +65,7 @@ def run_flow():
 
     def model(provider, messages):
         if provider.model == "REPORT_PROVIDER_ORDER":
-            # The narrator is deliberately unreliable about scores.
+            # 故意让文字总结中的评分说法不可信，以验证程序汇总结果仍为准。
             return {"summary": "两次作答讨论了重复请求。", "suggestions": ["补充失败场景。"],
                     "total_score": 99, "grade": "A", "pass_recommendation": "strong_pass",
                     "ability_radar": {"role_fit": 99}}
@@ -120,7 +120,7 @@ def run_flow():
             60, "D", "borderline",
         )
 
-    # Pre-migration rules-only reports had a number but no verified coverage.
+    # 迁移前仅靠规则生成的旧报告虽有分数，但没有经过验证的评分覆盖信息。
     legacy = post("/api/interviews", target_role="后端工程师")["interview"]
     legacy_path = "/api/interviews/" + legacy["id"]
     post(legacy_path + "/messages", sender_type="candidate", message_type="answer", content="不知道")

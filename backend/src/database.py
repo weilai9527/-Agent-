@@ -7,7 +7,7 @@ import re
 import sqlite3
 import threading
 
-from . import env  # noqa: F401
+from . import env  # noqa: F401  # 导入用于初始化配置或共享数据库。
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -707,6 +707,55 @@ def _ensure_turn_tables() -> None:
         )
     """ + _turn_table_options)
     db.commit()
+    _ensure_workflow_schema()
+
+
+def _ensure_workflow_schema() -> None:
+    """执行增量迁移，保留已有数据并兼容旧报告读取。"""
+    for table, name, sql_type in (
+        ("interview_sessions", "evaluation_revision", "BIGINT NOT NULL DEFAULT 0"),
+        ("interview_reports", "source_revision", "BIGINT"),
+    ):
+        exists = (any(row["name"] == name for row in all_rows(f"PRAGMA table_info({table})"))
+                  if DB_ENGINE == "sqlite" else _column_exists(table, name))
+        if not exists:
+            try:
+                _execute_schema(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+            except Exception:
+                # 其他应用进程可能已经完成同一项迁移。
+                exists = (any(row["name"] == name for row in all_rows(f"PRAGMA table_info({table})"))
+                          if DB_ENGINE == "sqlite" else _column_exists(table, name))
+                if not exists:
+                    raise
+    options = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" if DB_ENGINE == "mysql" else ""
+    _execute_schema("""
+        CREATE TABLE IF NOT EXISTS interview_tasks (
+          id CHAR(36) PRIMARY KEY,
+          interview_id CHAR(36) NOT NULL,
+          task_type VARCHAR(24) NOT NULL,
+          task_key VARCHAR(128) NOT NULL,
+          input_json MEDIUMTEXT NOT NULL,
+          input_hash VARCHAR(64) NOT NULL,
+          input_revision BIGINT,
+          status VARCHAR(24) NOT NULL DEFAULT 'queued',
+          lease_token CHAR(36), lease_until DOUBLE,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          result_json MEDIUMTEXT, error TEXT,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(interview_id, task_type, task_key),
+          FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE
+        )
+    """ + options)
+    if DB_ENGINE == "sqlite":
+        _execute_schema("CREATE INDEX IF NOT EXISTS idx_interview_tasks_recovery ON interview_tasks(status, lease_until)")
+    else:
+        try:
+            _ensure_index("interview_tasks", "idx_interview_tasks_recovery", "status, lease_until")
+        except Exception:
+            if not _index_exists("interview_tasks", "idx_interview_tasks_recovery"):
+                raise
+    db.commit()
 
 
 def init_db() -> None:
@@ -1169,9 +1218,9 @@ from shared.security_logging import ensure_security_schema
 
 ensure_security_schema(db, DB_ENGINE)
 
-# The career catalog is shared by the candidate and administration services.
-# Keeping its schema service independent avoids coupling catalog growth to resume
-# or interview tables.
+# 职业目录由候选人端和管理端共同使用。
+# 将目录建表逻辑独立，可避免目录扩展与简历表
+# 或面试表耦合。
 from shared.career_catalog import ensure_catalog_schema, seed_computer_pilot
 
 ensure_catalog_schema(db, DB_ENGINE)

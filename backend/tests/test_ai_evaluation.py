@@ -6,6 +6,28 @@ from backend.src.ai_evaluation import AiEvaluationError, DIMENSIONS, _call_with_
 from backend.src.kimi_followup import FollowupProvider
 
 
+@pytest.mark.parametrize("bad_result", [None, [], {"question_types": ["technical"],
+    "dimension_scores": {"technical_depth": 95}, "dimension_evidence": {"technical_depth": "捏造引文"}}])
+def test_invalid_primary_evaluation_uses_secondary_provider(monkeypatch, bad_result):
+    from backend.src import ai_evaluation as ai
+    monkeypatch.setenv("AI_EVALUATION_PROVIDER_ATTEMPTS", "2")
+    provider = FollowupProvider("primary", "test-key", "https://example.test", "test-model", 1, 0, 10)
+    calls = []
+
+    def generate(current, _messages):
+        calls.append(current.name)
+        return bad_result if current.name == "primary" else {
+            "question_types": ["technical"], "dimension_scores": {"technical_depth": 0},
+            "dimension_evidence": {"technical_depth": "不知道"}}
+
+    monkeypatch.setattr(ai, "get_task_providers", lambda *args, **kwargs: [provider, replace(provider, name="secondary")])
+    monkeypatch.setattr(ai, "call_provider_json", generate)
+    result = ai.generate_ai_evaluation(interview={}, agent=None, question="请解释缓存一致性", answer="不知道", messages=[])
+    assert calls == ["primary", "secondary"]
+    assert result["score"] == 0 and result["provider"] == "secondary"
+
+
+
 def test_normalize_evaluation_formats_feedback_without_filling_unassessed_dimensions():
     result = normalize_evaluation(
         {

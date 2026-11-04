@@ -39,11 +39,8 @@ def test_new_rtc_task_uses_current_role_question_and_bounded_opening_context(tmp
         main.resume_analysis_for_prompt = lambda *args, **kwargs: None
 
         def ask(agent, question):
-            result = client.post(prefix + '/messages', json={
-                'agent_id': agent['id'], 'sender_type': 'agent',
-                'message_type': 'question', 'content': question,
-            })
-            assert result.status_code == 201, result.text
+            main.append_message(interview['id'], agent['id'], 'question', question)
+            main.db.commit()
 
         ask(agents[0], '请描述你亲自实现的接口。')
         first = client.post(prefix + '/rtc/agent/start')
@@ -56,8 +53,8 @@ def test_new_rtc_task_uses_current_role_question_and_bounded_opening_context(tmp
             if index == 1:
                 stopped = client.post(prefix + '/rtc/agent/stop')
                 assert stopped.json()['status'] == 'stopped', stopped.text
-            # For the HR handoff a refresh interrupted the old browser before
-            # its stop request. Starting the new role must retire the old task.
+            # 人事轮交接时，页面刷新可能在旧浏览器发出
+            # 停止请求之前打断流程；启动新角色时必须先结束旧任务。
             for agent, status in [(agents[index - 1], 'completed'), (agents[index], 'active')]:
                 result = client.patch(prefix + f"/agents/{agent['id']}", json={'status': status})
                 assert result.status_code == 200, result.text

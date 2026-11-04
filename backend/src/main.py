@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import html
 import io
 import json
 import math
@@ -20,7 +21,7 @@ from uuid import uuid4
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from .env import first_env_value, load_env_file, normalize_certificate_env
@@ -34,6 +35,7 @@ from .interview_progress import (
 )
 from .database import DB_ENGINE, all_rows, db, get_database_path, one
 from . import database as database_module
+from . import interview_tasks as generation_tasks
 from shared.security_logging import RequestLoggingMiddleware, SecurityAuditStore, audit_context, bind_actor
 from shared.interviewer_policy import load_policy, select_strategy, load_snapshot, strategy_prompt
 from .ai_evaluation import (
@@ -89,12 +91,21 @@ from .security import (
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
-    global rtc_recovery_task
+    global rtc_recovery_task, generation_recovery_task
     if rtc_recovery_task is None or rtc_recovery_task.done():
         rtc_recovery_task = asyncio.create_task(rtc_recovery_loop())
+    if generation_recovery_task is None or generation_recovery_task.done():
+        generation_recovery_task = asyncio.create_task(generation_recovery_loop())
     try:
         yield
     finally:
+        if generation_recovery_task is not None:
+            generation_recovery_task.cancel()
+            try:
+                await generation_recovery_task
+            except asyncio.CancelledError:
+                pass
+            generation_recovery_task = None
         if rtc_recovery_task is not None:
             rtc_recovery_task.cancel()
             try:
@@ -700,14 +711,14 @@ def ensure_resume_analysis_for_user(user: dict, force: bool = False) -> dict:
 
 
 def resume_analysis_for_prompt(user: dict, *, cached_only: bool = False) -> dict[str, Any] | None:
-    """Return a current structured analysis without inventing resume content."""
+    """返回当前有效的结构化分析，不虚构简历内容。"""
     ensure_profile(user)
     profile = find_profile_by_user_id(user["id"])
     if not resume_source_text(profile):
         return None
     if cached_only:
-        # Voice startup must never wait for a fresh model analysis. The RTC
-        # prompt also includes the interview's saved resume_context.
+        # 启动语音时不等待新的模型分析；实时音视频提示词
+        # 同时包含本场面试已保存的简历补充材料。
         existing = find_resume_analysis_by_user_id(user["id"])
         if not existing or existing.get("source_hash") != resume_source_hash(profile):
             return None
@@ -1266,8 +1277,8 @@ def build_rtc_ai_agent_prompt(
     asked_questions = "\n".join(
         f"- {str(question)[:240]}" for question in session["asked_questions"][-5:]
     ) or "- 暂无"
-    # Order the important state before bounded resume/history sections so the
-    # provider's 5,000-character limit can never remove the current question.
+    # 把关键状态放在有长度限制的简历和历史对话之前，
+    # 避免供应商的 5,000 字符上限截掉当前题目。
     return "\n".join(
         [
             "你是中文 AI 电话面试官，不是候选人，也不是替候选人解题的助手。每次只问一个问题，问完等待候选人回答。",
@@ -1758,7 +1769,7 @@ def find_report_by_interview_id(interview_id: str, user_id: str) -> dict | None:
         SELECT reports.id, reports.user_id, reports.interview_id,
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
                reports.total_score, reports.grade, reports.pass_recommendation,
-               reports.scored_answer_count, reports.answer_count,
+               reports.scored_answer_count, reports.answer_count, reports.source_revision,
                reports.ability_radar, reports.agent_feedback, reports.timeline_review,
                reports.summary, reports.suggestions, reports.provider, reports.model,
                reports.prompt_version, reports.generation_status, reports.generation_error,
@@ -1778,7 +1789,7 @@ def find_report_by_id(report_id: str, user_id: str) -> dict | None:
         SELECT reports.id, reports.user_id, reports.interview_id,
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
                reports.total_score, reports.grade, reports.pass_recommendation,
-               reports.scored_answer_count, reports.answer_count,
+               reports.scored_answer_count, reports.answer_count, reports.source_revision,
                reports.ability_radar, reports.agent_feedback, reports.timeline_review,
                reports.summary, reports.suggestions, reports.provider, reports.model,
                reports.prompt_version, reports.generation_status, reports.generation_error,
@@ -1798,7 +1809,7 @@ def list_reports_by_user_id(user_id: str) -> list[dict]:
         SELECT reports.id, reports.user_id, reports.interview_id,
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
                reports.total_score, reports.grade, reports.pass_recommendation,
-               reports.scored_answer_count, reports.answer_count,
+               reports.scored_answer_count, reports.answer_count, reports.source_revision,
                reports.summary, reports.provider, reports.model, reports.prompt_version,
                reports.generation_status, reports.generation_error, reports.fallback,
                reports.generated_at, reports.review_status, reports.reviewed_by, reports.reviewed_at,
@@ -1845,7 +1856,7 @@ def list_full_reports_by_user_id(user_id: str) -> list[dict]:
         SELECT reports.id, reports.user_id, reports.interview_id,
                interviews.target_role, interviews.interview_type, interviews.status AS interview_status,
                interviews.difficulty, interviews.created_at AS interview_date,
-               reports.scored_answer_count, reports.answer_count,
+               reports.scored_answer_count, reports.answer_count, reports.source_revision,
                reports.total_score, reports.ability_radar, reports.provider, reports.model,
                reports.prompt_version, reports.generation_status, reports.generation_error,
                reports.fallback, reports.generated_at, reports.review_status,
@@ -2059,13 +2070,13 @@ def health():
 
 @app.get("/api/catalog/versions")
 def get_catalog_versions():
-    """Return published catalog versions available to candidate flows."""
+    """返回候选人流程可使用的已发布目录版本。"""
     return {"versions": list_versions(db)}
 
 
 @app.get("/api/catalog/tree")
 def get_catalog_tree(version: str | None = None):
-    """Return the college-to-job hierarchy and its ability matrices."""
+    """返回从学院到岗位的层级结构及对应能力矩阵。"""
     result = catalog_tree(db, version_code=version)
     if not result:
         raise error(404, "职业能力目录版本不存在或尚未发布。")
@@ -2083,9 +2094,9 @@ async def auth_register(request: Request, response: Response, body: dict | None 
         raise error(403, "学生自主注册已关闭，请使用学校分配的学号和临时密码登录。")
     body = json_body(body)
 
-    # Keep the legacy email registration path available only in tests. A number
-    # of API tests use it to create an isolated authenticated user, while every
-    # non-test environment continues to reject self-registration above.
+    # 旧邮箱注册入口仅在测试中开放。部分接口测试
+    # 依靠该入口创建独立的已登录用户；
+    # 所有非测试环境仍由上方逻辑拒绝自行注册。
     email = normalize_email(body.get("email"))
     password = str(body.get("password") or "")
     if email or password:
@@ -2236,7 +2247,7 @@ def change_initial_password(request: Request, response: Response, body: dict | N
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request, response: Response):
-    find_user_by_session(request)  # Capture identity before deleting the session.
+    find_user_by_session(request)  # 删除会话之前先记录操作者身份。
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if token:
         db.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(token),))
@@ -2273,7 +2284,7 @@ async def password_reset_request(request: Request, body: dict | None = None):
             if not sent:
                 audit_context(request, reason="reset_mail_not_configured", outcome="failed")
         except Exception:
-            # The response remains generic so account existence and mail-provider state are not exposed.
+            # 使用统一响应，避免泄露账号是否存在或邮件服务的状态。
             audit_context(request, reason="reset_mail_delivery_failed", outcome="failed")
         if os.environ.get("APP_ENV", "development").strip().lower() != "production":
             dev_reset_token = token
@@ -2362,7 +2373,7 @@ def update_profile(body: dict | None = None, user: dict = Depends(require_auth))
 
 
 def extract_text_from_resume_file(filename: str, content: bytes) -> tuple[str, str | None]:
-    """Extract plain text from an uploaded resume file."""
+    """从上传的简历文件中提取纯文本。"""
     extension = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
 
     if extension in ("txt", "md", "json"):
@@ -3011,7 +3022,7 @@ def current_question(interview_id: str, body: dict | None = None, user: dict = D
         return finished
     opening = None
     if not managed_progress(interview_id) and not latest_interview_question(interview_id):
-        # The provider may be slow. Recheck the authoritative state after obtaining the lock.
+        # 供应商响应可能较慢；取得锁后重新核对服务端的权威状态。
         try:
             opening = create_opening_question(interview_id, user=user)["question"]
         except HTTPException as exc:
@@ -3031,7 +3042,7 @@ def current_question(interview_id: str, body: dict | None = None, user: dict = D
                 create_default_agents(interview_id)
                 agents = list_agents_by_interview_id(interview_id)
             question = latest_interview_question(interview_id)
-            # Adopt a running old-format interview, including an interrupted role change.
+            # 接管仍在进行的旧格式面试，并兼容中途被打断的角色切换。
             agent = next((a for a in agents if a["status"] == "active"), None)
             if not agent and question:
                 agent = next((a for a in agents if a["id"] == question["agent_id"] and a["status"] != "completed"), None)
@@ -3048,7 +3059,7 @@ def current_question(interview_id: str, body: dict | None = None, user: dict = D
                        (interview_id, agent["id"], question_id)).close()
             messages = list_messages_by_interview_id(interview_id)
             if question and question_id == question["id"]:
-                # Legacy clients saved the answer before asking for the next question.
+                # 旧客户端会先保存回答，再请求下一道题。
                 answer = next((m for m in reversed(messages) if m["sender_type"] == "candidate"
                                and m.get("reply_to_message_id") in (None, question_id)
                                and m.get("round_agent_id") in (None, agent["id"])
@@ -3096,7 +3107,6 @@ def submit_turn(interview_id: str, body: dict, user: dict = Depends(require_auth
     interview = find_interview_by_user_id(interview_id, user["id"])
     if not interview:
         raise error(404, "面试不存在。")
-    # Read a coherent snapshot, release the lock during generation, and confirm it again before writing.
     with locked_session(interview_id, user["id"]) as session:
         prior = turn_by(interview_id, submission_id)
         if prior:
@@ -3104,11 +3114,59 @@ def submit_turn(interview_id: str, body: dict, user: dict = Depends(require_auth
         require_open_session(session)
         state = managed_progress(interview_id)
         require_current_question(state, question_id)
+        task = generation_tasks.task_by_key(interview_id, "followup", question_id)
+        if task:
+            saved = json.loads(task["input_json"])
+            if saved["submission_id"] != submission_id or saved["message"] != message:
+                raise error(409, "当前题已由另一份回答领取，请同步题目后重试。")
+        else:
+            task = generation_tasks.enqueue_locked(interview_id, "followup", question_id, {
+                "question_id": question_id, "submission_id": submission_id,
+                "message": message, "answer_id": str(uuid4()),
+            })
+        token = generation_tasks.claim_locked(task, retry_failed=True)
+    if token:
+        return execute_turn_task(task["id"], token, user)
+    # 并发重试等待已领取的任务，不再发起新的供应商调用。
+    deadline = time.monotonic() + bounded_env_int("INTERVIEW_TASK_WAIT_SECONDS", 20, 0, 60)
+    while time.monotonic() < deadline:
+        prior = turn_by(interview_id, submission_id)
+        if prior:
+            return replay_turn(interview_id, prior, question_id, message)
+        pending = generation_tasks.task_by_id(task["id"])
+        if pending["status"] in {"failed", "superseded"}:
+            raise error(409, "本次生成未完成，请同步题目后重试。")
+        time.sleep(0.05)
+    return JSONResponse(status_code=202, content={"processing": True, "task_id": task["id"], "retry_after_ms": 500})
+
+
+def execute_turn_task(task_id, token, user):
+    task = generation_tasks.task_by_id(task_id)
+    interview_id = task["interview_id"]
+    saved = json.loads(task["input_json"])
+    question_id, submission_id, message = saved["question_id"], saved["submission_id"], saved["message"]
+    try:
+        return _execute_turn_task(interview_id, task_id, token, saved, user)
+    except Exception as exc:
+        with locked_session(interview_id, user["id"]):
+            generation_tasks.finish_locked(task_id, token, {}, "superseded" if isinstance(exc, HTTPException) and exc.status_code == 409 else "failed", type(exc).__name__)
+        raise
+
+
+def _execute_turn_task(interview_id, task_id, token, saved, user):
+    question_id, submission_id, message = saved["question_id"], saved["submission_id"], saved["message"]
+    with locked_session(interview_id, user["id"]) as session:
+        require_open_session(session)
+        if not generation_tasks.owns_locked(task_id, token):
+            raise error(409, "生成任务已由其他执行者接管，请稍后重试。")
+        state = managed_progress(interview_id)
+        require_current_question(state, question_id)
+        interview = find_interview_by_user_id(interview_id, user["id"])
         question = find_message_by_interview_id(question_id, interview_id)
         agents = list_agents_by_interview_id(interview_id)
         active = next(a for a in agents if a["id"] == state["agent_id"])
         messages = list_messages_by_interview_id(interview_id)
-    answer = {**message, "id": str(uuid4()), "round_agent_id": active["id"], "reply_to_message_id": question_id}
+    answer = {**message, "id": saved["answer_id"], "round_agent_id": active["id"], "reply_to_message_id": question_id}
     decision = decide_turn(interview=interview, agents=agents, active_agent=active, messages=messages, answer=answer)
     next_question = decision["question"]
     if decision["action"] == "ask_follow_up":
@@ -3121,17 +3179,21 @@ def submit_turn(interview_id: str, body: dict, user: dict = Depends(require_auth
                     turn_decision=decision)
                 next_question = result["question"]
             except KimiFollowupError:
-                pass  # The decision already contains a role-appropriate fallback.
+                pass  # 轮次决策中已经包含适合当前角色的备用追问。
     with locked_session(interview_id, user["id"]) as session:
         prior = turn_by(interview_id, submission_id)
         if prior:
             return replay_turn(interview_id, prior, question_id, message)
         require_open_session(session)
+        if not generation_tasks.owns_locked(task_id, token):
+            raise error(409, "生成任务已过期，迟到结果未发布。")
         require_current_question(managed_progress(interview_id), question_id)
         if find_message_by_source_ref(interview_id, message["source"], submission_id):
             raise error(409, "提交标识已被其他消息使用。")
         commit_turn(interview_id, submission_id, question, answer, decision, next_question)
         result = replay_turn(interview_id, turn_by(interview_id, submission_id), question_id, message)
+        if not generation_tasks.finish_locked(task_id, token, result):
+            raise error(409, "生成任务已过期，迟到结果未发布。")
         return {**result, "duplicate": False}
 
 
@@ -3152,9 +3214,11 @@ def save_spoken_question(interview_id: str, submission_id: str, body: dict, user
                                            "message_type": "follow_up", "agent_id": turn["next_agent_id"]})
             if find_message_by_source_ref(interview_id, "aliyun_rtc", message["source_ref"]):
                 raise error(409, "字幕标识已被其他消息使用。")
-            question_id = complete_pending_question(interview_id, turn, message["content"],
-                                                   message["transcript_text"], message["source_ref"])
-        return {"question": find_message_by_interview_id(question_id, interview_id)}
+            # 客户端字幕不作为可信题目来源，以服务端决策为准。
+            expected = json.loads(turn["decision_json"])["question"]
+            question_id = complete_pending_question(interview_id, turn, expected)
+        question = find_message_by_interview_id(question_id, interview_id)
+        return {"question": question, "requires_reconciliation": question["content"] != str(body.get("content") or "").strip()}
 
 
 @app.post("/api/interviews/{interview_id}/finish")
@@ -3168,15 +3232,17 @@ def finish_interview(interview_id: str, background_tasks: BackgroundTasks, user:
                     completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
                 WHERE id=?
             """, (interview_id,)).close()
-        report = find_report_by_interview_id(interview_id, user["id"])
-        if not report:
-            insert_queued_report(interview_id, user)
-            background_tasks.add_task(generate_report_after_finish, interview_id, user)
+        task = queue_report_locked(interview_id, user)
+        token = generation_tasks.claim_locked(task, retry_failed=True)
+        if token:
+            db.execute("UPDATE interview_reports SET generation_status='queued',generation_error=NULL WHERE interview_id=?",
+                       (interview_id,)).close()
+            background_tasks.add_task(generate_report_after_finish, interview_id, user, task["id"], token)
     try:
         stop_interview_rtc_session_if_present(interview_id)
     except Exception as exc:
-        # The stop intent is persisted before the provider call. Recovery will
-        # continue even if Alibaba Cloud is temporarily unavailable here.
+        # 调用供应商前已经保存停止意图；即使阿里云暂时不可用，
+        # 后台恢复流程也会继续处理。
         print(f"Alibaba RTC stop on interview finish deferred: {type(exc).__name__}: {exc}", flush=True)
     return {"interview": find_interview_by_user_id(interview_id, user["id"]),
             "report": find_report_by_interview_id(interview_id, user["id"])}
@@ -3200,19 +3266,14 @@ def insert_queued_report(interview_id, user):
     ).close()
 
 
-def generate_report_after_finish(interview_id: str, user: dict) -> None:
+def generate_report_after_finish(interview_id: str, user: dict, task_id=None, token=None) -> None:
     try:
-        create_report(interview_id, Response(), user=user)
+        if task_id and token:
+            execute_report_task(task_id, token, user)
+        else:
+            create_report(interview_id, Response(), user=user)
     except Exception as exc:
-        db.execute(
-            """
-            UPDATE interview_reports SET generation_status = 'failed', generation_error = ?,
-                updated_at = CURRENT_TIMESTAMP WHERE interview_id = ? AND user_id = ? AND generation_status = 'queued'
-            """,
-            (f"{type(exc).__name__}: {exc}"[:1000], interview_id, user["id"]),
-        )
-        db.commit()
-        print(f"Report generation after interview finish failed: {type(exc).__name__}: {exc}", flush=True)
+        print(f"Report task failed: {type(exc).__name__}", flush=True)
 
 
 @app.get("/api/interviews/{interview_id}/agents")
@@ -3344,6 +3405,8 @@ def create_message(
     if interview["status"] == "completed":
         raise error(409, "已完成的面试不能继续写入消息。")
     message = parse_message_input(json_body(body))
+    if message["sender_type"] != "candidate":
+        raise error(403, "面试官题目和系统消息只能由服务端产生。")
     if message["agent_id"] and not find_agent_by_interview_id(message["agent_id"], interview["id"]):
         raise error(400, "Agent 不属于当前面试。")
     existing = find_message_by_source_ref(interview["id"], message["source"], message["source_ref"])
@@ -3392,7 +3455,7 @@ def create_message(
                 (interview["id"], user["id"]),
             ).close()
     except Exception:
-        # A retried RTC final-caption request may race with the first request.
+        # 实时音视频最终字幕的重试请求可能与首次请求并发。
         existing = find_message_by_source_ref(interview["id"], message["source"], message["source_ref"])
         if existing:
             response.status_code = 200
@@ -3911,37 +3974,37 @@ def create_evaluation(
         "pending_retry" if evaluation["fallback"] else "succeeded",
         evaluation.get("generation_error"), int(evaluation["fallback"]),
     )
-    if not existing:
-        # 同一回答可能同时收到两次请求，唯一键保证两次补评复用同一条记录。
-        conflict_clause = ("ON DUPLICATE KEY UPDATE id = id" if DB_ENGINE == "mysql"
-                           else "ON CONFLICT(interview_id, message_id) DO NOTHING")
-        db.execute(
-            """INSERT INTO interview_evaluations (
-                 id, interview_id, message_id, agent_id, score, strengths, issues, suggestions,
-                 dimension_scores, dimension_evidence, provider, model, prompt_version, generation_status,
-                 generation_error, fallback, generated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) """ + conflict_clause,
-            (evaluation_id, interview["id"], message["id"], evaluation_agent_id, *values),
-        )
-        stored = find_evaluation_by_message_id(interview["id"], message["id"])
-        if stored["id"] != evaluation_id:
-            existing = stored
-            evaluation_id = stored["id"]
-    if existing:
-        response.status_code = 200
-        # 只有成功的强制复评能覆盖已有有效分；超时或迟到的普通请求不能抹掉它。
-        db.execute(
-            """UPDATE interview_evaluations
-               SET score = ?, strengths = ?, issues = ?, suggestions = ?, dimension_scores = ?, dimension_evidence = ?,
-                   provider = ?, model = ?, prompt_version = ?, generation_status = ?,
-                   generation_error = ?, fallback = ?, agent_id = ?, generated_at = CURRENT_TIMESTAMP,
-                   review_status = 'pending', reviewed_by = NULL, reviewed_at = NULL,
-                   updated_at = CURRENT_TIMESTAMP
-               WHERE id = ? AND interview_id = ? AND (? = 1 OR generation_status <> 'succeeded' OR fallback = 1)""",
-            (*values, evaluation_agent_id, evaluation_id, interview["id"], int(force and not evaluation["fallback"])),
-        )
-    db.execute("UPDATE interview_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?", (interview["id"], user["id"]))
-    db.commit()
+    with locked_session(interview["id"], user["id"]):
+        existing = find_evaluation_by_message_id(interview["id"], message["id"])
+        if existing:
+            evaluation_id = existing["id"]
+            response.status_code = 200
+            written = db.execute(
+                """UPDATE interview_evaluations
+                   SET score=?,strengths=?,issues=?,suggestions=?,dimension_scores=?,dimension_evidence=?,
+                       provider=?,model=?,prompt_version=?,generation_status=?,generation_error=?,fallback=?,
+                       agent_id=?,generated_at=CURRENT_TIMESTAMP,review_status='pending',reviewed_by=NULL,
+                       reviewed_at=NULL,updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND interview_id=? AND (?=1 OR generation_status<>'succeeded' OR fallback=1)""",
+                (*values, evaluation_agent_id, evaluation_id, interview["id"], int(force and not evaluation["fallback"])))
+        else:
+            written = db.execute(
+                """INSERT INTO interview_evaluations (
+                     id,interview_id,message_id,agent_id,score,strengths,issues,suggestions,
+                     dimension_scores,dimension_evidence,provider,model,prompt_version,generation_status,
+                     generation_error,fallback,generated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+                (evaluation_id, interview["id"], message["id"], evaluation_agent_id, *values))
+        changed = written.rowcount > 0
+        written.close()
+        if changed and not evaluation["fallback"]:
+            db.execute("UPDATE interview_sessions SET evaluation_revision=evaluation_revision+1 WHERE id=?",
+                       (interview["id"],)).close()
+            current = find_interview_by_user_id(interview["id"], user["id"])
+            if current["status"] == "completed":
+                queue_report_locked(interview["id"], user)
+        db.execute("UPDATE interview_sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
+                   (interview["id"], user["id"])).close()
     return {"evaluation": find_evaluation_by_id(interview["id"], evaluation_id)}
 
 
@@ -3955,50 +4018,113 @@ def list_evaluations(interview_id: str, user: dict = Depends(require_auth)):
 
 @app.post("/api/interviews/{interview_id}/report", status_code=201)
 def create_report(interview_id: str, response: Response, body: dict | None = None, user: dict = Depends(require_auth)):
+    with locked_session(interview_id, user["id"]) as session:
+        if not session:
+            raise error(404, "面试不存在。")
+        if session["status"] != "completed":
+            raise error(409, "请先结束面试，再生成报告。")
+        had_report = find_report_by_interview_id(interview_id, user["id"]) is not None
+        task = queue_report_locked(interview_id, user)
+        existing = find_report_by_interview_id(interview_id, user["id"])
+        token = generation_tasks.claim_locked(task, retry_failed=True,
+            retry_completed=existing["generation_status"] in {"failed", "degraded", "pending_retry", "queued"})
+        if not token:
+            response.status_code = 200
+            return {"report": existing}
+        db.execute("UPDATE interview_reports SET generation_status='queued' WHERE interview_id=?",
+                   (interview_id,)).close()
+    response.status_code = 200 if had_report else 201
+    return {"report": execute_report_task(task["id"], token, user)}
+
+
+def queue_report_locked(interview_id, user):
+    """在同一把会话锁内取得评分集合及其版本快照。"""
     interview = find_interview_by_user_id(interview_id, user["id"])
-    if not interview:
-        raise error(404, "面试不存在。")
-    if interview["status"] != "completed":
-        raise error(409, "请先结束面试，再生成报告。")
+    revision = one("SELECT evaluation_revision FROM interview_sessions WHERE id=?", (interview_id,))["evaluation_revision"]
     agents = list_agents_by_interview_id(interview["id"])
     messages = list_messages_by_interview_id(interview["id"])
     evaluations = list_evaluations_by_interview_id(interview["id"])
     existing = find_report_by_interview_id(interview["id"], user["id"])
-    report_id = existing["id"] if existing else str(uuid4())
+    if not existing:
+        insert_queued_report(interview_id, user)
     turns = all_rows(
         "SELECT agent_id, action, decision_json FROM interview_turns "
         "WHERE interview_id = ? AND action IN ('switch_agent', 'finish_interview')",
         (interview["id"],),
     )
     local_report = build_scored_report(interview, agents, messages, evaluations, turns)
-    if local_report.get("generation_status") == "insufficient_evidence":
-        report = local_report
-    else:
+    task = generation_tasks.enqueue_locked(interview_id, "report", str(revision), {
+        "interview": interview, "agents": agents, "local_report": local_report,
+    }, revision)
+    if existing and existing.get("source_revision") != revision:
+        db.execute("UPDATE interview_reports SET generation_status='queued',generation_error=NULL WHERE id=?",
+                   (existing["id"],)).close()
+    return task
+
+
+def execute_report_task(task_id, token, user):
+    task = generation_tasks.task_by_id(task_id)
+    interview_id = task["interview_id"]
+    snapshot = json.loads(task["input_json"])
+    local_report = snapshot["local_report"]
+    revision = task["input_revision"]
+    try:
+        with locked_session(interview_id, user["id"]) as session:
+            if not session or not generation_tasks.owns_locked(task_id, token):
+                return find_report_by_interview_id(interview_id, user["id"])
+            current = one("SELECT evaluation_revision FROM interview_sessions WHERE id=?", (interview_id,))
+            if current["evaluation_revision"] != revision:
+                generation_tasks.finish_locked(task_id, token, {"reason": "scoring_revision_changed"}, "superseded")
+                queue_report_locked(interview_id, user)
+                return find_report_by_interview_id(interview_id, user["id"])
+        if local_report.get("generation_status") == "insufficient_evidence":
+            report = local_report
+        else:
+            try:
+                report = generate_ai_report(interview=snapshot["interview"], agents=snapshot["agents"],
+                    fallback_report=local_report, resume_analysis=resume_analysis_for_prompt(user, cached_only=True))
+            except AiEvaluationError as exc:
+                report = {**local_report, "provider": "local", "model": "rules-v1",
+                          "prompt_version": REPORT_PROMPT_VERSION, "fallback": True,
+                          "generation_error": str(exc)}
+        with locked_session(interview_id, user["id"]) as session:
+            if not session:
+                return None
+            if not generation_tasks.owns_locked(task_id, token):
+                return find_report_by_interview_id(interview_id, user["id"])
+            current = one("SELECT evaluation_revision FROM interview_sessions WHERE id=?", (interview_id,))
+            if current["evaluation_revision"] != revision:
+                generation_tasks.finish_locked(task_id, token, report, "superseded")
+                queue_report_locked(interview_id, user)
+                return find_report_by_interview_id(interview_id, user["id"])
+            result = publish_report_snapshot(snapshot["interview"], user, local_report, report, revision)
+            if not generation_tasks.finish_locked(task_id, token, report):
+                raise error(409, "报告任务已过期，本次结果未发布。")
         try:
-            report = generate_ai_report(
-                interview=interview,
-                agents=agents,
-                fallback_report=local_report,
-                resume_analysis=resume_analysis_for_prompt(user),
-            )
-        except AiEvaluationError as exc:
-            report = {
-                **local_report,
-                "provider": "local",
-                "model": "rules-v1",
-                "prompt_version": REPORT_PROMPT_VERSION,
-                "fallback": True,
-                "generation_error": str(exc),
-            }
+            refresh_user_skill_stats(user["id"])
+        except Exception as exc:
+            print(f"Report saved; skill-stat refresh deferred: {type(exc).__name__}", flush=True)
+        return result
+    except Exception as exc:
+        with locked_session(interview_id, user["id"]):
+            if generation_tasks.finish_locked(task_id, token, {}, "failed", type(exc).__name__):
+                db.execute("""UPDATE interview_reports SET generation_status='failed',generation_error=?
+                    WHERE interview_id=? AND generation_status='queued'
+                    AND EXISTS (SELECT 1 FROM interview_sessions WHERE id=? AND evaluation_revision=?)""",
+                    (type(exc).__name__, interview_id, interview_id, revision)).close()
+        raise
+
+
+def publish_report_snapshot(interview, user, local_report, report, revision):
+    existing = find_report_by_interview_id(interview["id"], user["id"])
+    report_id = existing["id"] if existing else str(uuid4())
     generation_status = report.get("generation_status") or ("degraded" if report.get("fallback") else "succeeded")
 
     if existing:
-        response.status_code = 200
-        # 摘要调用可能较慢；较早生成的部分报告不能覆盖补评后覆盖更完整的报告。
         db.execute(
             """
             UPDATE interview_reports
-            SET scored_answer_count = ?, answer_count = ?, total_score = ?, grade = ?, pass_recommendation = ?, ability_radar = ?,
+            SET source_revision = ?, scored_answer_count = ?, answer_count = ?, total_score = ?, grade = ?, pass_recommendation = ?, ability_radar = ?,
                 agent_feedback = ?, timeline_review = ?, summary = ?, suggestions = ?,
                 provider = ?, model = ?, prompt_version = ?, generation_status = ?,
                 generation_error = ?, fallback = ?,
@@ -4006,10 +4132,10 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
                 reviewed_by = NULL, reviewed_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND user_id = ?
-              AND (generation_status = 'queued' OR scored_answer_count IS NULL OR scored_answer_count <= ?)
+              AND EXISTS (SELECT 1 FROM interview_sessions WHERE id = ? AND evaluation_revision = ?)
             """,
             (
-                local_report["scored_answer_count"], local_report["answer_count"],
+                revision, local_report["scored_answer_count"], local_report["answer_count"],
                 report["total_score"],
                 report["grade"],
                 report["pass_recommendation"],
@@ -4026,23 +4152,24 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
                 1 if report.get("fallback") else 0,
                 report_id,
                 user["id"],
-                local_report["scored_answer_count"],
+                interview["id"], revision,
             ),
         )
     else:
         db.execute(
             """
             INSERT INTO interview_reports (
-              id, user_id, interview_id, scored_answer_count, answer_count, total_score, grade, pass_recommendation,
+              id, user_id, interview_id, source_revision, scored_answer_count, answer_count, total_score, grade, pass_recommendation,
               ability_radar, agent_feedback, timeline_review, summary, suggestions,
               provider, model, prompt_version, generation_status, generation_error, fallback, generated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 report_id,
                 user["id"],
                 interview["id"],
+                revision,
                 local_report["scored_answer_count"], local_report["answer_count"],
                 report["total_score"],
                 report["grade"],
@@ -4060,9 +4187,7 @@ def create_report(interview_id: str, response: Response, body: dict | None = Non
                 1 if report.get("fallback") else 0,
             ),
         )
-    db.commit()
-    refresh_user_skill_stats(user["id"])
-    return {"report": find_report_by_id(report_id, user["id"])}
+    return find_report_by_id(report_id, user["id"])
 
 
 @app.get("/api/interviews/{interview_id}/report")
@@ -4089,7 +4214,10 @@ def _download_json_value(value: Any, fallback: Any) -> Any:
 
 def _download_markdown_text(value: Any, fallback: str = "—") -> str:
     text = str(value or "").strip()
-    return text or fallback
+    if not text:
+        return fallback
+    text = html.escape(text, quote=False)
+    return re.sub(r"([\\`*_{}\[\]()#+.!|~=-])", r"\\\1", text)
 
 
 def build_report_markdown(report: dict, candidate_name: str) -> str:
@@ -4132,11 +4260,11 @@ def build_report_markdown(report: dict, candidate_name: str) -> str:
     if isinstance(ability_radar, dict) and ability_radar:
         lines.extend(["", "## 能力评分", "", "| 维度 | 分数 |", "| --- | ---: |"])
         for dimension, score in ability_radar.items():
-            safe_dimension = _download_markdown_text(dimension).replace("|", "\\|")
+            safe_dimension = _download_markdown_text(dimension)
             lines.append(f"| {safe_dimension} | {int(score or 0)}/100 |")
     if suggestions:
         lines.extend(["", "## 训练建议", ""])
-        lines.extend(f"- {item}" for item in suggestions)
+        lines.extend(f"- {_download_markdown_text(item)}" for item in suggestions)
     if isinstance(agent_feedback, list) and agent_feedback:
         lines.extend(["", "## 面试官综合评价", ""])
         for item in agent_feedback:
@@ -4149,7 +4277,7 @@ def build_report_markdown(report: dict, candidate_name: str) -> str:
                 "",
             ])
             if item.get("round_summary"):
-                lines.extend([str(item["round_summary"]), ""])
+                lines.extend([_download_markdown_text(item["round_summary"]), ""])
     answers = [item for item in timeline_review if isinstance(item, dict) and item.get("sender_type") == "candidate"] if isinstance(timeline_review, list) else []
     if answers:
         lines.extend(["", "## 逐题问答复盘", ""])
@@ -4175,7 +4303,7 @@ def build_report_markdown(report: dict, candidate_name: str) -> str:
             if isinstance(evidence, dict) and isinstance(dimensions, dict):
                 for key, quote in evidence.items():
                     if key in DIMENSION_LABELS and key in dimensions and quote:
-                        lines.append(f"- {DIMENSION_LABELS[key]} {dimensions[key]} 分，作答依据：“{quote}”")
+                        lines.append(f"- {DIMENSION_LABELS[key]} {dimensions[key]} 分，作答依据：“{_download_markdown_text(quote)}”")
                 lines.append("")
     return "\n".join(lines).strip() + "\n"
 
@@ -4226,7 +4354,7 @@ def get_dimensions(user: dict = Depends(require_auth)):
     refresh_user_skill_stats(user["id"])
     return {"dimensions": build_user_dimension_stats(user["id"])}
 
-# ==================== Alibaba Cloud RTC ====================
+# ==================== 阿里云实时音视频 ====================
 
 from .rtc_ai_agent_service import (
     RtcAiAgentConfigurationError,
@@ -4352,8 +4480,8 @@ def create_interview_rtc_token(
     if interview["status"] == "completed":
         raise error(409, "已完成的面试不能开启 RTC 通话。")
 
-    # Channel and user IDs are derived server-side so an authenticated client
-    # cannot request a token for an arbitrary RTC room or impersonate another user.
+    # 频道和用户标识由服务端生成，防止已登录客户端
+    # 为任意实时音视频房间申请令牌或冒充其他用户。
     rtc_session = ensure_interview_rtc_session(interview, user["id"])
 
     try:
@@ -4416,8 +4544,8 @@ def start_interview_rtc_ai_agent(
     rtc_session = ensure_interview_rtc_session(interview, user["id"])
     role_id = (current_question or {}).get("agent_id")
     if rtc_session["state"] in {"starting", "active"} and rtc_session.get("round_agent_id") != role_id:
-        # The browser may have closed after committing a role change but before
-        # stopping its old voice task. Fence the stop to that exact task.
+        # 浏览器可能在提交角色切换后、停止旧语音任务前关闭；
+        # 因此停止操作必须绑定到那一个旧任务。
         rtc_session, should_stop = request_rtc_stop(rtc_session["id"], rtc_session["current_task_id"])
         if should_stop:
             try:
@@ -4468,9 +4596,9 @@ def start_interview_rtc_ai_agent(
             prompt=rtc_prompt,
         )
     except HTTPException:
-        # Prompt preparation failed before Alibaba Cloud received StartAgent,
-        # so this task can be released immediately instead of being reconciled
-        # as an ambiguous provider timeout.
+        # 阿里云收到 StartAgent 前，提示词准备已经失败，
+        # 因此可直接释放本次任务，无需将其当作
+        # 调用结果不确定的供应商超时进行核对。
         fail_rtc_start(rtc_session["id"], task_id, "RTC prompt preparation failed")
         raise
     except RtcAiAgentConfigurationError as exc:
@@ -4482,16 +4610,16 @@ def start_interview_rtc_ai_agent(
         print(f"Alibaba RTC AI Agent input error: {exc}", flush=True)
         raise error(500, "RTC AI 智能体参数无效，请联系管理员。") from exc
     except Exception as exc:
-        # A provider rejection is definitive, unlike a transport timeout.
+        # 供应商明确拒绝属于确定结果，与传输超时不同。
         provider_data = getattr(exc, "data", None)
         provider_status = provider_data.get("statusCode") if isinstance(provider_data, dict) else None
         if str(provider_status).isdigit() and 400 <= int(provider_status) < 500 and int(provider_status) != 408:
             fail_rtc_start(rtc_session["id"], task_id, f"{type(exc).__name__}: {exc}")
             print(f"Alibaba RTC AI Agent start rejected: {type(exc).__name__}: {exc}", flush=True)
             raise error(502, "语音服务未能启动，请稍后重试；若持续失败请联系管理员检查语音配置。") from exc
-        # A transport timeout is ambiguous: Alibaba Cloud may have accepted the
-        # task even though this process did not receive the response. Keep the
-        # task fenced as starting and let GetAgent reconcile it.
+        # 传输超时不能确定远端结果：阿里云可能已接收任务，
+        # 但本进程没有收到响应。因此继续将任务保持在
+        # 启动中状态，由 GetAgent 查询核对远端结果。
         defer_rtc_start_reconciliation(rtc_session["id"], task_id, f"{type(exc).__name__}: {exc}")
         print(f"Alibaba RTC AI Agent start failed: {type(exc).__name__}: {exc}", flush=True)
         raise error(502, "RTC AI 智能体启动结果待确认，服务端正在自动核对。") from exc
@@ -4610,10 +4738,10 @@ def _rtc_now_for(value: datetime | None = None) -> datetime:
     if value is not None and value.tzinfo is not None:
         return datetime.now(value.tzinfo)
     if DB_ENGINE == "mysql":
-        # MySQL DATETIME/CURRENT_TIMESTAMP values follow the database server's
-        # local clock and arrive without timezone information.
+        # MySQL 的 DATETIME 和 CURRENT_TIMESTAMP 使用数据库服务器
+        # 的本地时钟，返回值不带时区信息。
         return datetime.now()
-    # SQLite CURRENT_TIMESTAMP is UTC but is likewise stored without tzinfo.
+    # SQLite 的 CURRENT_TIMESTAMP 使用世界协调时，但同样不保存时区信息。
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
@@ -4623,15 +4751,15 @@ def _rtc_is_older_than(value: Any, seconds: int) -> bool:
 
 
 def rtc_start_ready_for_recovery(session: dict[str, Any]) -> bool:
-    # Deferred starts have already returned an ambiguous transport error.
-    # Store-generated retry timestamps are UTC for both database engines.
+    # 延后处理的启动任务已经遇到结果不确定的传输错误。
+    # 存储层生成的重试时间，在两种数据库引擎中均使用世界协调时。
     retry_at = _rtc_datetime(session.get("next_retry_at"))
     if retry_at is not None:
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
         return retry_at <= datetime.now(timezone.utc)
-    # Never interpret GetAgent's "not found" while StartAgent is still within
-    # its connection/read timeout budget. Allow time for local preparation too.
+    # StartAgent 仍处于连接和读取超时预算内时，不能把
+    # GetAgent 的“未找到”当成最终结果，还要预留本地准备时间。
     connect_ms = bounded_env_int("RTC_AI_AGENT_CONNECT_TIMEOUT_MS", 10_000, 1_000, 120_000)
     read_ms = bounded_env_int("RTC_AI_AGENT_READ_TIMEOUT_MS", 60_000, 5_000, 180_000)
     timeout = max(RTC_SESSION_START_TIMEOUT_SECONDS, (connect_ms + read_ms) / 1000 + 15)
@@ -4716,6 +4844,41 @@ def reconcile_rtc_sessions_once() -> int:
 
 
 rtc_recovery_task: asyncio.Task | None = None
+generation_recovery_task: asyncio.Task | None = None
+
+
+def recover_generation_tasks_once():
+    # 同时兼容旧版排队报告占位记录与本版本创建的任务。
+    for row in all_rows("""SELECT reports.interview_id,reports.user_id FROM interview_reports AS reports
+                           WHERE reports.generation_status='queued' LIMIT 20"""):
+        with locked_session(row["interview_id"], row["user_id"]) as session:
+            if session and session["status"] == "completed":
+                queue_report_locked(row["interview_id"], {"id": row["user_id"]})
+    for task in generation_tasks.recoverable_tasks():
+        user = {"id": task["user_id"]}
+        with locked_session(task["interview_id"], user["id"]) as session:
+            if not session:
+                continue
+            fresh = generation_tasks.task_by_id(task["id"])
+            token = generation_tasks.claim_locked(fresh)
+        if not token:
+            continue
+        try:
+            if task["task_type"] == "report":
+                execute_report_task(task["id"], token, user)
+            elif task["task_type"] == "followup":
+                execute_turn_task(task["id"], token, user)
+        except Exception as exc:
+            print(f"Generation recovery task failed: {type(exc).__name__}", flush=True)
+
+
+async def generation_recovery_loop():
+    while True:
+        try:
+            await run_in_threadpool(recover_generation_tasks_once)
+        except Exception as exc:
+            print(f"Generation recovery deferred: {type(exc).__name__}", flush=True)
+        await asyncio.sleep(2)
 
 
 async def rtc_recovery_loop() -> None:

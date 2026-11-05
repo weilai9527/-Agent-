@@ -7,7 +7,8 @@ import textwrap
 
 def test_policy_round_trip_permissions_and_all_prompt_paths(tmp_path):
     environment = os.environ.copy()
-    environment.update({"APP_ENV": "test", "DB_ENGINE": "sqlite", "SQLITE_PATH": str(tmp_path / "policy.sqlite"), "ADMIN_COOKIE_SECURE": "false", "PYTHONIOENCODING": "utf-8"})
+    environment.update({"APP_ENV": "test", "DB_ENGINE": "sqlite", "SQLITE_PATH": str(tmp_path / "policy.sqlite"), "ADMIN_COOKIE_SECURE": "false", "PYTHONIOENCODING": "utf-8",
+                        "ADMIN_MASTER_EMAIL": "policy-admin@example.test", "ADMIN_MASTER_PASSWORD": "SyntheticAdmin123!"})
     script = textwrap.dedent('''
         from copy import deepcopy
         from fastapi.testclient import TestClient
@@ -17,7 +18,7 @@ def test_policy_round_trip_permissions_and_all_prompt_paths(tmp_path):
         from backend.src.kimi_followup import _build_messages, generate_opening_question, FollowupProvider
         from shared.interviewer_policy import ensure_interviewer_policy_schema, load_snapshot
 
-        # Schema initialization is repeatable for shared candidate/admin startup.
+        # 候选人端和管理端共同启动时，共享表初始化必须可重复执行。
         ensure_interviewer_policy_schema(main.db, "sqlite")
         root = TestClient(admin.app)
         actor = {"id": "root", "email": admin.MASTER_ADMIN_EMAIL, "role": "super_admin"}
@@ -62,7 +63,7 @@ def test_policy_round_trip_permissions_and_all_prompt_paths(tmp_path):
         assert student.post("/api/interviews", json={"target_role": "Test", "interviewer_strategy": malicious}).status_code == 400
         assert student.post("/api/interviews", json={"target_role": "Test", "interviewer_strategy": {**selection, "roles": {}}}).status_code == 400
 
-        # A later policy change cannot rewrite a created session or its reconnection.
+        # 后续策略修改不能改写已创建会话的策略，也不能影响其重连。
         policy["defaults"]["style"] = "友好引导"
         policy["roles"]["technical"]["focus"] = "管理员后续修改"
         assert root.put("/api/admin/interviewer-policy", headers=origin, json=policy).status_code == 200
@@ -70,7 +71,7 @@ def test_policy_round_trip_permissions_and_all_prompt_paths(tmp_path):
         assert reloaded["interviewer_strategy"] == interview["interviewer_strategy"]
         legacy = {key: value for key, value in reloaded.items() if key != "interviewer_strategy"}
         assert "背景职责 -> 方案取舍" in main.build_realtime_session_config(legacy, agents, [], None)["instructions"]
-        assert "追问优先覆盖：候选人职责" in main.build_rtc_ai_agent_prompt(legacy, agents, [], None)
+        assert "禁止自行生成问题" in main.build_rtc_ai_agent_prompt(legacy, agents, [], None)
         assert "本场固定面试官策略" not in main.build_rtc_ai_agent_prompt(legacy, agents, [], None)
         for active in agents:
             round_agents = [{**agent, "status": "active" if agent["id"] == active["id"] else "pending"} for agent in agents]

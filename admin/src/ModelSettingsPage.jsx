@@ -20,7 +20,7 @@ const fields = {
   reportKimiModel: { label: 'Kimi 文本模型', fallback: 'moonshot-v1-8k' },
   reportKimiBaseUrl: { label: 'Kimi 接入地址', fallback: 'https://api.moonshot.cn/v1' },
   reportDeepseekApiKey: { label: 'DeepSeek API Key', secret: true, configured: 'reportDeepseekApiKeyConfigured', masked: 'reportDeepseekApiKeyMasked' },
-  reportDeepseekModel: { label: 'DeepSeek 文本模型', fallback: 'deepseek-chat' },
+  reportDeepseekModel: { label: 'DeepSeek 文本模型', fallback: 'deepseek-flash' },
   reportDeepseekBaseUrl: { label: 'DeepSeek 接入地址', fallback: 'https://api.deepseek.com' },
   reportCustomApiKey: { label: '自定义服务 API Key', secret: true, configured: 'reportCustomApiKeyConfigured', masked: 'reportCustomApiKeyMasked' },
   reportCustomModel: { label: '自定义服务模型', optional: true },

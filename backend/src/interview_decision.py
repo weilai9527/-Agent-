@@ -1,20 +1,20 @@
-"""Replayable round progression. Evidence describes interview coverage, not a score."""
+"""支持重放的轮次推进逻辑；证据表示考察覆盖情况，不代表评分。"""
 import re
 
 
-# A mention alone can suggest a follow-up. Promotion needs a more specific
-# observation within the same clause, with the original words kept for audit.
-# (display name, mention, observation, local follow-up)
+# 提到某个概念可以作为追问线索；确认覆盖还需要
+# 同一分句中的具体观察，并保留候选人原文供核对。
+# 依次为显示名称、提及规则、具体观察规则、本地追问。
 DIMENSIONS = {
     "background": ("场景", r"业务|用户|目标|场景|问题", r"(为了解决|目标是|场景是|用户需要|业务要求).{4,}", "当时要为哪类用户解决什么具体问题？"),
     "responsibility": ("个人职责", r"负责|主导|亲自|我实现", r"我(?:个人|主要|独立|亲自)?(?:负责|主导|实现|承担|开发)(?:了)?[^，。]{4,}", "在这个例子中，你亲自完成了哪一部分？"),
     "solution": ("实现方案", r"设计|实现|拆分|缓存|接入|改造|方案|采用", r"(?:实现了|拆分为|改造了|接入了|采用了?|设计了|引入了).{4,}", "请具体说说你采用的做法，以及它如何解决当时的问题。"),
-    "tradeoff": ("方案取舍", r"取舍|权衡|成本|选择|放弃|备选|相比", r"(?:为了.{2,}选择|考虑到.{2,}选择|没有选择.{2,}因为|相比.{2,}选择|放弃.{2,}因为|选择.{2,}因为).{2,}", "当时还考虑过哪种做法，为什么最终选择了当前方案？"),
+    "tradeoff": ("方案取舍", r"取舍|权衡|成本|选择|放弃|备选|相比", r"(?:为了.{2,160}选择|考虑到.{2,160}选择|没有选择.{2,160}因为|相比.{2,160}选择|放弃.{2,160}因为|选择.{2,160}因为).{2,}", "当时还考虑过哪种做法，为什么最终选择了当前方案？"),
     "metrics": ("结果验证", r"指标|耗时|延迟|成功率|错误率|提升|降低|降到|缩短|P95|QPS|毫秒", r"(?:实测|测得|测出|压测.{0,10}(?:为|是)|降低了?|提升了?|缩短了?|降[到至]|升[到至]|减少了?).{0,12}?\d{1,10}(?:\.\d{1,4})?\s*(?:%|％|ms|毫秒|秒|小时|分钟|倍|QPS|次/秒)", "你用什么结果判断这项改动有效？"),
-    "risk": ("风险应对", r"风险|故障|异常|回滚|灰度|监控|报警|降级", r"(?:监控了?|回滚到|降级为|灰度到|配置了|设置了).{3,}(?:率|版本|流量|阈值|告警|延迟|报警)|(?:故障时|异常时|失败时).{3,}(?:回滚|降级|隔离)", "如果出现异常，你如何发现并控制影响范围？"),
+    "risk": ("风险应对", r"风险|故障|异常|回滚|灰度|监控|报警|降级", r"(?:监控了?|回滚到|降级为|灰度到|配置了|设置了).{3,160}(?:率|版本|流量|阈值|告警|延迟|报警)|(?:故障时|异常时|失败时).{3,160}(?:回滚|降级|隔离)", "如果出现异常，你如何发现并控制影响范围？"),
     "reflection": ("复盘改进", r"复盘|后来|改进|沉淀|下次", r"(?:复盘后|下次会|后来我|改进了).{4,}", "复盘之后，你具体改变了哪项做法？"),
     "motivation": ("职业动机", r"选择|岗位|希望|职业|看重", r"(?:我看重|我希望|我选择).{4,}", "选择这个岗位时，你最看重的因素是什么？"),
-    "collaboration": ("协作沟通", r"同事|团队|对齐|沟通|分歧|协调", r"(?:我协调|我组织|我与.{2,}对齐|我和.{2,}沟通).{2,}", "请举一个需要和他人达成共识的例子，你当时做了什么？"),
+    "collaboration": ("协作沟通", r"同事|团队|对齐|沟通|分歧|协调", r"(?:我协调|我组织|我与.{2,160}对齐|我和.{2,160}沟通).{2,}", "请举一个需要和他人达成共识的例子，你当时做了什么？"),
 }
 GOALS = {
     "technical": ("background", "responsibility", "solution", "tradeoff", "metrics", "risk"),
@@ -41,8 +41,8 @@ NO_PRACTICE = re.compile(r"没(?:有)?(?:做|学|实践|参与|接触|用|试|�
 UNTRIED = re.compile(r"(?:没(?:有)?|尚未|还未)(?:做|学|实践|参与|接触|试)|正在准备")
 PAST_EVENT = re.compile(r"曾经|之前|当时|实际(?:上|做)|上线后|实测|我(?:们)?[^，。]{0,8}(?:实现了|部署了|采用了|负责过|做过|开发了)")
 PERSONAL_FACT = re.compile(r"(?:我(?:们)?(?:曾经|曾|实际|当时|亲自|已经|主要|独立)?(?:负责|主导|实现|开发|采用|接入|设计|部署|写了|做过|完成)|实测|上线后)")
-# Keep loose clauses together when a trailing qualification could retract
-# the previous claim ("延迟降到300ms，我不确定").
+# 后续限定语可能撤回前文陈述时，不要过早拆散相关分句，
+# 例如“延迟降到300ms，我不确定”。
 CLAIM_BREAK = re.compile(r"[。！？!?；;\n]|(?:但是|但|不过|实际上)|[，,](?=(?:我(?:们)?|实际|当时)?(?:还|并|暂时)?(?:没(?:有)?(?:做|学|参与|用|测)|未(?:做|测|参与)))")
 BASIC_QUESTIONS = {
     "architecture": (
@@ -70,7 +70,7 @@ def _hypothetical_question(question):
 
 
 def contextual_followup(kind, answer, question, asked):
-    """Return one safe, replayable question when a generic probe would assume experience."""
+    """通用追问可能预设候选人有相关经历时，返回一条不作此预设且可重放的问题。"""
     parts = CLAIM_BREAK.split(answer)
     fact = next((c.strip(" ，,") for c in parts if PERSONAL_FACT.search(c)
                  and not (UNCONFIRMED.search(c) or HYPOTHETICAL.search(c))), "")
@@ -83,8 +83,8 @@ def contextual_followup(kind, answer, question, asked):
         probe = f"你提到“{fact[:64]}”，这部分你最熟悉的一个细节是什么？"
         if probe not in asked:
             return "partial_experience", probe
-    # A tentative proposal is still discussable even when the speaker doesn't
-    # know implementation details. An explicit boundary alone calls for a pivot.
+    # 即使候选人不了解实现细节，试探性的方案仍可继续讨论；
+    # 只有明确表达能力或经历边界时，才需要调整考点。
     elif not UNTRIED.search(answer) and (hypothetical or (_hypothetical_question(question) and not NO_PRACTICE.search(answer))):
         if kind == "architecture" and re.search(r"流量|并发", answer):
             proposed = "假设流量突然增加，你想先观察哪个现象来判断哪里开始吃紧？"
@@ -99,7 +99,7 @@ def contextual_followup(kind, answer, question, asked):
 
 
 def _role_answers(messages, agent_id):
-    """Older sessions may have no persisted round or reply ID."""
+    """旧会话可能没有保存轮次归属或所回答问题的标识。"""
     question_owners = {}
     latest_question = {}
     for message in messages:
@@ -121,14 +121,14 @@ def _evidence(answers, goals):
     evidence = {key: {"status": "unseen"} for key in goals}
     for answer in answers:
         for sentence in CLAIM_BREAK.split(answer["content"]):
-            # A qualification either side of a comma can govern the whole claim.
+            # 逗号任意一侧的限定语都可能约束整句陈述。
             prospective = HYPOTHETICAL.search(sentence) or (
                 _hypothetical_question(answer.get("question", "")) and not PAST_EVENT.search(sentence)
             )
             prospective = prospective or NO_PRACTICE.search(sentence)
             uncertain = prospective or UNCONFIRMED.search(sentence)
-            # Reject the discarded implementation, but retain an explicit reason
-            # for discarding it as evidence of a trade-off.
+            # 被否定的实现不作为已实施证据，但应保留
+            # 明确的放弃理由，作为方案取舍的证据。
             tradeoff_uncertain = prospective or UNCONFIRMED.search(sentence.replace("没有选择", ""))
             for raw_clause in re.split(r"[，,]", sentence):
                 clause = raw_clause.strip()
@@ -148,8 +148,8 @@ def _handoff(next_agent, evidence, interview):
     confirmed = [{"dimension": key, **item} for key, item in evidence.items() if item["status"] == "supported"]
     remaining = [key for key, item in evidence.items() if item["status"] != "supported"]
     kind = next_agent.get("agent_type")
-    # Prefer an engineering detail for architecture and an individual action
-    # for HR. Only quote the candidate, never fill in a missing project fact.
+    # 架构轮优先引用工程细节，人事轮优先引用个人行动；
+    # 只引用候选人原话，不补写缺失的项目事实。
     priorities = ("solution", "metrics", "risk") if kind == "architecture" else ("collaboration", "responsibility", "reflection", "solution")
     quote = next((evidence[key]["quote"] for key in priorities if key in evidence and evidence[key]["status"] == "supported"),
                  confirmed[0]["quote"] if confirmed else "")
@@ -179,8 +179,8 @@ def decide_turn(*, interview, agents, active_agent, messages, answer):
     enough = kind != "hr" and count >= minimum and supported >= 4
     if not enough and count < maximum:
         asked = {m.get("content") for m in messages if m.get("sender_type") == "agent" and m.get("agent_id") == active_agent["id"]}
-        # Clarify a mention first, then seek an uncovered goal. Skip questions
-        # already used when another suitable prompt is available.
+        # 先澄清已提及的内容，再寻找尚未覆盖的目标；有合适替代问题时，
+        # 跳过已经问过的问题。
         ranked = sorted(GOALS[kind], key=lambda key: {"mentioned": 0, "unseen": 1, "supported": 2}[evidence[key]["status"]])
         question = next((DIMENSIONS[key][3] for key in ranked if DIMENSIONS[key][3] not in asked),
                         "还有哪些事实能补充说明你在这段经历中的判断？")

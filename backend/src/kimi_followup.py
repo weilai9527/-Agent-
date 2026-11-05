@@ -6,6 +6,7 @@ import re
 import time
 from dataclasses import dataclass, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -65,7 +66,7 @@ def _provider_config(name: str) -> FollowupProvider | None:
             name="deepseek",
             api_key=api_key,
             base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
-            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-flash"),
             timeout=float(os.environ.get("DEEPSEEK_TIMEOUT", "20")),
             temperature=float(os.environ.get("DEEPSEEK_TEMPERATURE", "0.55")),
             max_tokens=int(os.environ.get("DEEPSEEK_MAX_TOKENS", "160")),
@@ -138,7 +139,7 @@ def get_task_providers(
     retries_env: str | None = None,
     default_retries: int | None = None,
 ) -> list[FollowupProvider]:
-    """Return configured OpenAI-compatible providers with task-specific limits."""
+    """返回已配置且兼容 OpenAI 协议的模型供应商，并应用当前任务的限制。"""
     reload_runtime_ai_env()
     order = os.environ.get(order_env) or os.environ.get(
         "FOLLOWUP_PROVIDER_ORDER", "kimi,deepseek,qwen,openai,custom"
@@ -168,7 +169,7 @@ def get_task_providers(
 
 
 def call_provider_json(provider: FollowupProvider, messages: list[dict[str, str]]) -> dict[str, Any]:
-    """Call a configured provider and require one JSON object as its response."""
+    """调用已配置的供应商，并要求响应为单个 JSON 对象。"""
     return _extract_json_object(_call_provider_content(provider, messages, json_mode=True))
 
 
@@ -208,8 +209,8 @@ def format_resume_analysis(resume_analysis: dict[str, Any] | None) -> str:
     return "\n".join(part for part in parts if part.strip())
 
 
-# Keep the internal name for the existing prompt builders while exposing one
-# canonical formatter to the realtime interview paths.
+# 保留既有提示词构造函数使用的内部名称，
+# 同时为实时面试流程提供统一的格式化入口。
 _format_resume_analysis = format_resume_analysis
 
 
@@ -287,20 +288,8 @@ def _build_messages(
 
 
 def _response_error_detail(response: httpx.Response) -> str:
-    """Return a bounded provider error without exposing credentials or full payloads."""
-    request_id = response.headers.get("x-request-id") or response.headers.get("request-id") or ""
-    try:
-        body = response.json()
-        detail = json.dumps(body, ensure_ascii=False)
-    except (ValueError, json.JSONDecodeError):
-        detail = response.text
-    detail = re.sub(r"\s+", " ", str(detail or "")).strip()[:500]
-    parts = [f"HTTP {response.status_code}"]
-    if request_id:
-        parts.append(f"request_id={request_id}")
-    if detail:
-        parts.append(detail)
-    return " | ".join(parts)
+    """供应商错误正文和响应头可能回显密钥或请求内容，仅保留状态码。"""
+    return f"HTTP {response.status_code}"
 
 
 def _call_provider_content(
@@ -320,6 +309,10 @@ def _call_provider_content(
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    if (provider.name == "deepseek" and urlsplit(provider.base_url).hostname == "api.deepseek.com"
+            and provider.model in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"}):
+        # 面试使用短回复，避免默认思考模式耗尽正文输出预算。
+        payload["thinking"] = {"type": "disabled"}
     last_error: Exception | None = None
 
     for attempt in range(retries + 1):
@@ -383,7 +376,7 @@ def generate_kimi_followup(
     if turn_decision:
         scoped_question = turn_decision["question"] if turn_decision.get("followup_mode") else None
     else:
-        # The legacy follow-up endpoint has no persisted turn decision.
+        # 旧版追问接口没有已保存的轮次决策。
         agent = active_agent or {}
         asked = [str(m.get("content") or "") for m in messages if m.get("sender_type") == "agent"
                  and m.get("message_type") in {"question", "follow_up"} and m.get("agent_id") == agent.get("id")]
@@ -426,7 +419,7 @@ def _normalize_list(value: Any, limit: int = 8) -> list[str]:
 
 
 def resume_analysis_source_text(profile: dict[str, Any] | None) -> str:
-    """Use the current uploaded resume as the authoritative analysis source."""
+    """以当前上传的简历作为分析的权威数据源。"""
     if not profile:
         return ""
     resume_text = str(profile.get("resume_text") or "").strip()

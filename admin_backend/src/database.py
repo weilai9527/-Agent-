@@ -7,8 +7,8 @@ import re
 import sqlite3
 import threading
 
-from . import env  # noqa: F401
-from backend.src import database as candidate_database  # noqa: F401
+from . import env  # noqa: F401  # 导入用于初始化配置或共享数据库。
+from backend.src import database as candidate_database  # noqa: F401  # 导入用于初始化配置或共享数据库。
 
 
 ADMIN_BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -214,7 +214,7 @@ def _column_exists(table_name: str, column_name: str) -> bool:
 
 
 def ensure_mysql_cross_schema_collations() -> None:
-    """Align columns joined to tables owned by the candidate backend."""
+    """统一与候选人后端共享表进行关联的字段排序规则。"""
     if DB_ENGINE != "mysql":
         return
 
@@ -461,7 +461,7 @@ def ensure_admin_schema() -> None:
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               INDEX idx_admin_perm_requests_user (admin_user_id),
               CONSTRAINT fk_admin_perm_request_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS campus_colleges (
@@ -548,9 +548,9 @@ def ensure_admin_schema() -> None:
 
     _migrate_admin_users()
     _migrate_student_registrations()
-    # Student accounts live in the candidate backend's users table.  The admin
-    # service also applies these additive migrations so either service can be
-    # started first during deployment.
+    # 学生账号保存在候选人后端的 users 表中。管理端
+    # 也执行这些增量迁移，因此部署时两个服务
+    # 可以按任意先后顺序启动。
     if _table_exists("users"):
         user_columns = [
             ("student_no", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(80) NULL"),

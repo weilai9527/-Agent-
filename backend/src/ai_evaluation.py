@@ -114,6 +114,7 @@ def _call_with_fallback(
     messages: list[dict[str, str]],
     *,
     max_attempts: int = 2,
+    validate=None,
 ) -> tuple[dict[str, Any], Any, bool, str | None]:
     if not providers:
         raise AiEvaluationError("未配置可用的 AI 评分供应商。")
@@ -121,8 +122,11 @@ def _call_with_fallback(
     bounded_providers = providers[:max(1, min(5, max_attempts))]
     for index, provider in enumerate(bounded_providers):
         try:
-            return call_provider_json(provider, messages), provider, index > 0, " | ".join(errors) or None
-        except (httpx.HTTPError, json.JSONDecodeError, ValueError, IndexError, KeyError) as exc:
+            raw = call_provider_json(provider, messages)
+            if validate is not None:
+                validate(raw)
+            return raw, provider, index > 0, " | ".join(errors) or None
+        except (httpx.HTTPError, json.JSONDecodeError, ValueError, IndexError, KeyError, TypeError, AttributeError, AiEvaluationError) as exc:
             errors.append(f"{provider.name}: {exc}")
     raise AiEvaluationError("所有 AI 供应商均调用失败：" + " | ".join(errors))
 
@@ -172,13 +176,14 @@ def generate_ai_evaluation(
         ),
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_attempts=int(os.environ.get("AI_EVALUATION_PROVIDER_ATTEMPTS", "1")),
+        validate=lambda raw: normalize_evaluation(raw, answer=answer),
     )
     return {
         **normalize_evaluation(raw, answer=answer),
         "provider": provider.name,
         "model": provider.model,
         "prompt_version": EVALUATION_PROMPT_VERSION,
-        # A secondary AI provider is still an AI result, not a local-rule fallback.
+        # 备用模型的结果仍属于模型评分，不应标记为本地规则降级。
         "fallback": False,
         "provider_fallback": fallback,
         "generation_error": prior_error,
@@ -229,8 +234,8 @@ def generate_ai_report(
         "provider": provider.name,
         "model": provider.model,
         "prompt_version": REPORT_PROMPT_VERSION,
-        # Switching from the primary provider to another AI provider must not be
-        # presented as a local rules fallback in the report UI.
+        # 从主模型切换到其他模型后，
+        # 报告界面不能将其显示为本地规则降级。
         "fallback": False,
         "provider_fallback": fallback,
         "generation_error": prior_error,

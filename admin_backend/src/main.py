@@ -23,6 +23,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from .database import DB_ENGINE, all_rows, db, ensure_admin_schema, get_database_path, one
 from . import database as database_module
+from backend.src.interview_tasks import report_review_token
 from shared.security_logging import (
     RequestLoggingMiddleware, SecurityAuditStore, audit_context, bind_actor, list_security_events,
 )
@@ -316,13 +317,13 @@ def _ensure_student_in_scope(admin: dict, user_id: str) -> None:
 
 
 def student_scope_sql(scope: list[dict[str, str]] | None, user_column: str) -> tuple[str, tuple]:
-    """Build a parameterized enrollment boundary; column names are internal constants."""
+    """用参数化查询建立学生归属边界，列名仅使用内部常量。"""
     if scope is None:
         return "1 = 1", ()
     clauses, params = [], []
     for entry in scope:
         if not isinstance(entry, dict) or not entry.get("college"):
-            continue  # Malformed legacy scopes must never grant all-school access.
+            continue  # 格式损坏的旧权限范围不能被解释为全校访问权限。
         terms = []
         for key, column in (("college", "sp.college_id"), ("program", "sc.program_id"), ("class", "sc.id")):
             if entry.get(key):
@@ -338,7 +339,7 @@ def student_scope_sql(scope: list[dict[str, str]] | None, user_column: str) -> t
 
 
 def registration_scope_checker(admin: dict):
-    """Existing accounts use actual enrollment; pending names must resolve uniquely."""
+    """已有账号按实际学籍归属匹配，待激活学生的名称必须能够唯一定位。"""
     scope = admin_student_scope(admin)
     if scope is None:
         return lambda row, destination=False: True
@@ -721,7 +722,7 @@ def build_settings() -> dict[str, Any]:
             field: value
             for prefix, env_prefix, default_model, default_url in (
                 ("reportKimi", "KIMI", "moonshot-v1-8k", "https://api.moonshot.cn/v1"),
-                ("reportDeepseek", "DEEPSEEK", "deepseek-chat", "https://api.deepseek.com"),
+                ("reportDeepseek", "DEEPSEEK", "deepseek-flash", "https://api.deepseek.com"),
                 ("reportCustom", "AI", "", ""),
             )
             for key in [configured_secret(backend_env, f"{env_prefix}_API_KEY", *(["MOONSHOT_API_KEY"] if env_prefix == "KIMI" else []))]
@@ -1144,7 +1145,7 @@ def list_candidates(scope: list[dict[str, str]] | None = None) -> list[dict[str,
 
 
 def dashboard_roster(scope: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
-    """Minimal current roster for workbench tasks, filtered before returning data."""
+    """返回工作台所需的最小学生名册，并在返回前完成范围筛选。"""
     rows = all_rows("""
         SELECT reg.id, reg.name, reg.student_no, reg.college, reg.class_name,
                reg.gender, reg.counselor, reg.created_at,
@@ -1453,6 +1454,7 @@ def get_report_detail(report_id: str) -> dict[str, Any]:
     )
     if not report:
         raise error(404, "报告不存在。")
+    report["review_token"] = report_review_token(report)
     report["total_score"] = report.pop("visible_score")
     return report
 
@@ -1556,7 +1558,7 @@ def _student_growth_status(row: dict[str, Any]) -> str:
 
 
 def list_campus_students() -> list[dict[str, Any]]:
-    # The overview filters permissions and calculates totals from this full list.
+    # 概览基于这份完整列表筛选权限并计算总数。
     rows = all_rows(
         f"""
         SELECT users.id, users.email, users.name, users.status, users.last_login_at,
@@ -2500,7 +2502,7 @@ def split_registration_class_name(class_name: str) -> tuple[str | None, str]:
     if not match:
         return None, raw
     program = body[match.end():].strip("-_ ")
-    # The final number identifies the class, not the academic program.
+    # 末尾数字表示班级，不表示专业。
     program = re.sub(r"\d+\s*$", "", program).strip("-_ ")
     if not program or re.search(r"[0-9]", program) or re.fullmatch(r"[0-9A-Za-z_-]+", program):
         return None, raw
@@ -2533,7 +2535,7 @@ def assign_registration_to_class(user_id: str, student_no: str, college: str | N
         (college, class_name),
     )
     if len(matches) > 1:
-        return  # A repeated class name across programs needs an explicit choice.
+        return  # 不同专业中存在同名班级时，必须明确选择所属专业。
     if matches:
         upsert_student_enrollment(
             user_id,
@@ -4259,20 +4261,24 @@ def interview_detail(request: Request, interview_id: str, admin: dict = Depends(
     result = get_interview_detail(interview_id)
     if is_super_admin(admin) or "viewReports" in admin_permissions(admin):
         result["reviewReport"] = one(
-            """SELECT id, review_status
+            """SELECT *
                FROM interview_reports
                WHERE interview_id = ?
                ORDER BY created_at DESC, id DESC
                LIMIT 1""",
             (interview_id,),
         )
+        if result["reviewReport"]:
+            raw_report = result["reviewReport"]
+            result["reviewReport"] = {key: raw_report.get(key) for key in ("id", "review_status", "source_revision")}
+            result["reviewReport"]["review_token"] = report_review_token(raw_report)
     record_audit(request, admin, "interview.view", target_type="interview", target_id=interview_id, summary="查看面试详情")
     return result
 
 
 @app.get("/api/admin/reports/{report_id}")
 def report_detail(request: Request, report_id: str, admin: dict = Depends(require_permission("viewReports"))):
-    owner = one("SELECT user_id FROM interview_reports WHERE id = ?", (report_id,))
+    owner = one("SELECT user_id,interview_id FROM interview_reports WHERE id = ?", (report_id,))
     if not owner:
         raise error(404, "报告不存在。")
     _ensure_student_in_scope(admin, owner["user_id"])
@@ -4288,25 +4294,56 @@ async def review_report(request: Request, report_id: str, admin: dict = Depends(
     status = str(body.get("status") or "").strip()
     if status not in {"approved", "rejected", "pending"}:
         raise error(400, "复核状态必须是 approved、rejected 或 pending。")
-    owner = one("SELECT user_id FROM interview_reports WHERE id = ?", (report_id,))
+    owner = one("SELECT user_id,interview_id FROM interview_reports WHERE id = ?", (report_id,))
     if not owner:
         raise error(404, "报告不存在。")
     _ensure_student_in_scope(admin, owner["user_id"])
-    db.execute(
-        """UPDATE interview_reports
-           SET review_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id = ?""",
-        (status, admin["id"], report_id),
-    )
-    db.commit()
+    if "source_revision" not in body or not isinstance(body.get("review_token"), str):
+        raise error(400, "请刷新报告后再提交复核。")
+    # SQLite 使用独立连接；MySQL 连接已按线程隔离。
+    review_db = database_module.SQLiteDatabase(db.path) if DB_ENGINE == "sqlite" else db
+    connection = review_db.connect()
+    try:
+        if DB_ENGINE == "sqlite":
+            connection.execute("BEGIN IMMEDIATE")
+        else:
+            connection.autocommit(False)
+            connection.begin()
+        def read(sql, params):
+            cursor = review_db.execute(sql, params)
+            try:
+                row = cursor.fetchone()
+                return dict(row) if row else None
+            finally:
+                cursor.close()
+        suffix = " FOR UPDATE" if DB_ENGINE == "mysql" else ""
+        session = read("SELECT evaluation_revision FROM interview_sessions WHERE id=?" + suffix, (owner["interview_id"],))
+        current = read("SELECT * FROM interview_reports WHERE id=?", (report_id,))
+        revision = current.get("source_revision")
+        legacy = revision is None and session["evaluation_revision"] == 0
+        if (body["source_revision"] != revision or body["review_token"] != report_review_token(current)
+                or (not legacy and revision != session["evaluation_revision"])
+                or current["generation_status"] in {"queued", "pending_retry", "failed"}):
+            raise error(409, "报告已更新或正在重新生成，请刷新后复核。")
+        review_db.execute("""UPDATE interview_reports SET review_status=?,reviewed_by=?,
+            reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (status, admin["id"], report_id)).close()
+        review_db.commit()
+    except Exception:
+        review_db.rollback()
+        raise
+    finally:
+        if DB_ENGINE == "sqlite":
+            connection.close()
+        else:
+            connection.autocommit(True)
     record_audit(
         request,
         admin,
         "report.review",
         target_type="report",
         target_id=report_id,
-        summary=f"报告复核状态更新为 {status}",
+        summary=f"报告复核状态更新为 {status}，评分修订 {revision if revision is not None else 'legacy'}",
     )
     return {"report": get_report_detail(report_id)}
 

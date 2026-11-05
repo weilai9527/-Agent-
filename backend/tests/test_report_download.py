@@ -7,6 +7,30 @@ import sys
 import textwrap
 
 
+def test_markdown_download_renders_untrusted_content_as_text(tmp_path):
+    environment = {**os.environ, "APP_ENV": "test", "DB_ENGINE": "sqlite",
+                   "SQLITE_PATH": str(tmp_path / "markdown.sqlite")}
+    script = '''
+from markdown_it import MarkdownIt
+from backend.src.main import build_report_markdown
+payload = '<img src="https://example.test/pixel">![track](https://example.test/pixel)\\n\\n# fake heading'
+payload += '<script>alert(1)</script>[link](javascript:alert(1))'
+report = {'total_score': 0, 'generation_status': 'succeeded', 'summary': payload, 'suggestions': [payload],
+    'agent_feedback': [{'agent_name': payload, 'comment': payload, 'round_summary': payload}],
+    'timeline_review': [{'sender_type': 'candidate', 'question_preview': payload, 'answer_preview': payload,
+        'score': 0, 'dimension_scores': {'technical_depth': 0}, 'dimension_evidence': {'technical_depth': payload}}]}
+markdown = build_report_markdown(report, payload)
+rendered = MarkdownIt('commonmark', {'html': True}).render(markdown)
+assert '<img' not in rendered and '<script' not in rendered, rendered
+assert '<h1>fake heading' not in rendered and '<a href=' not in rendered, rendered
+assert '![track]' in rendered and '&lt;img' in rendered
+assert '0/100' in rendered
+'''
+    result = subprocess.run([sys.executable, "-B", "-c", script], cwd=Path(__file__).resolve().parents[2],
+                            env=environment, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_completed_report_can_be_downloaded_as_utf8_markdown(tmp_path):
     project_dir = Path(__file__).resolve().parents[2]
     database_path = tmp_path / "report-download.sqlite"
@@ -32,12 +56,8 @@ def test_completed_report_can_be_downloaded_as_utf8_markdown(tmp_path):
         assert created.status_code == 201, created.text
         interview_id = created.json()["interview"]["id"]
         agent = client.get(f"/api/interviews/{interview_id}/agents").json()["agents"][0]
-        question = client.post(
-            f"/api/interviews/{interview_id}/messages",
-            json={"sender_type": "agent", "message_type": "question",
-                  "agent_id": agent["id"], "content": "如何限制并发？"},
-        )
-        assert question.status_code == 201, question.text
+        main.append_message(interview_id, agent["id"], "question", "如何限制并发？")
+        main.db.commit()
         answered = client.post(
             f"/api/interviews/{interview_id}/messages",
             json={"sender_type": "candidate", "message_type": "answer", "content": "使用 asyncio.Semaphore。"},
@@ -78,7 +98,7 @@ def test_completed_report_can_be_downloaded_as_utf8_markdown(tmp_path):
         assert (feedback[0]["reason"], feedback[0]["round_count"]) == ("evidence_sufficient", 5)
         assert (feedback[1]["reason"], feedback[1]["round_count"], feedback[1]["score"]) == ("turn_limit", 6, None)
         assert "reason" not in feedback[2]
-        # A historical completed session can have no report. Exercise the direct INSERT path.
+        # 历史已完成面试可能没有报告，此处验证直接新建报告的路径。
         main.db.execute("DELETE FROM interview_reports WHERE interview_id = ?", (interview_id,))
         main.db.commit()
         generated = client.post(f"/api/interviews/{interview_id}/report")

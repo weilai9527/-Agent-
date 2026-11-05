@@ -9,6 +9,8 @@ import {
   extractQuestionFromAgentTranscript,
   formatAliyunRtcStartError,
   findLatestInterviewQuestion,
+  matchesAliyunRtcQuestion,
+  createRtcCaptionStream,
   shouldPersistAliyunAgentTurn,
 } from './aliyunRtc.js';
 
@@ -200,6 +202,30 @@ test('persists only a new autonomous RTC follow-up', () => {
 });
 
 
+test('requires the full confirmed question rather than a different spoken question', () => {
+  const question = { id: 'q2', content: '你如何选索引？为什么？' };
+  const turn = { speaker: 'agent', end: true, text: '你如何选索引? 为什么?' };
+  assert.equal(matchesAliyunRtcQuestion(turn, question), true);
+  assert.equal(matchesAliyunRtcQuestion({ ...turn, end: false }, question), false);
+  assert.equal(matchesAliyunRtcQuestion({ ...turn, text: '为什么？' }, question), false);
+  assert.equal(matchesAliyunRtcQuestion({ ...turn, text: '你如何做缓存？为什么？' }, question), false);
+});
+
+test('keeps an utterance bound to the question that was ready when it began', () => {
+  const results = [];
+  let question = { id: 'q1' };
+  const stream = createRtcCaptionStream(turn => results.push(turn), () => {}, () => question);
+  stream.consume({ userType: 'user', message: '原来的', end: false });
+  question = { id: 'q2' };
+  stream.consume({ userType: 'user', message: '原来的回答', end: true });
+  question = null;
+  stream.consume({ userType: 'user', message: '抢在播报前开始', end: false });
+  question = { id: 'q3' };
+  stream.consume({ userType: 'user', message: '抢在播报前开始的回答', end: true });
+  stream.consume({ userType: 'user', message: '确认播报之后的回答', end: true });
+  assert.deepEqual(results.map(turn => turn.question?.id ?? null), ['q1', null, 'q3']);
+});
+
 test('assembles partial captions into one stable final RTC turn', () => {
   let nextId = 0;
   const assembler = createAliyunRtcTranscriptAssembler({ createTurnId: () => `turn_${++nextId}` });
@@ -220,16 +246,31 @@ test('assembles partial captions into one stable final RTC turn', () => {
 });
 
 
-test('uses an empty end marker to finalize the buffered candidate transcript', () => {
+test('persists only the final candidate snapshot after ASR revises and retracts text', async () => {
+  const { createRtcCaptionStream } = await import('./aliyunRtc.js');
+  const writes = [];
+  const stream = createRtcCaptionStream(turn => writes.push(turn), () => {});
+  const caption = (message, end = false) => stream.consume({ message, userType: 'user', end });
+  const first = caption('我负责数剧库和报表');
+
+  assert.deepEqual(caption('我负责数据库和报表'), { ...first, text: '我负责数据库和报表' });
+  assert.deepEqual(writes, []);
+
+  const final = { ...first, text: '我负责数据库。', end: true };
+  assert.deepEqual(caption('我负责数据库。', true), final);
+  stream.flush();
+  assert.deepEqual(writes, [final]);
+});
+
+
+test('uses an empty end marker to finalize the latest candidate snapshot', () => {
   const assembler = createAliyunRtcTranscriptAssembler({ createTurnId: () => 'turn_empty_end' });
 
-  assert.deepEqual(
-    assembler.consume({ message: '我负责核心模块', userType: 'user', end: false }),
-    { speaker: 'candidate', turnId: 'turn_empty_end', text: '我负责核心模块', end: false }
-  );
+  assembler.consume({ message: '我负责核心模块', userType: 'user', end: false });
+  assembler.consume({ message: '我负责核心', userType: 'user', end: false });
   assert.deepEqual(
     assembler.consume({ message: '', userType: 'user', end: true }),
-    { speaker: 'candidate', turnId: 'turn_empty_end', text: '我负责核心模块', end: true }
+    { speaker: 'candidate', turnId: 'turn_empty_end', text: '我负责核心', end: true }
   );
 });
 
@@ -269,6 +310,8 @@ test('joins, publishes microphone, subscribes remote audio, and releases resourc
   const remoteTrack = {
     played: false,
     stopped: false,
+    volume: 1,
+    setVolume(volume) { this.volume = volume; },
     play() { this.played = true; },
     stopPlay() { this.stopped = true; },
   };
@@ -327,6 +370,10 @@ test('joins, publishes microphone, subscribes remote audio, and releases resourc
   assert.equal(remoteTrack.played, true);
   assert.deepEqual(playedUsers, ['agent_1']);
   assert.deepEqual(remoteCounts, [1]);
+  session.setRemoteMuted(true);
+  assert.equal(remoteTrack.volume, 0);
+  session.setRemoteMuted(false);
+  assert.equal(remoteTrack.volume, 1);
 
   await session.leave();
   assert.equal(calls.unpublished, microphoneTrack);

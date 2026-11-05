@@ -55,7 +55,8 @@ def test_finish_queues_report_without_running_ai_inline(tmp_path):
         assert len(repeated_tasks.tasks) == 0
 
         main.generate_ai_report = lambda **kwargs: kwargs["fallback_report"]
-        main.generate_report_after_finish(interview_id, user)
+        task = background_tasks.tasks[0]
+        task.func(*task.args, **task.kwargs)
         completed = client.get(f"/api/interviews/{interview_id}/report")
         assert completed.status_code == 200, completed.text
         assert completed.json()["report"]["generation_status"] != "queued"

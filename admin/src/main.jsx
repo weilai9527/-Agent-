@@ -778,6 +778,8 @@ function formatDetail(type, payload, fallbackRow) {
     return {
       type: 'report',
       id: report.id || fallbackRow.id,
+      source_revision: report.source_revision,
+      review_token: report.review_token,
       title: `报告 · ${report.candidate || fallbackRow.candidate}`,
       rows: [
         { label: '候选人', value: report.candidate },
@@ -909,7 +911,7 @@ function InterviewsPage({ data, query, onQueryChange, presetFilter, requestedId,
     setReviewError('');
     try {
       await adminRequest(`/api/admin/reports/${encodeURIComponent(record.reviewReport.id)}/review`, {
-        method: 'PATCH', body: JSON.stringify({ status }),
+        method: 'PATCH', body: JSON.stringify({ status, source_revision: record.reviewReport.source_revision, review_token: record.reviewReport.review_token }),
       });
       setRecord((current) => ({ ...current, reviewReport: { ...current.reviewReport, review_status: status } }));
       onReviewed?.(record.reviewReport.id, status);
@@ -4545,12 +4547,12 @@ function AdminApp({ admin, onSignedOut }) {
   const [expandedNavigation, setExpandedNavigation] = useState(() => {
     let saved = {};
     try { saved = JSON.parse(window.localStorage.getItem('admin-navigation-groups') || '{}') || {}; }
-    catch { /* Use expanded defaults if storage is unavailable or invalid. */ }
+    catch { /* 浏览器存储不可用或内容无效时，默认展开导航。 */ }
     return Object.fromEntries(navItems.filter((item) => item.container).map((item) => [item.key, typeof saved[item.key] === 'boolean' ? saved[item.key] : true]));
   });
   useEffect(() => {
     try { window.localStorage.setItem('admin-navigation-groups', JSON.stringify(expandedNavigation)); }
-    catch { /* Navigation remains usable when browser storage is unavailable. */ }
+    catch { /* 浏览器存储不可用时，导航仍可正常操作。 */ }
   }, [expandedNavigation]);
   const [orgRevision, setOrgRevision] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -4610,7 +4612,7 @@ function AdminApp({ admin, onSignedOut }) {
   const toggleNavigation = (open) => {
     setNavigationOpen(open);
     try { window.localStorage.setItem('admin-navigation-collapsed', String(!open)); }
-    catch { /* Keep the control usable when browser storage is unavailable. */ }
+    catch { /* 浏览器存储不可用时，控件仍可正常使用。 */ }
     window.requestAnimationFrame(() => {
       (open ? navigationCloseButtonRef : navigationOpenButtonRef).current?.focus({ preventScroll: true });
     });
@@ -4799,7 +4801,8 @@ function AdminApp({ admin, onSignedOut }) {
     try {
       const payload = await adminRequest(`/api/admin/reports/${encodeURIComponent(reportId)}/review`, {
         method: 'PATCH',
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({ status, source_revision: (detail?.type === 'interview' ? detail.reviewReport : detail)?.source_revision,
+          review_token: (detail?.type === 'interview' ? detail.reviewReport : detail)?.review_token }),
       });
       setDetail((current) => current?.type === 'interview'
         ? { ...current, reviewReport: { ...current.reviewReport, review_status: status } }
@@ -4858,8 +4861,8 @@ function AdminApp({ admin, onSignedOut }) {
   const renderContent = () => {
     if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
-    // Redirect effects run after children mount. Block forbidden pages here so
-    // a retained URL cannot start their requests while permissions are loading.
+    // 重定向副作用在子页面挂载后执行，因此先在这里拦截无权访问的页面，
+    // 避免权限加载期间，残留地址提前发起无权限的数据请求。
     if (!visibleNavItems.some((item) => item.key === activeView)) return <DashboardPage data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
     if (activeView === 'guide') return <GuidePage onNavigate={navigateGuideStep} admin={admin} visibleViews={new Set(visibleNavItems.map((item) => item.key))} />;
     if (activeView === 'catalog') return <CatalogModule request={adminRequest} permissions={adminData.permissions || {}} renderLibrary={(permissions, active) => <CatalogLibraryPage permissions={permissions} active={active} />} />;

@@ -11,15 +11,6 @@ function defaultTurnId() {
   return `rtc-turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function mergeTranscriptText(previous, next) {
-  const prior = String(previous || '').trim();
-  const incoming = String(next || '').trim();
-  if (!prior) return incoming;
-  if (!incoming || prior.endsWith(incoming)) return prior;
-  if (incoming.startsWith(prior)) return incoming;
-  return `${prior}${incoming}`;
-}
-
 export function findLatestInterviewQuestion(messages = []) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -63,6 +54,14 @@ export function shouldPersistAliyunAgentTurn(turn, latestQuestion, nextAction = 
   return comparableQuestion(spokenQuestion) !== comparableQuestion(latestQuestion?.content);
 }
 
+export function matchesAliyunRtcQuestion(turn, question) {
+  if (turn?.speaker !== 'agent' || !turn.end || !question?.id) return false;
+  const normalize = (value) => String(value || '').normalize('NFKC')
+    .toLowerCase().replace(/[\s\p{P}]+/gu, '');
+  const expected = normalize(question.content);
+  return Boolean(expected && normalize(turn.text) === expected);
+}
+
 export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnId } = {}) {
   const turns = new Map();
 
@@ -73,9 +72,9 @@ export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnI
       const text = String(message?.message || '').trim();
       const buffered = turns.get(speaker);
 
-      // dingrtc-aiagent may send the final sentence boundary as an empty
-      // transcription with end=true. Do not discard that marker: it is what
-      // turns the buffered candidate transcript into a persistable answer.
+      // dingrtc-aiagent 可能用空字幕并设置 end=true 来表示
+      // 最终句子边界。不能丢弃该标记，因为它用于
+      // 把缓冲中的候选人转写内容提交为可保存的回答。
       if (!text) {
         if (!message?.end || !buffered?.text) return null;
         turns.delete(speaker);
@@ -87,8 +86,9 @@ export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnI
         };
       }
 
-      const current = buffered || { turnId: createTurnId(), text: '' };
-      current.text = mergeTranscriptText(current.text, text);
+      // 用户字幕是当前句子的识别结果，SDK 已在回调前累积智能体片段。
+      // 用最新文本更新当前句，保留本轮 ID 以绑定保存顺序。
+      const current = { turnId: buffered ? buffered.turnId : createTurnId(), text };
       const result = {
         speaker,
         turnId: current.turnId,
@@ -116,11 +116,12 @@ export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnI
   };
 }
 
-// The provider can finish a candidate caption while an earlier agent caption
-// is still streaming. Bind each question when it starts, and emit business
-// turns in conversational order regardless of which final marker arrives first.
-export function createRtcCaptionStream(candidate, agent) {
+// 供应商可能先结束候选人字幕，而更早的面试官字幕仍在传输；
+// 应在题目开始时绑定归属，并按真实对话顺序
+// 提交业务轮次，不依赖哪一方的结束标记先到。
+export function createRtcCaptionStream(candidate, agent, captureQuestion) {
   const assembler = createAliyunRtcTranscriptAssembler();
+  const questionByTurn = new Map();
   let lastCandidateId = null;
   let agentOwner = null;
   let speakingAgent = false;
@@ -128,6 +129,10 @@ export function createRtcCaptionStream(candidate, agent) {
 
   function emitCandidate(turn) {
     if (!turn) return;
+    if (captureQuestion) {
+      turn = { ...turn, question: questionByTurn.get(turn.turnId) ?? null };
+      questionByTurn.delete(turn.turnId);
+    }
     if (speakingAgent && turn.turnId !== agentOwner) deferred.push(turn);
     else candidate(turn);
   }
@@ -146,6 +151,10 @@ export function createRtcCaptionStream(candidate, agent) {
       const turn = assembler.consume(message);
       if (!turn) return null;
       if (turn.speaker === 'candidate') {
+        // 同一句的后续字幕只更新文字，始终保留开始作答时对应的题目。
+        if (captureQuestion && !questionByTurn.has(turn.turnId)) {
+          questionByTurn.set(turn.turnId, captureQuestion());
+        }
         lastCandidateId = turn.turnId;
         if (turn.end) emitCandidate(turn);
       } else {
@@ -176,8 +185,8 @@ async function loadAiAgentSdk() {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-// A spoken notification does not replace the cloud model's role/history.
-// Confirm the old session has stopped before preparing and starting a new role.
+// 播放语音通知不会替换云端模型的角色或历史对话。
+// 准备并启动新角色之前，先确认旧会话已经停止。
 export async function handoffAliyunRtcSession({ stop, prepare, start, isCancelled }) {
   const stopped = await stop();
   if (isCancelled()) return;
@@ -193,10 +202,10 @@ export async function ensureAiAgentMessagingReady(aiAgentClient, {
   timeoutMs = 2000,
   pollIntervalMs = 50,
 } = {}) {
-  // isInSession/initAgent are currently runtime fields of Alibaba's official
-  // dingrtc-aiagent package, although its .d.ts marks them private. The 1.0.10
-  // plugin can occasionally miss the channel's connected transition; audio
-  // still works in that state, but no message/agent-status events are emitted.
+  // isInSession 和 initAgent 是阿里云官方 dingrtc-aiagent 的运行时字段，
+  // 但类型声明将它们标为私有。1.0.10 版本插件偶尔会漏掉
+  // 频道连接成功的状态变化；这时音频仍可使用，
+  // 但不会发出字幕消息或面试官状态事件。
   if (!aiAgentClient || !Object.prototype.hasOwnProperty.call(aiAgentClient, 'isInSession')) {
     return true;
   }
@@ -254,6 +263,11 @@ async function createAliyunRtcAudioSessionOnce({
 
   const client = DingRTC.createClient();
   const remoteTracks = new Set();
+  let remoteMuted = false;
+  const setRemoteMuted = (muted) => {
+    remoteMuted = muted;
+    remoteTracks.forEach((track) => track.setVolume?.(muted ? 0 : 1));
+  };
   let mcuAudioSubscription = null;
   let microphoneTrack = null;
   let aiAgentClient = null;
@@ -285,9 +299,9 @@ async function createAliyunRtcAudioSessionOnce({
   const handleUserPublished = async (user, mediaType, auxiliary) => {
     if (closed || mediaType !== 'audio') return;
     try {
-      // DingRTC Web receives remote audio through the channel's mixed MCU
-      // stream. Subscribing by a participant user ID is rejected with
-      // "only support subscribe mcu audio".
+      // DingRTC 网页端通过频道的混合音频流接收远端声音；
+      // 按参与者用户标识订阅会被拒绝，错误信息为
+      // “only support subscribe mcu audio”，即仅支持订阅混合音频。
       if (!mcuAudioSubscription) {
         mcuAudioSubscription = client.subscribe('mcu', mediaType, auxiliary);
       }
@@ -298,6 +312,7 @@ async function createAliyunRtcAudioSessionOnce({
       }
       if (!remoteTracks.has(track)) {
         remoteTracks.add(track);
+        if (remoteMuted) track.setVolume?.(0);
         track.play();
       }
       onRemoteAudio?.(user);
@@ -329,7 +344,7 @@ async function createAliyunRtcAudioSessionOnce({
     if (aiAgentClient) {
       aiAgentClient.off('agent-status', handleAgentStatus);
       aiAgentClient.off('message', handleAgentMessage);
-      try { aiAgentClient.detach?.(); } catch { /* Continue releasing RTC resources. */ }
+      try { aiAgentClient.detach?.(); } catch { /* 继续释放实时音视频资源。 */ }
     }
 
     if (microphoneTrack) {
@@ -337,21 +352,21 @@ async function createAliyunRtcAudioSessionOnce({
         try {
           await client.unpublish(microphoneTrack);
         } catch {
-          // The signaling connection may already be gone; still release the device.
+          // 信令连接可能已断开，但仍需释放设备。
         }
       }
-      try { microphoneTrack.close(); } catch { /* Still leave the channel. */ }
+      try { microphoneTrack.close(); } catch { /* 仍然执行退出频道。 */ }
       microphoneTrack = null;
     }
 
     remoteTracks.forEach((track) => {
-      try { track.stopPlay?.(); } catch { /* Release the remaining tracks. */ }
+      try { track.stopPlay?.(); } catch { /* 释放剩余的音轨。 */ }
     });
     remoteTracks.clear();
     mcuAudioSubscription = null;
-    // join() can fail after opening signaling resources. The SDK's leave()
-    // also resets a partially connected client; do not gate it on success.
-    try { await client.leave(); } catch { /* Preserve the original startup error. */ }
+    // join() 可能在创建信令资源后失败；开发包的 leave()
+    // 也会清理尚未完全连接的客户端，因此不能仅在连接成功后调用。
+    try { await client.leave(); } catch { /* 保留最初的启动错误。 */ }
     joined = false;
   };
 
@@ -384,7 +399,7 @@ async function createAliyunRtcAudioSessionOnce({
       }
     }
 
-    // Subscribe to users that published audio before the candidate joined.
+    // 订阅候选人加入频道之前已经发布的远端音频。
     await Promise.all(
       (joinResult.remoteUsers || [])
         .filter((user) => user.hasAudio)
@@ -404,7 +419,7 @@ async function createAliyunRtcAudioSessionOnce({
     throw failure;
   }
 
-  return { client, microphoneTrack, aiAgentClient, leave };
+  return { client, microphoneTrack, aiAgentClient, setRemoteMuted, leave };
 }
 
 export function formatAliyunRtcStartError(error) {

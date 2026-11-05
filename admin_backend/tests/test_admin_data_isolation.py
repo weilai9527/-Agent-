@@ -1,7 +1,7 @@
-"""Regression coverage for registration, training and report scope boundaries.
+"""回归验证注册、训练和报告的数据访问边界。
 
-Each scenario runs in its own process with a fresh SQLite database. No business
-database, real accounts, model services or persistent environment files are used.
+每个场景在独立进程及全新测试数据库中运行，不使用业务数据库、
+真实账号、模型服务或持久环境配置文件。
 """
 import os
 from pathlib import Path
@@ -89,9 +89,10 @@ for uid in ("outside", "other", "unassigned"):
     assert request("PATCH", "reports/" + uid + "/review", json={"status": "approved"}).status_code == 403
     assert main.one("SELECT review_status FROM interview_reports WHERE id = ?", (uid,))["review_status"] != "approved"
 assert request("GET", "interviews/allowed").status_code == 200
-assert request("GET", "reports/allowed").status_code == 200
-assert request("PATCH", "reports/allowed/review", json={"status": "approved"}).status_code == 200
-# College and program scopes include sibling classes, but not other colleges.
+report = request("GET", "reports/allowed").json()["report"]
+assert request("PATCH", "reports/allowed/review", json={"status": "approved", **{
+    key: report[key] for key in ("source_revision", "review_token")}}).status_code == 200
+# 学院和专业范围可覆盖下属其他班级，但不能覆盖其他学院。
 for scope in ([{"college": "c1", "program": "p1"}], [{"college": "c1"}]):
     actor["student_scope"] = scope
     assert {r["id"] for r in request("GET", "snapshot").json()["reports"]} == {"allowed", "outside"}
@@ -122,7 +123,7 @@ for number, college, name in (("outside", "c1", "Allowed"), ("pending-out", "c1"
                               ("unassigned", "c1", "Allowed"), ("new-out", "c1", "Outside"),
                               ("new-ambiguous", "c1", "Ambiguous"), ("allowed", "c2", "Other")):
     assert create(number, college, name).status_code == 403
-# Mixed valid/invalid files must roll back earlier inserted accounts and rows.
+# 同批导入中混有无效文件时，必须回滚此前插入的账号和记录。
 csv = b"student_no,name,college,class_name,gender,counselor\\nnew-valid,Test,c1,Allowed,X,Test\\noutside,Test,c1,Allowed,X,Test\\n"
 result = request("POST", "student-registrations/import", files={"file": ("scope.csv", csv, "text/csv")})
 assert result.status_code == 403, result.text
@@ -149,7 +150,7 @@ assert request("DELETE", "student-registrations/accounts").json()["revoked"] == 
 assert request("DELETE", "student-registrations").status_code == 200
 assert all(r["deleted_at"] is None for r in main.all_rows("SELECT deleted_at FROM student_registrations"))
 actor["student_scope"] = [{"college": "c1", "program": "p1", "class": "a"}]
-# Forged display labels cannot bring an outside account into the scope.
+# 伪造显示标签不能让范围外的账号获得访问资格。
 db.execute("UPDATE student_registrations SET class_name = 'Allowed' WHERE id = 'outside'")
 db.commit()
 result = request("POST", "student-registrations/activate")

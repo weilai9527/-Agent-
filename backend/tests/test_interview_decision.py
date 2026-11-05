@@ -130,7 +130,7 @@ def test_architecture_live_transcript_replay_text_and_rtc(monkeypatch):
         assert result["followup_mode"] == ("hypothetical" if i == 0 else "change_topic")
         assert not any(e["status"] == "supported" for e in result["evidence"].values())
         question = result["question"]
-        for decision in (result, None):  # managed and old-format text paths
+        for decision in (result, None):  # 同时验证受管理的轮次流程和旧格式文字流程。
             text = generate_kimi_followup(interview={}, active_agent=agent, messages=messages,
                                           last_answer=content, turn_decision=decision)
             assert text["question"] == question
@@ -138,7 +138,7 @@ def test_architecture_live_transcript_replay_text_and_rtc(monkeypatch):
         messages.append(answer)
     assert len(set(seen)) == 3
     assert "假设流量" in seen[0] and "数据会经过" in seen[1] and "网络断开" in seen[2]
-    assert ANSWER_CONTEXT_POLICY in build_rtc_ai_agent_prompt({}, [agent], messages, None)
+    assert "禁止自行生成问题" in build_rtc_ai_agent_prompt({}, [agent], messages, None)
     assert ANSWER_CONTEXT_POLICY in _build_messages(interview={}, active_agent=agent, messages=messages,
                                                     last_answer=replies[-1])[0]["content"]
 
@@ -157,3 +157,22 @@ def test_tentative_solution_inherits_the_hypothetical_question():
     messages[0]["content"] = "假设访问量突然增大，你会怎么设计？"
     result = decide(1, messages)
     assert result["evidence"]["solution"]["status"] == "mentioned"
+
+
+def test_long_repeated_text_does_not_fabricate_or_hide_valid_evidence():
+    from backend.src.interview_decision import _evidence
+
+    # 三类重复文本均达到消息允许的最长长度，仍须正确区分提及与有效证据。
+    cases = (
+        ("tradeoff", "选择" * 6000, "为了降低成本选择缓存方案"),
+        ("risk", "监控" * 6000, "配置了错误率报警阈值"),
+        ("collaboration", "我与同事" * 3000, "我与产品同事对齐了上线方案"),
+    )
+    for dimension, repeated, valid in cases:
+        result = _evidence([{"id": "long-answer", "content": repeated}], [dimension])
+        assert result[dimension]["status"] == "mentioned", (dimension, result)
+        # 缩短前段重复文本，让完整回答仍不超过消息长度上限。
+        content = repeated[:12000 - len(valid) - 1] + "。" + valid
+        result = _evidence([{"id": "long-answer", "content": content}], [dimension])
+        assert result[dimension]["status"] == "supported", (dimension, result)
+        assert valid in result[dimension]["quote"], (dimension, result)

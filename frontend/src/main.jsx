@@ -47,9 +47,8 @@ import {
   createAliyunRtcAudioSession,
   handoffAliyunRtcSession,
   createRtcCaptionStream,
-  extractQuestionFromAgentTranscript,
   formatAliyunRtcStartError,
-  shouldPersistAliyunAgentTurn,
+  matchesAliyunRtcQuestion,
 } from './aliyunRtc';
 import { V4Brand, V4Logo, V4PageHeading } from './V4Shell';
 import { brand } from '../../shared/branding.js';
@@ -737,8 +736,8 @@ function reportToViewModel(reportData, user) {
     latestQuestion = null;
   });
 
-  // Older reports may have been saved as "succeeded" even though no candidate
-  // answer existed. The deterministic timeline is the evidence source of truth.
+  // 旧报告可能在没有候选人回答时就保存为成功状态；
+  // 应以程序确定的问答时间线作为证据来源。
   const hasEvidence = visibleReportScore(reportData || {}) !== null && (reportData?.scored_answer_count > 0 || timeline.length > 0);
 
   return {
@@ -1634,7 +1633,7 @@ const RESUME_FORM_FIELDS = [
 ];
 const EMPTY_RESUME_FORM = Object.fromEntries(RESUME_FORM_FIELDS.map(([field]) => [field, '']));
 
-/* ================= Resume form entry pickers ================= */
+/* ================= 简历表单入口选择器 ================= */
 
 function SkillModal({ title, description, onClose, footer, wide, children }) {
   return (
@@ -1971,7 +1970,7 @@ function HonorsPicker({ value, onChange }) {
 /* ---------- 通用：多项目列表弹窗 ---------- */
 function ProjectsPicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(null); // null | {index, item}
+  const [editing, setEditing] = useState(null); // 为空，或保存当前编辑项的序号和内容。
   const [items, setItems] = useState(() => parseProjects(value));
   const addNew = () => setEditing({ index: -1, item: { name: '', time: '', belong: '', desc: '' } });
   const handleSaveEntry = (item) => {
@@ -2385,7 +2384,7 @@ function ResumeDownloader({ text, name }) {
       document.body.removeChild(link);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } finally {
-      // noop
+      // 此处无需额外处理。
     }
   };
   return (
@@ -3656,6 +3655,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const aliyunRtcAgentTaskRef = useRef('');
   const aliyunRtcHeartbeatIntervalRef = useRef(15000);
   const rtcCaptionsRef = useRef(null);
+  const rtcQuestionRef = useRef(null);
   const rtcEpochRef = useRef(0);
   const rtcWritesRef = useRef(null);
   if (!rtcWritesRef.current) {
@@ -3684,70 +3684,69 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   );
   const handleSubmitAnswerRef = useRef(null);
 
-  const enqueueAliyunRtcCandidateTurn = (turn) => {
-    if (!turn?.text || turn.speaker !== 'candidate' || !turn.end) return;
-    const epoch = rtcEpochRef.current;
-    let question;
-    rtcWritesRef.current.enqueue(async () => {
-      if (epoch !== rtcEpochRef.current) return;
-      if (!question && !progressRef.current?.question && progressRef.current?.pending_spoken_submission_id) {
-        await stopAliyunRtcCall('语音题目未同步，已转入文字面试', { flushCandidate: false });
-        const state = await readCurrentQuestion();
-        await Promise.all([reloadMessages(), reloadAgents()]);
-        rtcEpochRef.current++;
-        applyProgress(state);
-        if (state.action === 'finish_interview') {
-          await finishAndOpenReport();
-          return;
-        }
-        recoveredDraftRef.current = true;
-        setAnswer(turn.text);
-        setInterviewMode('text');
-        setError('语音追问未同步。已保留回答草稿，请核对当前题目后发送。');
-        return;
-      }
-      question ||= progressRef.current?.question;
-      if (!question) return;
-      await handleSubmitAnswerRef.current(turn.text, {
-        source: 'aliyun_rtc', sourceRef: turn.turnId, question,
-      });
-    });
+  const clearAliyunRtcQuestion = () => {
+    window.clearTimeout(rtcQuestionRef.current?.timer);
+    rtcQuestionRef.current = null;
   };
 
-  const enqueueAliyunRtcAgentTurn = (turn, submissionId) => {
-    if (!submissionId || !turn?.end) return;
+  const prepareAliyunRtcQuestion = (question) => {
+    clearAliyunRtcQuestion();
+    const playback = { question, ready: false, timer: null };
+    rtcQuestionRef.current = playback;
+    return playback;
+  };
+
+  const fallBackFromAliyunRtc = async (message) => {
+    rtcEpochRef.current++;
+    await stopAliyunRtcCall(message, { flushCandidate: false });
+    setInterviewMode('text');
+    setError(message);
+  };
+
+  const waitForAliyunRtcQuestion = (playback) => {
+    if (rtcQuestionRef.current !== playback || playback.ready) return;
+    playback.timer = window.setTimeout(() => {
+      if (rtcQuestionRef.current === playback && !playback.ready) {
+        void fallBackFromAliyunRtc('未确认语音播报的是当前题目，已切换文字面试。');
+      }
+    }, 20000);
+  };
+
+  const confirmAliyunRtcQuestion = (turn) => {
+    const playback = rtcQuestionRef.current;
+    if (!playback || playback.ready || !matchesAliyunRtcQuestion(turn, playback.question)) return;
+    playback.ready = true;
+    window.clearTimeout(playback.timer);
+    setAliyunRtcMessage('本题已播报，可以开始回答');
+  };
+
+  const captureAliyunRtcQuestion = () => {
+    const playback = rtcQuestionRef.current;
+    if (!playback?.ready || progressRef.current?.question?.id !== playback.question.id) return null;
+    // 候选人开始作答时静音，避免上一题的自动回复混入下一题。
+    aliyunRtcSessionRef.current?.setRemoteMuted(true);
+    return playback.question;
+  };
+
+  const enqueueAliyunRtcCandidateTurn = (turn) => {
+    const question = turn?.question;
+    if (!turn?.text || !turn.end || !question || rtcQuestionRef.current?.question.id !== question.id) return;
     const epoch = rtcEpochRef.current;
+    clearAliyunRtcQuestion();
     rtcWritesRef.current.enqueue(async () => {
-      const current = progressRef.current;
-      if (epoch !== rtcEpochRef.current || current?.pending_spoken_submission_id !== submissionId
-          || !shouldPersistAliyunAgentTurn(turn, current.answeredQuestion, current.action)) return;
-      const payload = {
-        content: extractQuestionFromAgentTranscript(turn.text),
-        transcript_text: turn.text,
-        source_ref: `agent:${turn.turnId}`,
-      };
-      let question;
+      if (epoch !== rtcEpochRef.current || progressRef.current?.question?.id !== question.id) return;
       try {
-        ({ question } = await postInterviewTurn(body => apiRequest(
-          `/api/interviews/${interviewId}/turns/${encodeURIComponent(submissionId)}/spoken-question`,
-          { method: 'POST', body: JSON.stringify(body) }
-        ), payload, response => response.question?.id));
+        await handleSubmitAnswerRef.current(turn.text, {
+          source: 'aliyun_rtc', sourceRef: turn.turnId, question,
+        });
       } catch (error) {
-        if (error.status !== 409) throw error;
-        rtcEpochRef.current++;
-        await stopAliyunRtcCall('题目进度已变化，请重新连接', { flushCandidate: false });
-        const state = await readCurrentQuestion();
-        applyProgress(state);
-        if (state.action === 'finish_interview') await finishAndOpenReport();
-        else await Promise.all([reloadMessages(), reloadAgents()]);
-        return;
+        await fallBackFromAliyunRtc(error.message || '语音回答保存失败，已切换文字面试。');
+        if (progressRef.current?.question?.id === question.id) {
+          recoveredDraftRef.current = true;
+          setAnswer(turn.text);
+        }
+        throw error;
       }
-      if (question.source_ref !== payload.source_ref && question.content !== payload.content) {
-        rtcEpochRef.current++;
-        await stopAliyunRtcCall('当前追问已由其他页面恢复，请重新连接', { flushCandidate: false });
-      }
-      applyProgress({ ...current, question, pending_spoken_submission_id: null });
-      await reloadMessages();
     });
   };
 
@@ -3777,7 +3776,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         client_created_at: new Date().toISOString(),
       }),
     }).catch(() => {
-      // Diagnostics must never interrupt the interview flow.
+      // 诊断上报不能中断面试流程。
     });
   };
 
@@ -3801,7 +3800,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         client_created_at: new Date().toISOString(),
       }),
     }).catch(() => {
-      // Diagnostics must never interrupt the interview flow.
+      // 诊断上报不能中断面试流程。
     });
   };
 
@@ -3812,9 +3811,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         method: 'POST',
         body: JSON.stringify({ expected_task_id: taskId }),
       });
-      // A concurrent server-side finish may observe the persisted stop intent
-      // before StopAgent returns. Wait briefly for the authoritative terminal
-      // state instead of navigating away while the Agent is still speaking.
+      // 服务端并发结束面试时，可能在 StopAgent 返回前就读到
+      // 已保存的停止意图。应短暂等待服务端确认终态，
+      // 避免面试官仍在说话时就跳转页面。
       for (let poll = 0; result.status !== 'stopped' && poll < 12; poll += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         const statusResult = await apiRequest(`/api/interviews/${interviewId}/rtc/session`);
@@ -3847,8 +3846,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   };
 
   const stopAliyunRtcCall = async (message = '阿里云 RTC 通话已断开', { flushCandidate = true } = {}) => {
-    // Some provider sessions do not emit a final end=true caption. Preserve
-    // any buffered candidate speech before pausing or leaving the channel.
+    // 部分供应商会话不会发送带 end=true 的最终字幕；
+    // 暂停或离开频道前，先保存缓冲中的候选人语音转写。
     if (flushCandidate) {
       rtcCaptionsRef.current?.flush();
     }
@@ -3863,6 +3862,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setAliyunAgentStatus('disabled');
     setAliyunAgentTranscript(null);
     rtcCaptionsRef.current = null;
+    clearAliyunRtcQuestion();
     const leavePromise = session ? session.leave() : Promise.resolve();
     const stopPromise = stopAliyunRtcAgentTask(agentTaskId);
     const [, stopped] = await Promise.allSettled([leavePromise, stopPromise]);
@@ -3896,7 +3896,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     throw new Error('RTC AI 智能体启动确认超时，请断开后重试');
   };
 
-  const startAliyunRtcCall = async ({ afterHandoff = false } = {}) => {
+  const startAliyunRtcCall = async ({ afterHandoff = false, retryExisting = true } = {}) => {
     if (!interviewId || interview?.status === 'completed') {
       setAliyunRtcStatus('idle');
       setAliyunRtcMessage('本场面试已结束，不能重新加入 RTC 频道');
@@ -3928,12 +3928,14 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     let startupPhase = 'messages';
     const startupStartedAt = Date.now();
     try {
-      // A reconnect must use the database-backed question instead of the
-      // messages captured by the render that created this callback.
+      // 重连时必须使用数据库保存的题目，
+      // 不能使用创建本次回调时捕获的旧页面消息。
       if (!afterHandoff) await rtcWritesRef.current.drain();
       if (aliyunRtcAttemptRef.current !== attempt) return;
       rtcEpochRef.current++;
-      rtcCaptionsRef.current = createRtcCaptionStream(enqueueAliyunRtcCandidateTurn, enqueueAliyunRtcAgentTurn);
+      rtcCaptionsRef.current = createRtcCaptionStream(
+        enqueueAliyunRtcCandidateTurn, confirmAliyunRtcQuestion, captureAliyunRtcQuestion
+      );
       const current = await readCurrentQuestion();
       if (aliyunRtcAttemptRef.current !== attempt) return;
       applyProgress(current);
@@ -3943,6 +3945,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       }
       const latestQuestion = current.question;
       if (!latestQuestion?.id) throw new Error('当前题目尚未就绪，请重新连接。');
+      const playback = prepareAliyunRtcQuestion(latestQuestion);
       await Promise.all([reloadMessages(), reloadAgents()]);
       startupPhase = 'token';
       const credentials = await apiRequest(`/api/interviews/${interviewId}/rtc/token`, {
@@ -4023,7 +4026,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           if (aliyunRtcAttemptRef.current !== attempt) return;
           setAliyunAgentStatus(status);
           const statusMessages = {
-            listening: 'AI 面试官正在聆听',
+            listening: rtcQuestionRef.current?.ready ? '本题已播报，可以开始回答' : '正在确认本轮题目播报',
             thinking: 'AI 面试官正在思考',
             processing: 'AI 面试官正在思考',
             responding: 'AI 面试官正在回答',
@@ -4090,30 +4093,36 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         }
         aliyunRtcAgentTaskRef.current = agentSession.task_id;
         setAliyunAgentStatus(agentSession.status || 'starting');
-        setAliyunRtcMessage('AI 面试官正在进入频道');
+        if (!playback.ready) setAliyunRtcMessage('AI 面试官正在进入频道');
         recordAliyunRtcDiagnostic('ai_agent_started', {
           message: 'RTC AI 智能体启动请求成功',
         });
-        // A newly created provider task receives the current question as its
-        // StartAgent greeting from the backend. Only an already-running task
-        // needs an explicit replay when the browser reconnects.
+        // 新任务的开场白来自服务端当前题。复用旧任务时要重开，
+        // 因为插播播报可能不返回可用于确认题目的完整字幕。
         if (agentSession.current_question_id && agentSession.current_question_id !== latestQuestion.id) {
           await stopAliyunRtcCall('题目已更新，请重新连接当前面试官', { flushCandidate: false });
           applyProgress(await readCurrentQuestion());
           await Promise.all([reloadMessages(), reloadAgents()]);
           return;
         }
-        if (agentSession.idempotent && latestQuestion?.id) {
-          void apiRequest(`/api/interviews/${interviewId}/rtc/agent/notify`, {
-            method: 'POST',
-            body: JSON.stringify({ message_id: latestQuestion.id }),
-          }).catch((notifyError) => {
-            setAliyunRtcMessage(notifyError.message || 'RTC 当前问题播报失败');
-          });
+        if (agentSession.idempotent) {
+          if (!retryExisting) throw new Error('当前已有语音任务，请退出后重新连接。');
+          const handoffAttempt = aliyunRtcAttemptRef.current + 1;
+          const stopped = await stopAliyunRtcCall('正在重新播报当前题目', { flushCandidate: false });
+          if (aliyunRtcAttemptRef.current !== handoffAttempt) return;
+          if (stopped?.status === 'stopped') {
+            await startAliyunRtcCall({ afterHandoff: true, retryExisting: false });
+          } else {
+            setInterviewMode('text');
+            setError('上一条语音任务尚未结束，已切换文字面试。');
+          }
+          return;
         }
+        waitForAliyunRtcQuestion(playback);
       }
     } catch (requestError) {
       if (aliyunRtcAttemptRef.current !== attempt) return;
+      clearAliyunRtcQuestion();
       const session = aliyunRtcSessionRef.current;
       aliyunRtcSessionRef.current = null;
       if (session) await session.leave();
@@ -4253,7 +4262,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       try {
         source.stop();
       } catch {
-        // Source may have already finished.
+        // 音频源可能已经播放结束。
       }
       source.disconnect();
     });
@@ -4376,7 +4385,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       try {
         omniRecognitionRef.current.stop();
       } catch {
-        // Recognition can already be stopped by the browser.
+        // 浏览器可能已经停止语音识别。
       }
     }
     omniRecognitionRef.current = null;
@@ -4451,7 +4460,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           recognition.start();
           omniRecognitionRef.current = recognition;
         } catch {
-          // Chrome may throttle immediate restarts; keep the audio submission path alive.
+          // 浏览器可能限制立即重启识别；仍需保留录音提交路径。
         }
       }
     };
@@ -5439,7 +5448,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         try {
           message = JSON.parse(responseBody).error || message;
         } catch {
-          // Keep the raw server message.
+          // 保留服务端返回的原始消息。
         }
         throw new Error(message);
       }
@@ -5634,24 +5643,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     });
   };
 
-  const speakAliyunRtcMessage = async (message) => {
-    const taskId = aliyunRtcAgentTaskRef.current;
-    if (voiceProvider !== 'aliyun-rtc' || !taskId || !message?.id) return;
-    try {
-      await apiRequest(`/api/interviews/${interviewId}/rtc/agent/notify`, {
-        method: 'POST',
-        body: JSON.stringify({ message_id: message.id }),
-      });
-    } catch (notifyError) {
-      setAliyunRtcMessage(notifyError.message || 'RTC 面试问题播报失败');
-      recordAliyunRtcDiagnostic('ai_agent_notify_failed', {
-        level: 'warning',
-        message: 'RTC AI 智能体问题播报失败',
-        metadata: { error_name: notifyError?.name || 'Error' },
-      });
-    }
-  };
-
   const evaluateAnswerInBackground = (messageId) => {
     let trackedRequest;
     trackedRequest = apiRequest(`/api/interviews/${interviewId}/evaluations`, {
@@ -5659,9 +5650,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       body: JSON.stringify({ message_id: messageId }),
     })
       .catch((evaluationError) => {
-        // A missing per-question evaluation should not hold the candidate on
-        // the current screen. The final report still waits for tracked work,
-        // and pending evaluations can be retried from the report.
+        // 单题评分缺失不应把候选人卡在当前页面；
+        // 最终报告仍等待已跟踪的任务完成，
+        // 未完成的单题评分可在报告页面重试。
         console.warn('Background answer evaluation failed:', evaluationError);
         return null;
       })
@@ -5707,7 +5698,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setProcessingStage('正在保存回答并确认下一题');
 
     try {
-      // A timed-out POST may already be committed. Reuse its ID for this answer.
+      // 提交请求超时时可能已经写入成功，因此同一回答要复用原提交标识。
       const submission = createAnswerSubmission({
         questionId: question.id, content, sourceRef: options.sourceRef, previous: textAttemptRef.current,
       });
@@ -5750,12 +5741,15 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         else await Promise.all([reloadMessages(), reloadAgents()]);
         return;
       }
-      if (changedRole && aliyunRtcSessionRef.current) {
+      if ((changedRole || (isRtc && state.question)) && aliyunRtcSessionRef.current) {
         setAliyunRtcSwitching(true);
         const handoffAttempt = aliyunRtcAttemptRef.current + 1;
         try {
           await handoffAliyunRtcSession({
-            stop: () => stopAliyunRtcCall('正在切换语音面试官', { flushCandidate: false }),
+            stop: () => stopAliyunRtcCall(
+              changedRole ? '正在切换语音面试官' : '正在准备下一题的语音',
+              { flushCandidate: false }
+            ),
             prepare: () => Promise.all([reloadAgents(), reloadMessages()]),
             isCancelled: () => aliyunRtcAttemptRef.current !== handoffAttempt,
             start: () => startAliyunRtcCall({ afterHandoff: true }),
@@ -5765,9 +5759,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         }
       } else {
         await Promise.all([reloadMessages(), (state.action === 'switch_agent' || result.duplicate) && reloadAgents()]);
-        if (state.question && !isRtc) {
-          if (voiceProvider === 'qwen') playQwenSpeechInBackground(state.question.content);
-          await speakAliyunRtcMessage(state.question);
+        if (state.question && !isRtc && voiceProvider === 'qwen') {
+          playQwenSpeechInBackground(state.question.content);
         }
       }
     } catch (requestError) {

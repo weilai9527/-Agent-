@@ -6,7 +6,7 @@ import sys
 from textwrap import dedent
 
 
-def test_progress_is_atomic_and_recovers_awaited_captions(tmp_path):
+def test_progress_is_atomic_and_rtc_stores_the_server_question(tmp_path):
     script = dedent("""
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
@@ -56,16 +56,17 @@ def test_progress_is_atomic_and_recovers_awaited_captions(tmp_path):
                 assert state['action'] == 'finish_interview' and state['question'] is None
                 assert turn['decision']['round_count'] == 3
             else:
-                assert state['question'] is None and state['pending_spoken_submission_id'] == sid
+                previous = turn['question']
+                assert previous['content'] == turn['decision']['question']
+                assert state['question']['id'] == previous['id']
+                assert state['pending_spoken_submission_id'] is None
                 spoken = {'content':'遇到这个问题你怎么做？','transcript_text':'那么，遇到这个问题你怎么做？',
                           'source_ref':'agent-'+sid}
                 endpoint = path+'/turns/'+sid+'/spoken-question'
-                if n == 2:
-                    previous = post(path+'/current-question',{'recover_spoken':True})['question']
-                else:
-                    previous = post(endpoint,spoken)['question']
-                    assert previous['content'] == turn['decision']['question']
-                assert post(endpoint,spoken)['question']['id'] == previous['id']
+                mismatched = post(endpoint, spoken)
+                assert mismatched['requires_reconciliation']
+                assert mismatched['question']['id'] == previous['id']
+                assert post(path+'/current-question',{'recover_spoken':True})['question']['id'] == previous['id']
                 assert client.post(path+'/turns/turn-1/spoken-question',json=spoken).status_code == 409
         assert main.one('SELECT count(*) AS n FROM interview_turns')['n'] == 16
         assert post(path + '/current-question', {'recover_spoken':True})['action'] == 'finish_interview'
@@ -80,6 +81,46 @@ def test_progress_is_atomic_and_recovers_awaited_captions(tmp_path):
         assert post(path+'/current-question')['action'] == 'finish_interview'
     """)
     run_isolated(script, tmp_path)
+
+
+def test_legacy_pending_spoken_question_recovers_only_the_server_decision(tmp_path):
+    run_isolated(dedent("""
+        from fastapi.testclient import TestClient
+        from backend.src import main
+
+        client = TestClient(main.app)
+        def post(url, body=None):
+            result = client.post(url, json=body or {})
+            assert result.is_success, result.text
+            return result.json()
+
+        post('/api/auth/register', {'email':'legacy-rtc@example.com','password':'Password123!'})
+        for recover_from_progress in (False, True):
+            created = post('/api/interviews', {'target_role':'后端工程师'})
+            interview_id = created['interview']['id']
+            agent = created['agents'][0]
+            path = '/api/interviews/' + interview_id
+            main.append_message(interview_id, agent['id'], 'question', '之前的题目？')
+            main.db.commit()
+            previous = post(path + '/current-question')['question']
+            with main.locked_session(interview_id, created['interview']['user_id']):
+                main.commit_turn(interview_id, 'pending', previous,
+                    {'id':str(main.uuid4()), 'content':'历史回答', 'source':'aliyun_rtc', 'source_ref':'pending'},
+                    {'action':'ask_follow_up', 'question':'服务端原本决定的题目？'}, None)
+            state = post(path + '/current-question')
+            assert state['question'] is None and state['pending_spoken_submission_id'] == 'pending'
+            spoken = {'content':'浏览器提供的另一个题目？', 'transcript_text':'不同字幕', 'source_ref':'agent-pending'}
+            endpoint = path + '/turns/pending/spoken-question'
+            if recover_from_progress:
+                question = post(path + '/current-question', {'recover_spoken':True})['question']
+            else:
+                response = post(endpoint, spoken)
+                assert response['requires_reconciliation']
+                question = response['question']
+            assert question['content'] == '服务端原本决定的题目？'
+            assert post(endpoint, spoken)['question']['id'] == question['id']
+            assert post(path + '/current-question')['pending_spoken_submission_id'] is None
+    """), tmp_path)
 
 
 def run_isolated(script, tmp_path):

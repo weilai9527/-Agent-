@@ -138,7 +138,7 @@ def test_architecture_live_transcript_replay_text_and_rtc(monkeypatch):
         messages.append(answer)
     assert len(set(seen)) == 3
     assert "假设流量" in seen[0] and "数据会经过" in seen[1] and "网络断开" in seen[2]
-    assert ANSWER_CONTEXT_POLICY in build_rtc_ai_agent_prompt({}, [agent], messages, None)
+    assert "禁止自行生成问题" in build_rtc_ai_agent_prompt({}, [agent], messages, None)
     assert ANSWER_CONTEXT_POLICY in _build_messages(interview={}, active_agent=agent, messages=messages,
                                                     last_answer=replies[-1])[0]["content"]
 

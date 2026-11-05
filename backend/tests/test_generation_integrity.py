@@ -75,10 +75,12 @@ def test_client_cannot_supply_authoritative_questions(tmp_path):
     q=question()
     assert q['content']!='自行指定的题目'
     turn=post(path+'/turns',{'question_id':q['id'],'submission_id':'rtc-1','content':'不知道','source':'aliyun_rtc'})
-    assert turn['question'] is None
+    assert turn['question']['content']==turn['decision']['question']
+    assert question()['id']==turn['question']['id']
     response=post(path+'/turns/rtc-1/spoken-question',{'content':'伪造语音追问','source_ref':'untrusted'})
     assert response['requires_reconciliation']
     assert response['question']['content']==turn['decision']['question']
+    assert response['question']['id']==turn['question']['id']
     assert question()['id']==response['question']['id']
     assert post(path+'/turns/rtc-1/spoken-question',{'content':'另一个伪造题目','source_ref':'another'})['question']['id']==response['question']['id']
     """)

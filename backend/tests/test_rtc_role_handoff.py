@@ -89,3 +89,63 @@ def test_new_rtc_task_uses_current_role_question_and_bounded_opening_context(tmp
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+
+def test_restarting_rtc_plays_next_canonical_question_for_same_role(tmp_path):
+    environment = {
+        **os.environ, "APP_ENV": "test", "DB_ENGINE": "sqlite",
+        "SQLITE_PATH": str(tmp_path / "rtc-notify.sqlite"),
+    }
+    script = textwrap.dedent('''
+        from fastapi.testclient import TestClient
+        from backend.src import main
+
+        client = TestClient(main.app)
+        def post(url, payload=None):
+            response = client.post(url, json=payload or {})
+            assert response.is_success, response.text
+            return response.json()
+
+        post('/api/auth/register', {'email':'rtc-notify@example.com', 'password':'Password123!'})
+        created = post('/api/interviews', {'target_role':'后端工程师'})
+        interview_id = created['interview']['id']
+        agent_id = created['agents'][0]['id']
+        path = '/api/interviews/' + interview_id
+        main.append_message(interview_id, agent_id, 'question', '首个服务端问题？')
+        main.db.commit()
+        first = post(path + '/current-question')['question']
+        started, stopped = [], []
+        def start(**options):
+            started.append(options)
+            return {'task_id': options['task_id'], 'request_id': 'start'}
+        def stop(**options):
+            stopped.append(options['task_id'])
+            return {'request_id': 'stop'}
+        main.start_rtc_ai_agent = start
+        main.stop_rtc_ai_agent = stop
+        main.resume_analysis_for_prompt = lambda *args, **kwargs: None
+        task = post(path + '/rtc/agent/start')['task_id']
+        assert started[0]['greeting'] == first['content']
+        assert '禁止自行生成问题' in started[0]['prompt']
+
+        turn = post(path + '/turns', {'question_id':first['id'], 'submission_id':'rtc-turn',
+                                     'content':'还不清楚', 'source':'aliyun_rtc'})
+        assert turn['action'] == 'ask_follow_up'
+        current = turn['question']
+        assert current['agent_id'] == agent_id
+        assert post(path + '/rtc/agent/start')['task_id'] == task
+        assert len(started) == 1
+
+        assert post(path + '/rtc/agent/stop', {'expected_task_id':task})['status'] == 'stopped'
+        next_start = post(path + '/rtc/agent/start')
+        assert next_start['task_id'] != task
+        assert stopped == [task]
+        assert [call['greeting'] for call in started] == [first['content'], current['content']]
+        assert next_start['current_question_id'] == current['id']
+        assert started[0]['channel_id'] == started[1]['channel_id']
+    ''')
+    result = subprocess.run(
+        [sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[2],
+        env=environment, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"

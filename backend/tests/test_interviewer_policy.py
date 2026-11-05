@@ -71,7 +71,7 @@ def test_policy_round_trip_permissions_and_all_prompt_paths(tmp_path):
         assert reloaded["interviewer_strategy"] == interview["interviewer_strategy"]
         legacy = {key: value for key, value in reloaded.items() if key != "interviewer_strategy"}
         assert "背景职责 -> 方案取舍" in main.build_realtime_session_config(legacy, agents, [], None)["instructions"]
-        assert "追问优先覆盖：候选人职责" in main.build_rtc_ai_agent_prompt(legacy, agents, [], None)
+        assert "禁止自行生成问题" in main.build_rtc_ai_agent_prompt(legacy, agents, [], None)
         assert "本场固定面试官策略" not in main.build_rtc_ai_agent_prompt(legacy, agents, [], None)
         for active in agents:
             round_agents = [{**agent, "status": "active" if agent["id"] == active["id"] else "pending"} for agent in agents]

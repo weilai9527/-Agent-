@@ -114,6 +114,87 @@ def test_concurrent_retries_call_generator_once(tmp_path):
     """)
 
 
+@pytest.mark.parametrize("edited", [False, True])
+def test_failed_followup_accepts_new_submission_after_reload(tmp_path, edited):
+    run_case(tmp_path, "edited = " + repr(edited) + "\n" + textwrap.dedent("""
+    q=question()
+    original={'question_id':q['id'],'submission_id':'before-reload','content':'我使用缓存减少查询。'}
+    def fail(**kwargs):raise RuntimeError('temporary worker failure')
+    main.generate_kimi_followup=fail
+    failed_client=TestClient(main.app,raise_server_exceptions=False)
+    failed_client.cookies.update(client.cookies)
+    assert failed_client.post(path+'/turns',json=original).status_code==500
+    failed=jobs.task_by_key(i,'followup',q['id'])
+    assert failed['status']=='failed'
+    assert main.one('SELECT COUNT(*) AS n FROM interview_turns')['n']==0
+    assert main.one("SELECT COUNT(*) AS n FROM interview_messages WHERE sender_type='candidate'")['n']==0
+
+    # 同一提交标识不能表示修改后的回答，即使原任务已经失败。
+    changed=client.post(path+'/turns',json={**original,'content':'修改后的回答'})
+    assert changed.status_code==409
+    assert jobs.task_by_id(failed['id'])['input_hash']==failed['input_hash']
+    main.generate_kimi_followup=lambda **kwargs:{'question':'恢复后的追问'}
+    reloaded=TestClient(main.app)
+    reloaded.cookies.update(client.cookies)
+    assert reloaded.post(path+'/current-question').json()['question']['id']==q['id']
+    replacement={**original,'submission_id':'after-reload'}
+    if edited:replacement['content']='我使用缓存减少查询，并设置过期时间。'
+    response=reloaded.post(path+'/turns',json=replacement)
+    assert response.status_code==200,response.text
+    result=response.json()
+    assert result['answer']['content']==replacement['content']
+    assert not result['duplicate']
+    fresh=jobs.task_by_id(failed['id'])
+    assert fresh['status']=='succeeded' and fresh['attempt_count']==2
+    assert json.loads(fresh['input_json'])['submission_id']=='after-reload'
+    assert fresh['input_hash']!=failed['input_hash']
+    assert fresh['error'] is None
+    replay=reloaded.post(path+'/turns',json=replacement).json()
+    assert replay['duplicate'] and replay['answer']['id']==result['answer']['id']
+    assert client.post(path+'/turns',json=original).status_code==409
+    assert main.one('SELECT COUNT(*) AS n FROM interview_turns')['n']==1
+    assert main.one("SELECT COUNT(*) AS n FROM interview_messages WHERE sender_type='candidate'")['n']==1
+    """))
+
+
+def test_failed_followup_replacement_has_one_owner_and_fences_old_lease(tmp_path):
+    run_case(tmp_path, """
+    q=question()
+    original={'question_id':q['id'],'submission_id':'failed','content':'我使用缓存减少查询。'}
+    old_tokens=[]
+    def fail(**kwargs):
+        old_tokens.append(jobs.task_by_key(i,'followup',q['id'])['lease_token'])
+        raise RuntimeError('temporary worker failure')
+    main.generate_kimi_followup=fail
+    try:main.submit_turn(i,original,user)
+    except RuntimeError:pass
+    else:raise AssertionError('expected task failure')
+    task=jobs.task_by_key(i,'followup',q['id'])
+    entered,release=Event(),Event()
+    calls=[]
+    def generate(**kwargs):
+        calls.append(1);entered.set();assert release.wait(8)
+        return {'question':'恢复后的追问'}
+    main.generate_kimi_followup=generate
+    replacement={**original,'submission_id':'replacement'}
+    with ThreadPoolExecutor(2) as pool:
+        first=pool.submit(main.submit_turn,i,replacement,user)
+        assert entered.wait(5)
+        duplicate=pool.submit(main.submit_turn,i,dict(replacement),user)
+        try:
+            for body in (original,{**replacement,'submission_id':'competing-tab'}):
+                assert client.post(path+'/turns',json=body).status_code==409
+            with main.locked_session(i,user['id']):
+                assert not jobs.finish_locked(task['id'],old_tokens[0],{},'failed')
+            assert jobs.task_by_id(task['id'])['status']=='running'
+        finally:release.set()
+        replies=[first.result(),duplicate.result()]
+    assert calls==[1] and sum(r['duplicate'] for r in replies)==1
+    assert jobs.task_by_id(task['id'])['attempt_count']==2
+    assert main.one('SELECT COUNT(*) AS n FROM interview_turns')['n']==1
+    """)
+
+
 def test_late_report_cannot_overwrite_rescore_or_review(tmp_path):
     run_case(tmp_path, """
     answer=answered()

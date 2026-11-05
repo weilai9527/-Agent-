@@ -3147,7 +3147,14 @@ def submit_turn(interview_id: str, body: dict, user: dict = Depends(require_auth
         if task:
             saved = json.loads(task["input_json"])
             if saved["submission_id"] != submission_id or saved["message"] != message:
-                raise error(409, "当前题已由另一份回答领取，请同步题目后重试。")
+                # 刷新页面会产生新的提交标识。仅允许替换当前题尚未提交的
+                # 失败任务；运行中的任务和同一标识下修改回答仍然拒绝。
+                if task["status"] != "failed" or saved["submission_id"] == submission_id:
+                    raise error(409, "当前题已由另一份回答领取，请同步题目后重试。")
+                task = generation_tasks.replace_failed_followup_locked(task, {
+                    "question_id": question_id, "submission_id": submission_id,
+                    "message": message, "answer_id": str(uuid4()),
+                })
         else:
             task = generation_tasks.enqueue_locked(interview_id, "followup", question_id, {
                 "question_id": question_id, "submission_id": submission_id,

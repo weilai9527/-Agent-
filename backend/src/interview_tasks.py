@@ -64,6 +64,16 @@ def enqueue_locked(interview_id, kind, key, payload, revision=None):
     return task_by_id(task_id)
 
 
+def replace_failed_followup_locked(task, payload):
+    """会话锁内替换尚未提交的失败回答，保留任务标识和尝试次数。"""
+    source = encode(payload)
+    db.execute("""UPDATE interview_tasks SET input_json=?,input_hash=?,status='queued',
+        result_json=NULL,error=NULL,lease_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND task_type='followup' AND status='failed'""",
+        (source, hashlib.sha256(source.encode()).hexdigest(), task["id"])).close()
+    return task_by_id(task["id"])
+
+
 def claim_locked(task, *, retry_failed=False, retry_completed=False):
     now = database_now()
     if task["status"] == "running" and (task.get("lease_until") or 0) > now:

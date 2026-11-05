@@ -1,0 +1,4 @@
+-r ../requirements.txt
+websocket-client
+websockets>=14
+alibabacloud_rtc20180111==5.3.5

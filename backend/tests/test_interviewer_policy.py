@@ -7,13 +7,17 @@ import textwrap
 
 def test_policy_round_trip_permissions_and_all_prompt_paths(tmp_path):
     environment = os.environ.copy()
-    environment.update({"APP_ENV": "test", "DB_ENGINE": "sqlite", "SQLITE_PATH": str(tmp_path / "policy.sqlite"), "ADMIN_COOKIE_SECURE": "false", "PYTHONIOENCODING": "utf-8"})
+    environment.update({"APP_ENV": "test", "DB_ENGINE": "sqlite", "SQLITE_PATH": str(tmp_path / "policy.sqlite"),
+                        "ADMIN_MASTER_EMAIL": "policy-test@example.test", "ADMIN_MASTER_PASSWORD": "SyntheticPolicyTestOnly!",
+                        "ADMIN_COOKIE_SECURE": "false", "PYTHONIOENCODING": "utf-8"})
     script = textwrap.dedent('''
         from copy import deepcopy
         from fastapi.testclient import TestClient
         from unittest.mock import patch
-        import backend.src.main as main
-        import admin_backend.src.main as admin
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
+        import admin_backend.offline.main as admin
         from backend.src.kimi_followup import _build_messages, generate_opening_question, FollowupProvider
         from shared.interviewer_policy import ensure_interviewer_policy_schema, load_snapshot
 

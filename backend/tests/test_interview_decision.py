@@ -109,7 +109,9 @@ if __name__ == "__main__":
 def test_architecture_live_transcript_replay_text_and_rtc(monkeypatch):
     from backend.src.interview_decision import ANSWER_CONTEXT_POLICY
     from backend.src.kimi_followup import _build_messages, generate_kimi_followup
-    from backend.src.main import build_rtc_ai_agent_prompt
+    from shared.offline_fixture import enable_offline_fixture
+    enable_offline_fixture()
+    from backend.offline.main import build_rtc_ai_agent_prompt
 
     agent = {**AGENTS[1], "agent_name": "架构面试官", "status": "active"}
     messages = []
@@ -130,7 +132,7 @@ def test_architecture_live_transcript_replay_text_and_rtc(monkeypatch):
         assert result["followup_mode"] == ("hypothetical" if i == 0 else "change_topic")
         assert not any(e["status"] == "supported" for e in result["evidence"].values())
         question = result["question"]
-        for decision in (result, None):  # managed and old-format text paths
+        for decision in (result, None):  # 同时覆盖按轮次管理的面试和旧格式文本。
             text = generate_kimi_followup(interview={}, active_agent=agent, messages=messages,
                                           last_answer=content, turn_decision=decision)
             assert text["question"] == question

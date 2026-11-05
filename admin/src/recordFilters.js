@@ -12,7 +12,7 @@ export function recordFilterOptions(rows, key, college = '') {
     .sort((left, right) => String(left).localeCompare(String(right), 'zh-CN', { numeric: true }));
 }
 
-// Date inputs use the same calendar date shown in the list, including the entire end day.
+// 按列表显示的日期筛选，截止日期当天的所有记录也包括在内。
 export function matchesRecordFilters(row, filters, dateKey) {
   if (['college', 'className', 'role', 'type', 'grade'].some((key) => filters[key] && row[key] !== filters[key])) return false;
   if (filters.scoreBand) {

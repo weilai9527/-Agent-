@@ -1,5 +1,4 @@
-// A retry must identify the same answer to the same question, even if the
-// first request committed before the connection was lost.
+// 服务端可能在断线前已保存回答。重试应复用同一题、同一回答的提交编号。
 export function createAnswerSubmission({ questionId, content, sourceRef, previous }) {
   const source = sourceRef ? 'aliyun_rtc' : 'text';
   if (!sourceRef && previous?.question_id === questionId && previous.content === content) return previous;
@@ -21,8 +20,7 @@ export async function postInterviewTurn(post, submission, validate) {
   }
 }
 
-// Keep captions in arrival order. A failed write stays at the head until an
-// explicit retry, so later answers cannot overtake their spoken question.
+// 按顺序保存字幕。写入失败时保留队首，防止后续回答先于对应口述问题入库。
 export function createRtcWriteQueue(onError) {
   const writes = [];
   let running = null;

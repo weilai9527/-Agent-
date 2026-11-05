@@ -1,0 +1,7 @@
+# 原生部署依赖。安装这些依赖后只需分发 services、shared 和 deploy 源码。
+-r ../services/requirements.txt
+-r ../services/identity/requirements.txt
+-r ../services/profile/requirements.txt
+-r ../services/career/requirements.txt
+-r ../services/media/requirements.txt
+python-docx

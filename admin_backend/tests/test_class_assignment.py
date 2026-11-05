@@ -28,7 +28,9 @@ def run_isolated(tmp_path, script):
 
 def test_numbered_classes_and_existing_enrollment_are_assigned_safely(tmp_path):
     run_isolated(tmp_path, '''
-        import admin_backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import admin_backend.offline.main as main
 
         for name, expected in [
             ("G22计算机应用技术1班", ("计算机应用技术", "G22")),
@@ -61,7 +63,7 @@ def test_numbered_classes_and_existing_enrollment_are_assigned_safely(tmp_path):
         second = main.one("SELECT * FROM student_enrollments WHERE user_id = 'second'")
         assert first["class_id"] != second["class_id"]
 
-        # A focus action creates an enrollment even before the class is known.
+        # 即使尚未确定班级，标记重点关注也会创建学生归属记录。
         main.upsert_student_enrollment("unassigned", class_id=None, status="inactive", focus_flag=True, note="keep")
         main.db.begin()
         main.assign_registration_to_class("unassigned", "20260003", "计算机学院", "G22计算机应用技术1班")
@@ -73,7 +75,7 @@ def test_numbered_classes_and_existing_enrollment_are_assigned_safely(tmp_path):
         assert main.one("SELECT * FROM student_enrollments WHERE user_id = 'first'") == first
         assert len(main.all_rows("SELECT id FROM campus_classes")) == 2
 
-        # Class assignment must be part of the caller's import transaction.
+        # 归班操作必须纳入调用方的导入事务。
         main.db.begin()
         main.assign_registration_to_class("rollback", "20260004", "计算机学院", "G22计算机应用技术3班")
         main.db.rollback()
@@ -95,7 +97,9 @@ def test_workbook_import_assigns_new_updated_and_migrated_accounts_atomically(tm
     run_isolated(tmp_path, '''
         from io import BytesIO
         from openpyxl import Workbook
-        import admin_backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import admin_backend.offline.main as main
 
         def workbook(numbers):
             book = Workbook()

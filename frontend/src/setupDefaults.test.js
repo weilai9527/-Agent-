@@ -22,7 +22,7 @@ const savedProfile = {
   preferred_interviewer_style: '犀利追问',
 };
 
-test('guided difficulty keeps the selected preset while loading role and resume', () => {
+test('载入岗位和简历时保留已选的引导难度', () => {
   assert.deepEqual(mergeProfileIntoSetup(easyPreset, savedProfile, 'guided'), {
     ...easyPreset,
     role: '幼儿园行政助理',
@@ -30,7 +30,7 @@ test('guided difficulty keeps the selected preset while loading role and resume'
   });
 });
 
-test('custom setup can reuse saved interview preferences', () => {
+test('自定义设置沿用已保存的面试偏好', () => {
   const result = mergeProfileIntoSetup(easyPreset, savedProfile, 'custom');
   assert.equal(result.level, '中级');
   assert.equal(result.interviewType, '技术二面');
@@ -40,7 +40,7 @@ test('custom setup can reuse saved interview preferences', () => {
   assert.equal(result.focusArea, '八股基础');
 });
 
-test('an edited brief is never replaced by a delayed profile response', () => {
+test('延迟到达的资料不覆盖学生已编辑的简介', () => {
   const current = { ...easyPreset, brief: '用户刚刚输入的内容' };
   assert.equal(
     mergeProfileIntoSetup(current, savedProfile, 'guided', { preserveBrief: true }).brief,

@@ -18,7 +18,9 @@ def test_rtc_startup_uses_cache_and_recovers_only_after_request_settles(tmp_path
     script = textwrap.dedent('''
         from datetime import datetime, timedelta, timezone
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
         from backend.src import rtc_session_store as store
 
         client = TestClient(main.app)

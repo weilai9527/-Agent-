@@ -20,5 +20,4 @@ def load_env_file(path: Path) -> None:
 ADMIN_BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = ADMIN_BACKEND_DIR.parent
 
-load_env_file(PROJECT_DIR / "backend" / ".env")
-load_env_file(ADMIN_BACKEND_DIR / ".env")
+# 历史数据夹具只能接收调用方传入的隔离配置，导入时不读取部署环境文件。

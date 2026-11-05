@@ -8,9 +8,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 
-TEST_DB_PATH = Path(tempfile.gettempdir()) / "multi_agent_interview_admin_auth_test.sqlite"
-if TEST_DB_PATH.exists():
-    TEST_DB_PATH.unlink()
+_fixture_dir = tempfile.TemporaryDirectory(prefix="school-admin-auth-")
+TEST_DB_PATH = Path(_fixture_dir.name) / "admin.sqlite"
 
 os.environ["DB_ENGINE"] = "sqlite"
 os.environ["SQLITE_PATH"] = str(TEST_DB_PATH)
@@ -24,8 +23,10 @@ os.environ["ADMIN_COOKIE_SECURE"] = "false"
 
 from fastapi.testclient import TestClient
 
-from admin_backend.src import main as admin_main
-from admin_backend.src.main import app
+from shared.offline_fixture import enable_offline_fixture
+enable_offline_fixture()
+from admin_backend.offline import main as admin_main
+from admin_backend.offline.main import app
 
 
 TRUSTED_ORIGIN = "http://127.0.0.1:5174"
@@ -199,14 +200,14 @@ class AdminAuthTests(unittest.TestCase):
             f"/api/admin/reports/{report_id}/review",
             headers={"Origin": TRUSTED_ORIGIN}, json={"status": "approved"},
         )
-        self.assertEqual(review.status_code, 200, review.text)
+        self.assertEqual(review.status_code, 403, review.text)
         self.assertEqual(
             self.client.get(f"/api/admin/interviews/{interview_id}").json()["reviewReport"]["review_status"],
-            "approved",
+            "pending",
         )
 
     def insert_candidate_user(self, user_id: str, email: str, name: str) -> None:
-        """Keep admin tests independent from candidate-backend import order."""
+        """管理端测试应独立于候选人后端模块的导入顺序。"""
         columns = {
             row[1]
             for row in admin_main.db.execute("PRAGMA table_info(users)").fetchall()
@@ -446,7 +447,7 @@ class AdminAuthTests(unittest.TestCase):
         second_id = str(uuid4())
         self.insert_candidate_user(first_id, "campus-student-1@example.com", "Campus Student One")
         self.insert_candidate_user(second_id, "campus-student-2@example.com", "Campus Student Two")
-        # The student overview includes only accounts linked to an active registration.
+        # 学生概览只应列入与有效注册记录关联的账号。
         for user_id, student_no, name in (
             (first_id, "20270001", "Campus Student One"),
             (second_id, "20270002", "Campus Student Two"),
@@ -613,49 +614,23 @@ class AdminAuthTests(unittest.TestCase):
         self.assertEqual(event["metadata"]["candidateType"], "relay")
         self.assertGreaterEqual(body["summary"]["warnings"], 1)
 
-    def test_super_admin_can_save_masked_report_provider_settings(self):
+    def test_super_admin_saves_only_non_secret_settings_through_provider_service(self):
         self.login_super_admin()
-        with tempfile.TemporaryDirectory() as directory:
-            env_path = Path(directory) / ".env"
-            with patch.object(admin_main, "USER_BACKEND_ENV_PATH", env_path), patch.dict(os.environ, {}, clear=False):
-                response = self.client.patch(
-                    "/api/admin/settings",
-                    headers={"Origin": TRUSTED_ORIGIN},
-                    json={
-                        "reportOpenaiApiKey": "sk-test-openai-report-secret",
-                        "reportOpenaiModel": "gpt-4o-mini",
-                        "reportQwenApiKey": "sk-test-qwen-report-secret",
-                        "reportQwenModel": "qwen-plus",
-                        "reportProviderOrder": "openai,qwen",
-                        "reportTimeout": 60,
-                        "reportRetries": 1,
-                    },
-                )
+        config = {"reportOpenaiModel": "test-openai"}
+        with patch.object(admin_main, "provider_request", return_value=config) as gateway:
+            response = self.client.patch("/api/admin/settings", headers={"Origin": TRUSTED_ORIGIN}, json=config)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["settings"], config)
+            self.assertEqual(gateway.await_args.args[1:], ("PATCH", "/settings", "providers.configure", config))
 
-                self.assertEqual(response.status_code, 200, response.text)
-                serialized = response.text
-                self.assertNotIn("sk-test-openai-report-secret", serialized)
-                self.assertNotIn("sk-test-qwen-report-secret", serialized)
-                settings = response.json()["settings"]
-                self.assertTrue(settings["reportOpenaiApiKeyConfigured"])
-                self.assertTrue(settings["reportQwenApiKeyConfigured"])
-                self.assertEqual(settings["reportProviderOrder"], "openai,qwen")
-                saved = env_path.read_text(encoding="utf-8")
-                self.assertIn("OPENAI_API_KEY=sk-test-openai-report-secret", saved)
-                self.assertIn("QWEN_API_KEY=sk-test-qwen-report-secret", saved)
-
-    def test_report_provider_settings_reject_env_line_injection(self):
+    def test_super_admin_cannot_send_secrets_to_provider_settings(self):
         self.login_super_admin()
-        with tempfile.TemporaryDirectory() as directory:
-            env_path = Path(directory) / ".env"
-            with patch.object(admin_main, "USER_BACKEND_ENV_PATH", env_path):
-                response = self.client.patch(
-                    "/api/admin/settings",
-                    headers={"Origin": TRUSTED_ORIGIN},
-                    json={"reportOpenaiApiKey": "valid-looking-key\nINJECTED=true"},
-                )
-                self.assertEqual(response.status_code, 400, response.text)
-                self.assertFalse(env_path.exists())
+        with patch.object(admin_main, "provider_request") as gateway:
+            response = self.client.patch("/api/admin/settings", headers={"Origin": TRUSTED_ORIGIN},
+                                         json={"reportOpenaiApiKey": "private-test-value"})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertNotIn("private-test-value", response.text)
+            gateway.assert_not_called()
 
     def test_super_admin_can_run_sanitized_report_provider_diagnostics(self):
         self.login_super_admin()
@@ -670,7 +645,7 @@ class AdminAuthTests(unittest.TestCase):
                 "latency_ms": 321,
             }
         ]
-        with patch("backend.src.provider_diagnostics.diagnose_report_providers", return_value=result):
+        with patch.object(admin_main, "provider_request", return_value={"providers": result}):
             response = self.client.post(
                 "/api/admin/settings/report-providers/test",
                 headers={"Origin": TRUSTED_ORIGIN},

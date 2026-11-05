@@ -16,7 +16,9 @@ def test_completed_report_can_be_downloaded_as_utf8_markdown(tmp_path):
         """
         import json
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         client = TestClient(main.app)
         registered = client.post(

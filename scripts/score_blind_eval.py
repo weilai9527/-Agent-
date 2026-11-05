@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare blind reviewer sheets and compare two scoring versions on the same answers."""
+"""生成供评审员盲评的表格，比较两个评分版本对同一组回答的评分。"""
 
 import argparse
 import csv
@@ -110,7 +110,7 @@ def rate(numerator, denominator):
 
 
 def agreement(pairs):
-    # With linear weights the common distance scale factor cancels in kappa.
+    # 采用线性权重时，计算加权 kappa 的分子和分母会约去同一个距离缩放因子。
     n = len(pairs)
     actual = [0] * 5
     predicted = [0] * 5

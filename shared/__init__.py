@@ -1,1 +1,1 @@
-"""Shared domain services used by the candidate and administration APIs."""
+"""学生端、管理端及各业务服务共用的数据契约与基础能力。"""

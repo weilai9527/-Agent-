@@ -202,17 +202,20 @@ def test_real_student_and_admin_audit_flow(tmp_path):
         import json
         from uuid import uuid4
         from fastapi.testclient import TestClient
-        import backend.src.main as main
-        import admin_backend.src.main as admin
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
+        import admin_backend.offline.main as admin
         uid = str(uuid4())
         with main.db:
             main.db.execute("INSERT INTO users (id,email,student_no,password_hash,name,must_change_password,status) VALUES (?,?,?,?,?,1,'normal')",
                 (uid,'20260101@student.local','20260101',main.hash_password('TempSecret123!'),'audit-test')).close()
-        student = TestClient(main.app)
+        student = TestClient(main.app, base_url='https://testserver')
         failure = student.post('/api/auth/login',json={'student_no':'20260101','password':'WrongSecret123!'})
         assert failure.status_code == 401
         logged = student.post('/api/auth/login',json={'student_no':'20260101','password':'TempSecret123!'})
         assert logged.status_code == 200
+        assert "secure" in logged.headers["set-cookie"].lower()
         assert student.get('/api/profile').status_code == 403
         changed = student.post('/api/auth/change-initial-password',json={'password':'NewSecret123!','confirm_password':'NewSecret123!'})
         assert changed.status_code == 200
@@ -237,7 +240,7 @@ def test_real_student_and_admin_audit_flow(tmp_path):
         assert 'Secret123!' not in json.dumps(events)
         assert tokens[0] not in json.dumps(events)
         assert any(e.get('actor_id')==uid and e['event_type']=='student.password_reset' for e in events)
-        root = TestClient(admin.app)
+        root = TestClient(admin.app, base_url='https://testserver')
         assert root.get('/api/admin/security-logs').status_code == 401
         assert root.post('/api/admin/auth/login',headers={'Origin':'http://127.0.0.1:5174'},json={'email':'audit-root@example.com','password':'AuditRoot123!'}).status_code==200
         queried = root.get('/api/admin/security-logs',params={'request_id':failure.headers['x-request-id']})
@@ -256,7 +259,7 @@ def test_real_student_and_admin_audit_flow(tmp_path):
         assert root.get('/api/admin/security-logs',params={'limit':201}).status_code==422
         created = root.post('/api/admin/users',headers={'Origin':'http://127.0.0.1:5174'},json={'email':'auditor@example.com','password':'AuditorPassword123!','name':'auditor','role':'reviewer','permissions':[]})
         assert created.status_code==201,created.text
-        limited=TestClient(admin.app)
+        limited=TestClient(admin.app, base_url='https://testserver')
         assert limited.post('/api/admin/auth/login',headers={'Origin':'http://127.0.0.1:5174'},json={'email':'auditor@example.com','password':'AuditorPassword123!'}).status_code==200
         denied=limited.get('/api/admin/security-logs')
         assert denied.status_code==403

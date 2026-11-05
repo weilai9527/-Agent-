@@ -6,23 +6,29 @@ from pathlib import Path
 import re
 import sqlite3
 import threading
+import ssl
+
+from services.assessment.storage_mode import assessment_owner, emit_projections, setting
+
+from shared.offline_fixture import connect_offline_sqlite, require_offline_fixture
+require_offline_fixture()
 
 from . import env  # noqa: F401
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-DB_ENGINE = os.environ.get("DB_ENGINE", "mysql").strip().lower()
-SQLITE_PATH = Path(os.environ.get("SQLITE_PATH") or BACKEND_DIR / "data" / "dev.sqlite")
+DB_ENGINE = setting("DB_ENGINE", "mysql").strip().lower()
+SQLITE_PATH = Path(setting("SQLITE_PATH") or BACKEND_DIR / "data" / "dev.sqlite")
 
 
 @dataclass(frozen=True)
 class MySQLConfig:
-    host: str = os.environ.get("MYSQL_HOST", "127.0.0.1")
-    port: int = int(os.environ.get("MYSQL_PORT", "3306"))
-    user: str = os.environ.get("MYSQL_USER", "root")
-    password: str = os.environ.get("MYSQL_PASSWORD", "")
-    database: str = os.environ.get("MYSQL_DATABASE", "multi_agent_interview")
-    charset: str = os.environ.get("MYSQL_CHARSET", "utf8mb4")
+    host: str = setting("MYSQL_HOST", "127.0.0.1")
+    port: int = int(setting("MYSQL_PORT", "3306"))
+    user: str = setting("MYSQL_USER", "root")
+    password: str = setting("MYSQL_PASSWORD", "")
+    database: str = setting("MYSQL_DATABASE", "multi_agent_interview")
+    charset: str = setting("MYSQL_CHARSET", "utf8mb4")
 
 
 config = MySQLConfig()
@@ -52,6 +58,8 @@ def _normalize_sql(sql: str) -> str:
 
 
 class MySQLDatabase:
+    engine = "mysql"
+
     def __init__(self, cfg: MySQLConfig):
         self.cfg = cfg
         self._local = threading.local()
@@ -82,7 +90,9 @@ class MySQLDatabase:
         if conn and getattr(conn, "open", False):
             return conn
 
-        self._ensure_database()
+        service_identity = os.environ.get("SERVICE_ID")
+        if not assessment_owner() and not service_identity:
+            self._ensure_database()
         pymysql = _load_pymysql()
         conn = pymysql.connect(
             host=self.cfg.host,
@@ -93,6 +103,9 @@ class MySQLDatabase:
             charset=self.cfg.charset,
             autocommit=True,
             cursorclass=pymysql.cursors.DictCursor,
+            **({"ssl": ssl.create_default_context(cafile=os.environ.get(
+                "ASSESSMENT_MYSQL_SSL_CA" if assessment_owner() else "MYSQL_SSL_CA"
+            ) or None)} if service_identity or assessment_owner() else {}),
         )
         self._local.conn = conn
         return conn
@@ -140,6 +153,8 @@ class MySQLDatabase:
 
 
 class SQLiteDatabase:
+    engine = "sqlite"
+
     def __init__(self, path: Path):
         self.path = path
         self._local = threading.local()
@@ -151,7 +166,7 @@ class SQLiteDatabase:
             return conn
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=30)
+        conn = connect_offline_sqlite(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
@@ -186,6 +201,8 @@ class SQLiteDatabase:
 
 
 db = SQLiteDatabase(SQLITE_PATH) if DB_ENGINE == "sqlite" else MySQLDatabase(config)
+from services.interview.offline_binding import bind
+bind(db)
 
 
 def row_to_dict(row: dict | None) -> dict | None:
@@ -710,6 +727,15 @@ def _ensure_turn_tables() -> None:
 
 
 def init_db() -> None:
+    if assessment_owner():
+        from services.assessment.schema import initialize
+        initialize(db, DB_ENGINE)
+        return
+    if emit_projections():
+        marker_query = ("SHOW TABLES LIKE 'assessment_database_owner'" if DB_ENGINE == "mysql" else
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='assessment_database_owner'")
+        if one(marker_query):
+            raise RuntimeError("Interview source points to the assessment database")
     if DB_ENGINE == "sqlite":
         _init_sqlite_db()
         _ensure_turn_tables()
@@ -1163,15 +1189,14 @@ init_db()
 
 from shared.interviewer_policy import ensure_interviewer_policy_schema
 
-ensure_interviewer_policy_schema(db, DB_ENGINE)
+if not assessment_owner():
+    ensure_interviewer_policy_schema(db, DB_ENGINE)
 
 from shared.security_logging import ensure_security_schema
 
 ensure_security_schema(db, DB_ENGINE)
 
-# The career catalog is shared by the candidate and administration services.
-# Keeping its schema service independent avoids coupling catalog growth to resume
-# or interview tables.
+# 候选人服务和管理服务共用岗位目录。目录独立维护表结构，因此扩充目录无需改动简历表或面试表。
 from shared.career_catalog import ensure_catalog_schema, seed_computer_pilot
 
 ensure_catalog_schema(db, DB_ENGINE)

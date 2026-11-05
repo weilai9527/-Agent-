@@ -1,4 +1,4 @@
-"""Administrator bootstrap must use explicit configuration, never default credentials."""
+"""引导创建管理员账号时必须显式配置登录凭据。"""
 import os
 from pathlib import Path
 import subprocess
@@ -20,7 +20,7 @@ def test_admin_bootstrap_requires_explicit_credentials(tmp_path, mode):
         "PYTHONUTF8": "1",
         "ADMIN_COOKIE_SECURE": "false",
         "STUDENT_TEMP_PASSWORD_KEY": Fernet.generate_key().decode("ascii"),
-        # Empty values also prevent ignored local .env files from filling these in.
+        # 显式设为空值，避免本机未纳入版本管理的 .env 文件补入凭据。
         "ADMIN_MASTER_EMAIL": "",
         "ADMIN_MASTER_PASSWORD": "",
         "ADMIN_BOOTSTRAP_EMAIL": "",
@@ -35,7 +35,7 @@ def test_admin_bootstrap_requires_explicit_credentials(tmp_path, mode):
         env["ADMIN_BOOTSTRAP_PASSWORD"] = "IgnoredLegacyPassword123!"
 
     success = mode in {"master", "legacy"}
-    script = "from admin_backend.src import main\n"
+    script = "from shared.offline_fixture import enable_offline_fixture\nenable_offline_fixture()\nfrom admin_backend.offline import main\n"
     if success:
         script += (
             "from fastapi.testclient import TestClient\n"

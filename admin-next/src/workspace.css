@@ -1,4 +1,4 @@
-/* White / blue / gray workspace. Color accents communicate status only. */
+/* 工作区采用白、蓝、灰三色，强调色仅用于标示状态。 */
 :root {
   --primary: #2563eb;
   --primary-hover: #1d4ed8;

@@ -1,4 +1,4 @@
-"""Shared interview policy, validated selections and immutable session snapshots."""
+"""校验面试官策略与学生选项，并在创建面试时冻结本场策略。"""
 from copy import deepcopy
 import json
 
@@ -42,6 +42,11 @@ def ensure_interviewer_policy_schema(db, engine):
     suffix = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" if engine == "mysql" else ""
     db.execute(f"CREATE TABLE IF NOT EXISTS interviewer_policy (id VARCHAR(40) PRIMARY KEY, config {text_type} NOT NULL){suffix}")
     db.execute(f"CREATE TABLE IF NOT EXISTS interview_strategy_snapshots (interview_id CHAR(36) PRIMARY KEY, config {text_type} NOT NULL, FOREIGN KEY (interview_id) REFERENCES interview_sessions(id) ON DELETE CASCADE){suffix}")
+    db.execute(f"""CREATE TABLE IF NOT EXISTS interview_policy_changes (
+        id CHAR(36) PRIMARY KEY, school_id VARCHAR(128) NOT NULL, actor_id VARCHAR(128) NOT NULL,
+        old_digest CHAR(64) NOT NULL, new_digest CHAR(64) NOT NULL,
+        changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ){suffix}""").close()
     db.commit()
 
 
@@ -66,7 +71,7 @@ def validate_policy(value):
         for field, limit in (("focus", 180), ("strategy", 240)):
             text = roles.get(role, {}).get(field) if isinstance(roles.get(role), dict) else None
             if not isinstance(text, str) or not text.strip() or len(text.strip()) > limit or "\0" in text:
-                raise ValueError(f"面试官侧重点需为 1–180 字，提问策略需为 1–240 字。")
+                raise ValueError("面试官侧重点需为 1–180 字，提问策略需为 1–240 字。")
             result["roles"][role][field] = text.strip()
     return result
 
@@ -78,7 +83,7 @@ def load_policy(db):
 
 def save_policy(db, value):
     policy = validate_policy(value)
-    # REPLACE is supported by both SQLite and MySQL and changes only this row.
+    # SQLite 和 MySQL 均支持 REPLACE，此操作只更新默认策略这一行。
     db.execute("REPLACE INTO interviewer_policy (id, config) VALUES (?, ?)", ("default", json.dumps(policy, ensure_ascii=False)))
     db.commit()
     return policy

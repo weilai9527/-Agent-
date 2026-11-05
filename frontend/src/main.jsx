@@ -1,5 +1,10 @@
 import { createAnswerSubmission, createRtcWriteQueue, postInterviewTurn } from './interviewTurn.js';
 import InterviewerStrategyFields from './InterviewerStrategyFields.jsx';
+import StudentTrainingPage from './StudentTrainingPage.jsx';
+import ProfileVersions from './ProfileVersions.jsx';
+import { confirmPendingVideo } from './questionMedia.js';
+import QuestionMedia, { QuestionPlayback } from './QuestionMedia.jsx';
+import TeachingCredentials from './TeachingCredentials.jsx';
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
@@ -64,168 +69,6 @@ import {
 import { mergeProfileIntoSetup } from './setupDefaults';
 import './styles.css';
 import './v4.css';
-
-const report = {
-  candidate: '林致远',
-  role: '高级前端开发工程师',
-  level: 'P6 / Senior',
-  result: '建议录用',
-  grade: 'A',
-  score: 86,
-  generatedAt: '2026-06-09 16:40',
-  interviewId: 'INT-20260609-FE-027',
-  radar: [
-    { subject: '硬技能', value: 88 },
-    { subject: '架构思维', value: 84 },
-    { subject: '业务理解', value: 78 },
-    { subject: '沟通表达', value: 90 },
-    { subject: '稳定抗压', value: 82 },
-    { subject: '学习迁移', value: 86 },
-  ],
-  metrics: [
-    {
-      label: '技术深度',
-      value: 89,
-      note: 'React Fiber、状态管理与性能优化回答完整，能解释底层机制与工程权衡。',
-    },
-    {
-      label: '系统设计',
-      value: 84,
-      note: '组件边界、缓存策略、灰度发布思路清晰，异常链路还可继续量化。',
-    },
-    {
-      label: '业务判断',
-      value: 78,
-      note: '能围绕转化与稳定性做取舍，但对指标拆解的主动性略弱。',
-    },
-    {
-      label: '表达协作',
-      value: 91,
-      note: '回答结构稳定，能先给结论再展开，追问下仍能保持节奏。',
-    },
-  ],
-  interviewers: [
-    {
-      name: '技术一面 Agent',
-      decision: '通过',
-      color: 'green',
-      text: '候选人对现代前端工程体系理解成熟，能从调度、渲染和工程治理三个层面展开。',
-    },
-    {
-      name: '架构二面 Agent',
-      decision: '通过',
-      color: 'blue',
-      text: '有大型项目复杂度意识，方案表达克制，具备主导中型模块的能力。',
-    },
-    {
-      name: 'HR Agent',
-      decision: '待确认',
-      color: 'amber',
-      text: '职业动机稳定，薪资与到岗时间需在 offer 前进一步确认。',
-    },
-  ],
-  timeline: [
-    {
-      type: 'tech',
-      title: 'Q1: 谈谈你对 React Fiber 的理解',
-      answer:
-        'Fiber 是 React 为了解决同步渲染阻塞主线程而引入的数据结构和调度模型。它把渲染工作拆成可中断的小单元，并结合优先级调度，让高优先级任务可以更快响应。',
-      review:
-        '亮点：能抓住可中断渲染、优先级和用户体验之间的关系。不足：如果补充双缓存树、commit 阶段不可中断，以及 lane 模型的演进，会更接近资深候选人的完整答案。示范：可以先定义 Fiber，再按数据结构、调度流程、渲染阶段、实际收益四层展开。',
-      score: 90,
-    },
-    {
-      type: 'tech',
-      title: 'Q2: 如何设计一个稳定的低代码表单渲染器',
-      answer:
-        '我会把 schema 解析、组件注册、联动规则和校验策略拆开。核心渲染层保持纯粹，复杂业务通过插件或 hook 注入，避免表单引擎被业务逻辑污染。',
-      review:
-        '亮点：边界意识好，提到了注册表、规则引擎和插件化。不足：缺少对运行时性能、版本兼容、灰度回滚的说明。示范：建议补充 schema version、字段依赖图、局部渲染、错误隔离和埋点观测。',
-      score: 84,
-    },
-    {
-      type: 'business',
-      title: 'Q3: 如果排期与质量冲突，你如何推动决策',
-      answer:
-        '我会先把质量风险显性化，列出必须修复和可延期项，再和产品确认核心业务目标。如果风险会影响主链路，就推动缩范围而不是压测试。',
-      review:
-        '亮点：有风险分级和范围管理意识，态度稳。不足：可以更主动量化影响，例如故障概率、影响用户量、回滚成本。示范：先对齐目标，再给出三套方案和推荐路径，让决策者看到取舍。',
-      score: 82,
-    },
-    {
-      type: 'hr',
-      title: 'Q4: 你为什么考虑这次机会',
-      answer:
-        '我希望参与更复杂的业务平台建设，也希望从单点功能负责人转向更完整的系统 owner 角色。',
-      review:
-        '亮点：动机与岗位成长路径匹配，表达真实。不足：可以补充对团队业务的具体理解。示范：把个人成长、岗位职责和公司业务阶段连接起来，会更有说服力。',
-      score: 87,
-    },
-  ],
-};
-
-const liveInterview = {
-  candidate: '林致远',
-  role: '高级前端开发工程师',
-  sessionId: 'LIVE-20260609-FE-027',
-  duration: '18:42',
-  currentAgent: '技术一面 Agent',
-  currentQuestion: '请你结合最近一个复杂项目，说明你是如何定位并解决前端性能瓶颈的。',
-  agents: [
-    {
-      name: '技术一面 Agent',
-      role: '硬技能追问',
-      status: '正在提问',
-      tone: 'green',
-      score: 88,
-    },
-    {
-      name: '架构二面 Agent',
-      role: '系统设计观察',
-      status: '待接入',
-      tone: 'blue',
-      score: 0,
-    },
-    {
-      name: 'HR Agent',
-      role: '动机与稳定性',
-      status: '待接入',
-      tone: 'amber',
-      score: 0,
-    },
-  ],
-  transcript: [
-    {
-      speaker: '技术一面 Agent',
-      time: '18:21',
-      type: 'agent',
-      text: '我们先从你最近负责的项目开始。请描述一下当时的性能问题、定位过程和最终收益。',
-    },
-    {
-      speaker: '候选人',
-      time: '18:35',
-      type: 'candidate',
-      text: '当时主要问题集中在首屏渲染和表格滚动卡顿。我先通过性能面板确认长任务来源，再用埋点拆分接口、渲染和资源加载耗时。',
-    },
-    {
-      speaker: '技术一面 Agent',
-      time: '18:42',
-      type: 'agent live',
-      text: '请继续补充：你如何判断优化动作真的带来了业务收益，而不是只改善了实验环境指标？',
-    },
-  ],
-  signals: [
-    { label: '语音清晰度', value: '96%', trend: '稳定' },
-    { label: '回答完整度', value: '84%', trend: '上升' },
-    { label: '追问深度', value: '3 层', trend: '进行中' },
-  ],
-  queue: [
-    'React 渲染链路与状态更新',
-    '大型表格性能治理',
-    '异常监控与线上回滚',
-    '团队协作与项目复盘',
-  ],
-};
 
 const setupOptions = {
   levels: ['应届', '初级', '中级', '高级'],
@@ -357,46 +200,6 @@ function buildInterviewerProfile(form) {
   };
 }
 
-const resumeAnalysis = {
-  matchScore: 86,
-  targetRole: '等待分析后确认',
-  summary:
-    '系统会结合专业、技能、项目与实践经历推荐多个就业方向，并保留学生自主确认或自定义目标岗位的权利。',
-  parsedSections: [
-    { label: '基础信息', value: '已识别姓名、联系方式、目标岗位' },
-    { label: '技能栈', value: 'React、Node.js、性能优化、工程治理' },
-    { label: '项目经历', value: '低代码表单、组件库、中后台性能治理' },
-    { label: '求职意向', value: '高级前端 / AI 工具平台 / 中大型团队' },
-  ],
-  highlights: [
-    '有完整的中后台性能优化经验，适合展开指标拆解、瓶颈定位和收益验证。',
-    '低代码表单项目能体现抽象能力，可重点讲 schema、插件化、联动规则和版本兼容。',
-    '组件库治理经历能支撑工程 owner 能力表达，适合补充规范制定和推广过程。',
-  ],
-  risks: [
-    '项目结果需要进一步量化，例如首屏耗时、长任务占比、转化率或缺陷率变化。',
-    '架构 owner 经验描述偏隐性，建议补充跨团队协作、方案评审和灰度发布案例。',
-    'AI Agent 相关经验如果作为目标方向，需要补充真实场景、工具链或落地边界。',
-  ],
-  questions: [
-    '你在最近一次性能优化中，如何判断瓶颈来自渲染、接口还是资源加载？',
-    '低代码表单的 schema 如何做版本兼容和灰度回滚？',
-    '组件库治理如何推动业务团队采用，而不是停留在工具建设？',
-    '如果线上优化指标变好但业务指标没有变化，你会如何复盘？',
-  ],
-  suggestions: [
-    '把每段项目经历改成“背景-职责-技术难点-结果指标”的结构。',
-    '为核心项目补充 2-3 个可被追问的技术细节，避免只写宏观职责。',
-    '把“参与/负责”改成更明确的动作，例如设计、落地、推动、复盘。',
-  ],
-  recommendedSetup: [
-    { label: '面试类型', value: '技术二面' },
-    { label: '面试难度', value: '严格' },
-    { label: '练习重点', value: '项目深挖' },
-    { label: '面试官风格', value: '犀利追问' },
-  ],
-};
-
 function hasAnyKeyword(text, keywords) {
   const lowerText = text.toLowerCase();
   return keywords.some((keyword) => lowerText.includes(keyword.toLowerCase()));
@@ -435,7 +238,7 @@ function buildResumeAnalysis(text, fileName = '') {
     directions: [],
     summary: normalizedText
       ? `已基于“${sourceName}”解析 ${normalizedText.length} 个字符。当前分数仅表示简历证据完整度；点击“开始分析”后会生成多个就业方向，再由你确认目标岗位。`
-      : resumeAnalysis.summary,
+      : '上传或填写简历后，可以分析目标方向并选择适合自己的岗位。',
     parsedSections: [
       { label: '来源文件', value: sourceName },
       { label: '文本规模', value: normalizedText ? `${normalizedText.length} 个字符` : '暂无简历文本' },
@@ -677,10 +480,9 @@ function apiUrl(path) {
 }
 
 function apiWsUrl(path) {
-  if (apiBaseUrl.startsWith('https://')) return `${apiBaseUrl.replace(/^https:/, 'wss:')}${path}`;
-  if (apiBaseUrl.startsWith('http://')) return `${apiBaseUrl.replace(/^http:/, 'ws:')}${path}`;
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}${path}`;
+  const url = new URL(apiUrl(path), window.location.origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.href;
 }
 
 function parseJsonValue(value, fallback) {
@@ -727,6 +529,7 @@ function reportToViewModel(reportData, user) {
       type: interviewer.includes('HR') ? 'hr' : 'tech',
       title: `${interviewer} · 问答复盘`,
       question,
+      questionId: item.question_id || latestQuestion?.message_id,
       answer: item.answer_preview || item.content_preview,
       ...roundAssessment(item),
       review: '本题暂无详细评价。',
@@ -737,8 +540,7 @@ function reportToViewModel(reportData, user) {
     latestQuestion = null;
   });
 
-  // Older reports may have been saved as "succeeded" even though no candidate
-  // answer existed. The deterministic timeline is the evidence source of truth.
+  // 部分历史报告在没有回答时也标记为成功，展示分数前仍需核对评分覆盖和问答记录。
   const hasEvidence = visibleReportScore(reportData || {}) !== null && (reportData?.scored_answer_count > 0 || timeline.length > 0);
 
   return {
@@ -783,25 +585,36 @@ function reportToViewModel(reportData, user) {
   };
 }
 
+async function responseError(response) {
+  const body = await response.json().catch(() => ({}));
+  const detail = body?.detail;
+  const data = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : body;
+  const message = [data?.error, data?.message, detail].find(value => typeof value === 'string' && value);
+  const defaults = {
+    401: '登录已失效，请重新登录。',
+    403: '当前账号无权执行此操作。',
+    404: '未找到请求的记录。',
+    429: '请求达到额度或频率上限，请稍后再试。',
+    502: '下游服务暂时不可用，请稍后重试。',
+    503: '服务暂时不可用，请稍后重试。',
+  };
+  const statusMessage = defaults[response.status];
+  const error = new Error(message && (!statusMessage || /[\u4e00-\u9fff]/.test(message))
+    ? message : statusMessage || message || '请求失败，请稍后重试。');
+  error.status = response.status;
+  error.data = data;
+  return error;
+}
+
 async function apiRequest(path, options = {}) {
   const response = await fetch(apiUrl(path), {
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
     ...options,
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...options.headers },
   });
-  const data = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    const requestError = new Error(data.error || '请求失败，请稍后再试。');
-    requestError.status = response.status;
-    requestError.data = data;
-    throw requestError;
-  }
-
-  return data;
+  if (!response.ok) throw await responseError(response);
+  if (response.status === 204) return {};
+  return response.json();
 }
 
 const QWEN_TTS_MIME_TYPE = 'audio/mpeg';
@@ -816,10 +629,7 @@ async function apiAudioResponse(path, body, signal) {
     signal,
   });
 
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || '语音合成失败，请稍后再试。');
-  }
+  if (!response.ok) throw await responseError(response);
 
   return response;
 }
@@ -1077,7 +887,7 @@ function CompetencyRadar({ data }) {
   );
 }
 
-function TimelineItem({ item, index, onRetry, busy }) {
+function TimelineItem({ item, index, onRetry, busy, interviewId }) {
   const [open, setOpen] = useState(false);
   const Icon = item.type === 'hr' ? BriefcaseBusiness : item.type === 'business' ? MessageSquareText : Wrench;
 
@@ -1103,6 +913,7 @@ function TimelineItem({ item, index, onRetry, busy }) {
           <div className="answer-block">
             <h3>候选人回答</h3>
             <p>{item.answer}</p>
+            {item.questionId && <QuestionPlayback key={item.questionId} interviewId={interviewId} questionId={item.questionId} request={apiRequest} />}
           </div>
           <div className="review-block">
             <h3>AI 导师复盘意见</h3>
@@ -1140,95 +951,17 @@ function AuthInput({ icon, label, type = 'text', value, onChange, placeholder })
 }
 
 function LoginPage({ onAuthenticated }) {
-  const initialResetToken = '';
-  const [mode, setMode] = useState('login');
-  const [resetToken, setResetToken] = useState(initialResetToken);
-  const [resetTokenStatus, setResetTokenStatus] = useState(initialResetToken ? 'verifying' : 'idle');
-  const [form, setForm] = useState({
-    studentNo: '',
-    password: '',
-    confirmPassword: '',
-  });
+  const [form, setForm] = useState({ studentNo: '', password: '' });
   const [authError, setAuthError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const updateForm = (key, value) => {
-    setForm((current) => ({ ...current, [key]: value }));
-  };
-
-  const removeResetTokenFromUrl = () => {
-    const url = new URL(window.location.href);
-    url.searchParams.delete('reset_token');
-    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
-  };
-
-  const switchMode = (nextMode) => {
-    setMode(nextMode);
-    setAuthMessage('');
-    setAuthError('');
-    if (nextMode !== 'reset-confirm' && resetToken) {
-      setResetToken('');
-      setResetTokenStatus('idle');
-      removeResetTokenFromUrl();
-    }
-  };
-
-  const isRegister = false;
-  const isResetRequest = false;
-  const isResetConfirm = false;
-  const isReset = isResetRequest || isResetConfirm;
-  const title = isResetConfirm
-    ? '设置新的登录密码'
-    : isResetRequest
-      ? '重置登录密码'
-      : isRegister
-        ? '创建个人训练账号'
-        : '使用学号登录';
-  const subtitle = isResetConfirm
-    ? '重置链接只能使用一次；完成后，所有旧设备上的登录状态都会失效。'
-    : isResetRequest
-      ? '输入注册邮箱后，系统会发送一次性的密码重置链接。'
-      : '账号由学校统一创建。首次登录请使用辅导员发放的临时密码。';
+  const updateForm = (key, value) => setForm(current => ({ ...current, [key]: value }));
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setAuthError('');
     setSubmitting(true);
     try {
-      if (isResetRequest) {
-        const data = await apiRequest('/api/auth/password-reset/request', {
-          method: 'POST',
-          body: JSON.stringify({ email: form.email }),
-        });
-        if (data.devResetToken) {
-          setResetToken(data.devResetToken);
-          setResetTokenStatus('valid');
-          setMode('reset-confirm');
-          setAuthMessage('开发环境已生成一次性重置凭证，请设置新密码。');
-          return;
-        }
-        setAuthMessage('如果邮箱存在，我们会发送密码重置链接。');
-        return;
-      }
-
-      if (isResetConfirm) {
-        const data = await apiRequest('/api/auth/password-reset/confirm', {
-          method: 'POST',
-          body: JSON.stringify({
-            token: resetToken,
-            password: form.password,
-            confirm_password: form.confirmPassword,
-          }),
-        });
-        setResetToken('');
-        setResetTokenStatus('idle');
-        setMode('login');
-        setForm((current) => ({ ...current, password: '', confirmPassword: '' }));
-        removeResetTokenFromUrl();
-        setAuthMessage(data.message || '密码已重置，请使用新密码登录。');
-        return;
-      }
-
       const data = await apiRequest('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({
@@ -1270,72 +1003,25 @@ function LoginPage({ onAuthenticated }) {
           </div>
 
           <div className="auth-form">
-            {!isResetConfirm && (
-              <AuthInput
-                icon={<GraduationCap size={17} />}
-                label="学号"
-                value={form.studentNo}
-                onChange={(value) => updateForm('studentNo', value)}
-                placeholder="请输入学校分配的学号"
-              />
-            )}
-            {!isResetRequest && (
-              <AuthInput
-                icon={<LockKeyhole size={17} />}
-                label="密码"
-                type="password"
-                value={form.password}
-                onChange={(value) => updateForm('password', value)}
-                placeholder={isResetConfirm ? '输入至少 8 位的新密码' : '输入登录密码'}
-              />
-            )}
-            {(isRegister || isResetConfirm) && (
-              <AuthInput
-                icon={<LockKeyhole size={17} />}
-                label="确认密码"
-                type="password"
-                value={form.confirmPassword}
-                onChange={(value) => updateForm('confirmPassword', value)}
-                placeholder="再次输入密码"
-              />
-            )}
+            <AuthInput
+              icon={<GraduationCap size={17} />} label="学号" value={form.studentNo}
+              onChange={(value) => updateForm('studentNo', value)} placeholder="请输入学校分配的学号"
+            />
+            <AuthInput
+              icon={<LockKeyhole size={17} />} label="密码" type="password" value={form.password}
+              onChange={(value) => updateForm('password', value)} placeholder="输入登录密码"
+            />
           </div>
-
-          {!isReset && (
-            <div className="auth-options">
-              <label>
-                <input type="checkbox" defaultChecked />
-                保持登录状态
-              </label>
-            <span>忘记密码请联系辅导员或系统管理员</span>
-            </div>
-          )}
-
-          {isReset && (
-            <div className="auth-options">
-              <span>{isResetConfirm && resetTokenStatus === 'verifying' ? '正在校验重置链接...' : '记起密码了？'}</span>
-              <button type="button" onClick={() => switchMode('login')}>
-                返回登录
-              </button>
-            </div>
-          )}
+          <div className="auth-options"><span>首次登录请使用学校发放的临时密码。忘记密码请联系学校管理员重置。</span></div>
 
           {authError && <p className="auth-alert error">{authError}</p>}
 
           <button
             className="auth-submit"
             type="submit"
-            disabled={submitting || (isResetConfirm && resetTokenStatus !== 'valid')}
+            disabled={submitting}
           >
-            {submitting
-              ? '处理中...'
-              : isResetConfirm
-                ? '确认修改密码'
-                : isResetRequest
-                  ? '发送重置链接'
-                  : isRegister
-                    ? '创建账号并进入'
-                    : '使用学号登录'}
+            {submitting ? '正在登录…' : '使用学号登录'}
           </button>
         </form>
       </section>
@@ -1343,7 +1029,7 @@ function LoginPage({ onAuthenticated }) {
   );
 }
 
-function InitialPasswordChangePage({ user, onChanged, onLogout }) {
+function InitialPasswordChangePage({ user, onChanged, onLogout, sessionError }) {
   const [form, setForm] = useState({ password: '', confirmPassword: '' });
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
@@ -1393,7 +1079,7 @@ function InitialPasswordChangePage({ user, onChanged, onLogout }) {
             <AuthInput icon={<LockKeyhole size={17} />} label="新密码" type="password" value={form.password} onChange={(value) => setForm((current) => ({ ...current, password: value }))} placeholder="请输入至少 8 位的新密码" />
             <AuthInput icon={<LockKeyhole size={17} />} label="确认新密码" type="password" value={form.confirmPassword} onChange={(value) => setForm((current) => ({ ...current, confirmPassword: value }))} placeholder="再次输入新密码" />
           </div>
-          {formError && <p className="auth-alert error">{formError}</p>}
+          {(formError || sessionError) && <p className="auth-alert error" role="alert">{formError || sessionError}</p>}
           <button className="auth-submit" type="submit" disabled={submitting}>{submitting ? '正在保存...' : '修改密码并进入系统'}</button>
           <button className="auth-secondary-action" type="button" onClick={onLogout}>退出当前账号</button>
           <p className="auth-notice">密码修改成功后，临时密码立即失效，且无法由管理员恢复查看。</p>
@@ -1442,8 +1128,8 @@ function TextAreaField({ label, value, onChange, placeholder }) {
   );
 }
 
-function ProfilePage({ user, onUserUpdate, onLogout }) {
-  const [profile, setProfile] = useState(defaultProfile);
+function ProfilePage({ user, onLogout }) {
+  const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
@@ -1492,7 +1178,6 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
         body: JSON.stringify(profile),
       });
       setProfile({ ...defaultProfile, ...(data.profile || {}) });
-      onUserUpdate({ ...user, name: data.profile?.nickname || user.name });
       setMessage('个人资料已保存，新的面试配置会优先参考这些信息。');
     } catch (requestError) {
       setError(requestError.message);
@@ -1508,6 +1193,8 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
       </section>
     );
   }
+
+  if (!profile) return <p className="profile-message error" role="alert">{error || '个人资料尚未载入。'}</p>;
 
   return (
     <form className="profile-page v4-profile-page" onSubmit={handleSave}>
@@ -1537,7 +1224,7 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
         <aside className="profile-sidebar">
           <div className="profile-summary">
             <strong>{profile.nickname || user.name}</strong>
-            <span>{user.email}</span>
+            <span>{user.studentNo}</span>
             <p>{profile.target_role || '还没有设置目标岗位'}</p>
           </div>
           <div className="profile-anchor-list">
@@ -1554,7 +1241,7 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
           <Card title="基础资料" icon={<UserRound size={18} />} className="profile-section-card">
             <div className="profile-form-grid" id="basic">
               <TextField label="昵称" value={profile.nickname} onChange={(value) => updateProfile('nickname', value)} />
-              <TextField label="邮箱" value={user.email} onChange={() => {}} disabled />
+              <TextField label="学号" value={user.studentNo} onChange={() => {}} disabled />
               <TextField label="头像链接" value={profile.avatar_url} onChange={(value) => updateProfile('avatar_url', value)} placeholder="https://..." />
             </div>
           </Card>
@@ -1601,12 +1288,12 @@ function ProfilePage({ user, onUserUpdate, onLogout }) {
           <Card title="账号安全" icon={<KeyRound size={18} />} className="profile-section-card">
             <div className="security-panel" id="security">
               <div>
-                <strong>最近登录时间</strong>
-                <span>{user.lastLoginAt || '暂无记录'}</span>
+                <strong>所属学校</strong>
+                <span>{user.schoolId}</span>
               </div>
               <div>
                 <strong>登录账号</strong>
-                <span>{user.email}</span>
+                <span>{user.studentNo}</span>
               </div>
               <button type="button" className="secondary-action" onClick={onLogout}>
                 <LogOut size={16} />
@@ -1634,7 +1321,7 @@ const RESUME_FORM_FIELDS = [
 ];
 const EMPTY_RESUME_FORM = Object.fromEntries(RESUME_FORM_FIELDS.map(([field]) => [field, '']));
 
-/* ================= Resume form entry pickers ================= */
+/* 结构化简历的分类编辑器 */
 
 function SkillModal({ title, description, onClose, footer, wide, children }) {
   return (
@@ -1971,7 +1658,7 @@ function HonorsPicker({ value, onChange }) {
 /* ---------- 通用：多项目列表弹窗 ---------- */
 function ProjectsPicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(null); // null | {index, item}
+  const [editing, setEditing] = useState(null); // 空值表示当前未打开条目
   const [items, setItems] = useState(() => parseProjects(value));
   const addNew = () => setEditing({ index: -1, item: { name: '', time: '', belong: '', desc: '' } });
   const handleSaveEntry = (item) => {
@@ -2265,7 +1952,7 @@ function GenericListPicker({ icon, title, fieldKey, itemFields, value, onChange 
   );
 }
 
-/* 简历表单 Picker 序列化工具 */
+/* 将结构化条目转换为简历表单文本 */
 const EDU_LABELS = { school: '学校', duration: '在校时间', major: '专业' };
 const EDU_PLACEHOLDERS = { school: '例如：上海交通大学', duration: '例如：2022.09 - 2026.06', major: '例如：软件工程' };
 
@@ -2372,26 +2059,21 @@ function parseKeyValueList(text, fields) {
 }
 
 function ResumeDownloader({ text, name }) {
-  const [ready, setReady] = useState(true);
   const handleDownload = () => {
-    try {
-      const blob = new Blob([text || ''], { type: 'text/markdown;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${name || '简历'}-简历.md`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } finally {
-      // noop
-    }
+    const blob = new Blob([text || ''], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${name || '简历'}-简历.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   return (
-    <button className="primary-action" type="button" onClick={handleDownload} disabled={!ready || !text}>
+    <button className="primary-action" type="button" onClick={handleDownload} disabled={!text}>
       <Download size={16} />
-      {ready ? '下载文本' : '准备中...'}
+      下载文本
     </button>
   );
 }
@@ -2496,6 +2178,7 @@ function JobMatchResult({ result }) {
 function ResumeJobCompare() {
   const [mode, setMode] = useState('library');
   const [postings, setPostings] = useState([]);
+  const [postingError, setPostingError] = useState('');
   const [loadingPostings, setLoadingPostings] = useState(true);
   const [postingKeyword, setPostingKeyword] = useState('');
   const [selectedId, setSelectedId] = useState('');
@@ -2509,7 +2192,7 @@ function ResumeJobCompare() {
     let mounted = true;
     apiRequest('/api/job-postings')
       .then((data) => { if (mounted) setPostings(data.postings || []); })
-      .catch(() => { if (mounted) setPostings([]); })
+      .catch(failure => { if (mounted) setPostingError(failure.message); })
       .finally(() => { if (mounted) setLoadingPostings(false); });
     return () => { mounted = false; };
   }, []);
@@ -2566,6 +2249,8 @@ function ResumeJobCompare() {
               </label>
               {loadingPostings ? (
                 <p className="jcmp-hint">正在读取招聘信息库…</p>
+              ) : postingError ? (
+                <p className="profile-message error" role="alert">{postingError}</p>
               ) : visiblePostings.length === 0 ? (
                 <p className="jcmp-hint">当前没有可对比的招聘岗位，可切换到“粘贴岗位描述”方式，或联系就业指导老师录入岗位。</p>
               ) : (
@@ -2749,7 +2434,7 @@ function JobMatchHistoryPage() {
   );
 }
 
-function ResumeAnalysisPage({ onStartInterview }) {
+function ResumeAnalysisPage({ user, onStartInterview }) {
   const [resumeText, setResumeText] = useState('');
   const [fileName, setFileName] = useState('');
   const [analysis, setAnalysis] = useState(() => buildResumeAnalysis(resumeText));
@@ -2762,6 +2447,8 @@ function ResumeAnalysisPage({ onStartInterview }) {
   const [error, setError] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [form, setForm] = useState(EMPTY_RESUME_FORM);
+  const [formReady, setFormReady] = useState(false);
+  const [formLoadError, setFormLoadError] = useState('');
   const [formDirty, setFormDirty] = useState(false);
   const [collegeOptions, setCollegeOptions] = useState([]);
   const [majorOptionsStatus, setMajorOptionsStatus] = useState('loading');
@@ -2774,6 +2461,7 @@ function ResumeAnalysisPage({ onStartInterview }) {
   const [confirming, setConfirming] = useState(false);
   const fileInput = useRef(null);
   const busy = loading || uploading || analyzing || savingForm || savingText || confirming;
+  const canEditResume = Boolean(profile) && (editorMode !== 'form' || formReady);
   const hasResult = analyzed && !!structuredAnalysis;
   const invalidateAnalysis = () => {
     setAnalyzed(false);
@@ -2798,7 +2486,7 @@ function ResumeAnalysisPage({ onStartInterview }) {
           setResumeText(savedResume);
           setAnalysis(buildResumeAnalysis(savedResume, currentProfile.resume_filename));
 
-          let analysisData = await apiRequest('/api/profile/resume-analysis');
+          const analysisData = await apiRequest('/api/profile/resume-analysis');
 
           if (!mounted) return;
           const savedRecord = analysisData.resume_analysis;
@@ -2834,9 +2522,10 @@ function ResumeAnalysisPage({ onStartInterview }) {
         } else {
           setForm((current) => ({ ...current, college: data.college || current.college }));
         }
+        setFormReady(true);
         setStudentInfo({ name: data.name || '', studentNo: data.student_no || '', college: data.college || '' });
       })
-      .catch(() => {});
+      .catch(requestError => { if (mounted) setFormLoadError(requestError.message); });
 
     return () => {
       mounted = false;
@@ -2860,6 +2549,7 @@ function ResumeAnalysisPage({ onStartInterview }) {
   };
 
   const handleSaveForm = async () => {
+    if (!formReady) return null;
     setSavingForm(true);
     setMessage('');
     setError('');
@@ -2871,14 +2561,14 @@ function ResumeAnalysisPage({ onStartInterview }) {
       const savedForm = data.form || form;
       setForm(savedForm);
       setFormDirty(false);
-      const nextText = data.resume_text || resumeText;
+      const nextText = data.resume_text ?? resumeText;
       setResumeText(nextText);
       setFileName('');
       setAnalysis(buildResumeAnalysis(nextText));
       setStructuredAnalysis(null);
       setAnalysisMeta(null);
       setAnalyzed(false);
-      setProfile((current) => ({ ...current, resume_text: nextText, resume_filename: '' }));
+      setProfile((current) => ({ ...current, ...(data.profile || {}), nickname: data.profile?.nickname || current?.nickname || user.name, resume_text: nextText, resume_filename: '' }));
       setMessage('填写内容已保存为当前简历，可以开始分析了。');
       return nextText;
     } catch (requestError) {
@@ -2898,7 +2588,7 @@ function ResumeAnalysisPage({ onStartInterview }) {
     setUploading(true);
     try {
       const data = await uploadResume(apiUrl('/api/profile/resume-upload'), file);
-      setProfile({ ...defaultProfile, ...data.profile });
+      setProfile(current => ({ ...defaultProfile, ...data.profile, nickname: data.profile?.nickname || current?.nickname || user.name }));
       setResumeText(data.text);
       setFileName(data.filename);
       setEditorMode('document');
@@ -2963,22 +2653,24 @@ function ResumeAnalysisPage({ onStartInterview }) {
       const nextFileName = editorMode === 'form' ? '' : fileName;
       const nextAnalysis = buildResumeAnalysis(textToAnalyze, nextFileName);
       const currentProfile = profile || defaultProfile;
-      const data = await apiRequest('/api/profile', {
-        method: 'PUT',
-        body: JSON.stringify({
-          ...currentProfile,
-          resume_text: textToAnalyze,
-          resume_filename: nextFileName,
-          project_experience: currentProfile.project_experience || textToAnalyze,
-          target_role: currentProfile.target_role || '',
-          preferred_interview_type: currentProfile.preferred_interview_type || nextAnalysis.recommendedSetup[0].value,
-          preferred_difficulty: currentProfile.preferred_difficulty || nextAnalysis.recommendedSetup[1].value,
-          preferred_interviewer_style: currentProfile.preferred_interviewer_style || nextAnalysis.recommendedSetup[3].value,
-        }),
-      });
-      const savedProfile = { ...defaultProfile, ...(data.profile || {}) };
-      setProfile(savedProfile);
-
+      let savedProfile = currentProfile;
+      if (editorMode === 'document') {
+        const data = await apiRequest('/api/profile', {
+          method: 'PUT',
+          body: JSON.stringify({
+            ...currentProfile,
+            resume_text: textToAnalyze,
+            resume_filename: nextFileName,
+            project_experience: currentProfile.project_experience || textToAnalyze,
+            target_role: currentProfile.target_role || '',
+            preferred_interview_type: currentProfile.preferred_interview_type || nextAnalysis.recommendedSetup[0].value,
+            preferred_difficulty: currentProfile.preferred_difficulty || nextAnalysis.recommendedSetup[1].value,
+            preferred_interviewer_style: currentProfile.preferred_interviewer_style || nextAnalysis.recommendedSetup[3].value,
+          }),
+        });
+        savedProfile = { ...defaultProfile, ...data.profile };
+        setProfile(savedProfile);
+      }
       const analysisData = await apiRequest('/api/profile/resume-analysis', {
         method: 'POST',
         body: JSON.stringify({ force: true }),
@@ -3060,10 +2752,11 @@ function ResumeAnalysisPage({ onStartInterview }) {
             <div className="resume-document">
               <div className="resume-document-heading"><h2>{fileName || '我的简历内容'}</h2><span>{resumeText.length.toLocaleString()} / 12,000 字</span></div>
               <p>检查提取的内容，也可以直接粘贴或补充你的经历。</p>
-              <textarea aria-label="简历内容" value={resumeText} maxLength={12000} disabled={busy} placeholder="在这里粘贴简历，描述你的教育背景、专业技能、项目经历和成果…" onChange={(event) => { setResumeText(event.target.value); invalidateAnalysis(); }} />
+              <textarea aria-label="简历内容" value={resumeText} maxLength={12000} disabled={busy || !profile} placeholder="在这里粘贴简历，描述你的教育背景、专业技能、项目经历和成果…" onChange={(event) => { setResumeText(event.target.value); invalidateAnalysis(); }} />
             </div>
           ) : (
-          <fieldset className="resume-form-panel" disabled={busy}>
+          <fieldset className="resume-form-panel" disabled={busy || !canEditResume}>
+            {!formReady && <p role={formLoadError ? 'alert' : 'status'}>{formLoadError || '正在读取已保存的表单…'}</p>}
             <p className="resume-form-hint">没有现成简历？按模块填写，保存后将作为当前简历进行分析。</p>
             <div className="resume-form-basic">
               <label className="brief-field">
@@ -3131,10 +2824,10 @@ function ResumeAnalysisPage({ onStartInterview }) {
           )}
           <div className="resume-editor-footer">
             <div className="resume-form-actions">
-              <button className="secondary-action" type="button" onClick={editorMode === 'form' ? handleSaveForm : handleSaveText} disabled={busy || (editorMode === 'document' && !resumeText.trim())}><Save size={15} />{savingForm || savingText ? '保存中…' : '保存简历'}</button>
+              <button className="secondary-action" type="button" onClick={editorMode === 'form' ? handleSaveForm : handleSaveText} disabled={busy || !canEditResume || (editorMode === 'document' && !resumeText.trim())}><Save size={15} />{savingForm || savingText ? '保存中…' : '保存简历'}</button>
               <ResumeDownloader text={resumeText} name={studentInfo.name || '简历'} />
             </div>
-            <button className="primary-action" type="button" onClick={handleAnalyze} disabled={busy || (editorMode === 'document' && !resumeText.trim())}><Sparkles size={16} />{analyzing ? '正在分析…' : editorMode === 'form' ? '保存并分析' : '开始分析'}</button>
+            <button className="primary-action" type="button" onClick={handleAnalyze} disabled={busy || !canEditResume || (editorMode === 'document' && !resumeText.trim())}><Sparkles size={16} />{analyzing ? '正在分析…' : editorMode === 'form' ? '保存并分析' : '开始分析'}</button>
           </div>
         </section>
 
@@ -3578,13 +3271,14 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   const [messages, setMessages] = useState([]);
   const [answer, setAnswer] = useState('');
   const [loading, setLoading] = useState(Boolean(interviewId));
+  const [interviewReload, setInterviewReload] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [error, setError] = useState('');
   const [processingStage, setProcessingStage] = useState('');
   const [processingSeconds, setProcessingSeconds] = useState(0);
   const [interviewMode, setInterviewMode] = useState('text');
-  const [voiceProvider] = useState('aliyun-rtc');
+  const [voiceProvider, setVoiceProvider] = useState('aliyun-rtc');
   const [voiceStatus, setVoiceStatus] = useState('idle');
   const [voiceMessage, setVoiceMessage] = useState('点击麦克风开始真实语音通话');
   const [qwenStatus, setQwenStatus] = useState('idle');
@@ -3664,8 +3358,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     });
   }
   const finishRequestRef = useRef(null);
+  const videoBeforeLeaveRef = useRef(null);
   const recoveredDraftRef = useRef(false);
-  const pendingEvaluationRequestsRef = useRef(new Set());
   const [progress, setProgress] = useState(null);
   const progressRef = useRef(null);
   const textAttemptRef = useRef(null);
@@ -3777,7 +3471,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         client_created_at: new Date().toISOString(),
       }),
     }).catch(() => {
-      // Diagnostics must never interrupt the interview flow.
+      // 诊断数据上传失败时，仍允许学生继续当前回合。
     });
   };
 
@@ -3801,7 +3495,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         client_created_at: new Date().toISOString(),
       }),
     }).catch(() => {
-      // Diagnostics must never interrupt the interview flow.
+      // 诊断数据上传失败时，仍允许学生继续当前回合。
     });
   };
 
@@ -3812,9 +3506,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         method: 'POST',
         body: JSON.stringify({ expected_task_id: taskId }),
       });
-      // A concurrent server-side finish may observe the persisted stop intent
-      // before StopAgent returns. Wait briefly for the authoritative terminal
-      // state instead of navigating away while the Agent is still speaking.
+      // 结束面试与停机回执可能同时到达，短暂等待服务端确认后再离开通话。
       for (let poll = 0; result.status !== 'stopped' && poll < 12; poll += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         const statusResult = await apiRequest(`/api/interviews/${interviewId}/rtc/session`);
@@ -3847,8 +3539,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   };
 
   const stopAliyunRtcCall = async (message = '阿里云 RTC 通话已断开', { flushCandidate = true } = {}) => {
-    // Some provider sessions do not emit a final end=true caption. Preserve
-    // any buffered candidate speech before pausing or leaving the channel.
+    // 个别语音会话不会发出最后一条结束字幕，离开频道前先提交已缓冲的回答。
     if (flushCandidate) {
       rtcCaptionsRef.current?.flush();
     }
@@ -3928,8 +3619,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     let startupPhase = 'messages';
     const startupStartedAt = Date.now();
     try {
-      // A reconnect must use the database-backed question instead of the
-      // messages captured by the render that created this callback.
+      // 重连时重新读取当前题，避免用先前页面状态重复提问。
+      await confirmPendingVideo(apiRequest, interviewId);
       if (!afterHandoff) await rtcWritesRef.current.drain();
       if (aliyunRtcAttemptRef.current !== attempt) return;
       rtcEpochRef.current++;
@@ -4094,9 +3785,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         recordAliyunRtcDiagnostic('ai_agent_started', {
           message: 'RTC AI 智能体启动请求成功',
         });
-        // A newly created provider task receives the current question as its
-        // StartAgent greeting from the backend. Only an already-running task
-        // needs an explicit replay when the browser reconnects.
+        // 新建任务会自动播报本题；只有重连已运行的任务时才需要补播。
         if (agentSession.current_question_id && agentSession.current_question_id !== latestQuestion.id) {
           await stopAliyunRtcCall('题目已更新，请重新连接当前面试官', { flushCandidate: false });
           applyProgress(await readCurrentQuestion());
@@ -4123,6 +3812,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       setAliyunRtcStatus('error');
       setAliyunAgentStatus('error');
       const startErrorMessage = formatAliyunRtcStartError(requestError);
+      if (requestError.data?.fallback === 'text') setInterviewMode('text');
       setAliyunRtcMessage(startErrorMessage);
       setError(startErrorMessage);
       recordAliyunRtcDiagnostic('call_start_failed', {
@@ -4155,6 +3845,15 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         }
       }).catch((heartbeatError) => {
         if (cancelled) return;
+        if ([401, 403, 404].includes(heartbeatError.status) || heartbeatError.data?.fallback === 'text') {
+          // 下游已拒绝继续通话，立即关闭本地麦克风；失效身份的缓存字幕不能写入新会话。
+          cancelled = true;
+          rtcEpochRef.current++;
+          void stopAliyunRtcCall('语音授权已中断', { flushCandidate: false });
+          setInterviewMode('text');
+          setError(heartbeatError.message);
+          return;
+        }
         recordAliyunRtcDiagnostic('session_heartbeat_failed', {
           level: 'warning',
           message: 'RTC 会话心跳失败',
@@ -4172,16 +3871,11 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   }, [interviewId, aliyunRtcStatus]);
 
   const activeAgent = progress?.active_agent;
-  const currentAgentName = activeAgent?.agent_name || liveInterview.currentAgent;
+  const currentAgentName = activeAgent?.agent_name || '面试官';
   const persistedQuestion = progress?.question?.content || '正在准备下一题…';
   const currentQuestion = persistedQuestion;
 
   const reloadMessages = async () => {
-    console.info('reloadMessages', {
-      interviewId,
-      currentMessageCount: messages.length,
-      activeAgentId: activeAgent?.id || null,
-    });
     const data = await apiRequest(`/api/interviews/${interviewId}/messages`);
     setMessages(data.messages || []);
     return data.messages || [];
@@ -4253,7 +3947,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       try {
         source.stop();
       } catch {
-        // Source may have already finished.
+        // 音频可能已自然播放结束。
       }
       source.disconnect();
     });
@@ -4376,7 +4070,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       try {
         omniRecognitionRef.current.stop();
       } catch {
-        // Recognition can already be stopped by the browser.
+        // 浏览器也可能已经停止识别。
       }
     }
     omniRecognitionRef.current = null;
@@ -4451,7 +4145,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           recognition.start();
           omniRecognitionRef.current = recognition;
         } catch {
-          // Chrome may throttle immediate restarts; keep the audio submission path alive.
+          // 浏览器可能限制立即重启识别，音频仍可提交。
         }
       }
     };
@@ -5276,7 +4970,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     if (savedRealtimeEventsRef.current.has(eventKey)) return;
     savedRealtimeEventsRef.current.add(eventKey);
 
-    const messageData = await apiRequest(`/api/interviews/${interviewId}/messages`, {
+    await apiRequest(`/api/interviews/${interviewId}/messages`, {
       method: 'POST',
       body: JSON.stringify({
         agent_id: senderType === 'agent' ? activeAgent?.id : undefined,
@@ -5286,10 +4980,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         transcript_text: text,
       }),
     });
-
-    if (senderType === 'candidate') {
-      evaluateAnswerInBackground(messageData.message.id);
-    }
 
     await reloadMessages();
   };
@@ -5439,7 +5129,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         try {
           message = JSON.parse(responseBody).error || message;
         } catch {
-          // Keep the raw server message.
+          // 非 JSON 错误沿用服务端消息。
         }
         throw new Error(message);
       }
@@ -5547,6 +5237,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
 
       setLoading(true);
       setError('');
+      setInterview(null);
 
       try {
         const interviewData = await apiRequest(`/api/interviews/${interviewId}`);
@@ -5576,7 +5267,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     return () => {
       mounted = false;
     };
-  }, [interviewId]);
+  }, [interviewId, interviewReload]);
 
   useEffect(() => () => {
     void stopAliyunRtcCall();
@@ -5652,34 +5343,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
   };
 
-  const evaluateAnswerInBackground = (messageId) => {
-    let trackedRequest;
-    trackedRequest = apiRequest(`/api/interviews/${interviewId}/evaluations`, {
-      method: 'POST',
-      body: JSON.stringify({ message_id: messageId }),
-    })
-      .catch((evaluationError) => {
-        // A missing per-question evaluation should not hold the candidate on
-        // the current screen. The final report still waits for tracked work,
-        // and pending evaluations can be retried from the report.
-        console.warn('Background answer evaluation failed:', evaluationError);
-        return null;
-      })
-      .finally(() => pendingEvaluationRequestsRef.current.delete(trackedRequest));
-    pendingEvaluationRequestsRef.current.add(trackedRequest);
-    return trackedRequest;
-  };
-
-  const waitForPendingEvaluations = async () => {
-    while (pendingEvaluationRequestsRef.current.size) {
-      await Promise.all([...pendingEvaluationRequestsRef.current]);
-    }
-  };
-
   const finishAndOpenReport = async () => {
     if (!finishRequestRef.current) {
       finishRequestRef.current = (async () => {
-        await waitForPendingEvaluations();
         await apiRequest(`/api/interviews/${interviewId}/finish`, { method: 'POST' });
         onReportReady(interviewId);
       })().catch(error => {
@@ -5707,7 +5373,8 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     setProcessingStage('正在保存回答并确认下一题');
 
     try {
-      // A timed-out POST may already be committed. Reuse its ID for this answer.
+      if (!isRtc) await videoBeforeLeaveRef.current?.();
+      // 请求超时时答案可能已经保存；重试同一题、同一回答时沿用提交标识。
       const submission = createAnswerSubmission({
         questionId: question.id, content, sourceRef: options.sourceRef, previous: textAttemptRef.current,
       });
@@ -5727,7 +5394,6 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
         textAttemptRef.current = null;
         setAnswer('');
       }
-      evaluateAnswerInBackground(result.answer.id);
       if (state.action === 'finish_interview') {
         rtcEpochRef.current++;
         setProcessingStage('正在结束面试并生成综合报告');
@@ -5776,14 +5442,20 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
           rtcEpochRef.current++;
           await stopAliyunRtcCall('题目进度已变化，请重新连接', { flushCandidate: false });
         }
-        const current = await readCurrentQuestion();
-        applyProgress(current);
-        if (current.action === 'finish_interview') {
-          await finishAndOpenReport();
+        try {
+          const current = await readCurrentQuestion();
+          applyProgress(current);
+          if (current.action === 'finish_interview') {
+            await finishAndOpenReport();
+            return;
+          }
+          await Promise.all([reloadMessages(), reloadAgents()]);
+          if (!isRtc && current.question?.id !== question.id) setAnswer('');
+        } catch (syncError) {
+          setError(syncError.message);
+          if (isRtc) throw syncError;
           return;
         }
-        await Promise.all([reloadMessages(), reloadAgents()]);
-        if (!isRtc && current.question?.id !== question.id) setAnswer('');
       }
       setError(requestError.message);
       if (isRtc && requestError.status !== 409) throw requestError;
@@ -5794,6 +5466,20 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     }
   };
   handleSubmitAnswerRef.current = handleSubmitAnswer;
+
+  const switchToVoice = async () => {
+    setProcessingStage('正在切换语音模式');
+    setError('');
+    try {
+      // 同一学生在同一频道使用同一 RTC 身份，切换前需确认本题视频已停止。
+      await videoBeforeLeaveRef.current?.({ requireConfirmed: true });
+      setInterviewMode('voice');
+    } catch (mediaError) {
+      setError(mediaError.message);
+    } finally {
+      setProcessingStage('');
+    }
+  };
 
   const switchToText = async () => {
     setProcessingStage('正在同步语音面试进度');
@@ -5816,12 +5502,13 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   };
 
   const handleFinish = async () => {
-    if (!interviewId || finishing) return;
+    if (!interviewId || finishing || submitting) return;
     setFinishing(true);
     setError('');
     setProcessingStage('正在保存最后一条回答');
 
     try {
+      await videoBeforeLeaveRef.current?.();
       await stopAliyunRtcCall();
       await rtcWritesRef.current.drain();
       if (recoveredDraftRef.current) {
@@ -5836,11 +5523,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
       stopQwenSpeech();
       const finalMessages = await reloadMessages();
       if (!finalMessages.some((item) => item.sender_type === 'candidate' && String(item.content || '').trim())) {
-        throw new Error('未识别到候选人回答，本次面试尚未完成。请重新接通阿里云 RTC 并确认页面出现实时转写后再结束。');
-      }
-      if (pendingEvaluationRequestsRef.current.size) {
-        setProcessingStage('正在完成最后的单题评价');
-        await waitForPendingEvaluations();
+        throw new Error('本场还没有已保存的回答。请先提交文字回答，或确认语音转写已保存后再结束。');
       }
       setProcessingStage('正在结束面试并生成综合报告');
       await finishAndOpenReport();
@@ -5928,6 +5611,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
     return <div className="profile-loading">正在读取真实面试、Agent 和消息流</div>;
   }
 
+  if (!interview || !progress) {
+    return <section className="empty-state" role="alert"><strong>面试暂时无法打开</strong><p>{error}</p>
+      <button type="button" className="secondary-action" onClick={() => setInterviewReload(n => n + 1)}>重新读取</button>
+      <button type="button" className="secondary-action" onClick={onBackToSetup}>返回面试配置</button></section>;
+  }
+
   return (
     <section className={`phone-page v4-phone-page v4-interview-page ${interviewMode}-mode`}>
       {interview?.interviewer_strategy?.selection && <p className="session-strategy-summary">本场面试官策略：{Object.values(interview.interviewer_strategy.selection).join(' · ')} · 评分标准保持统一</p>}
@@ -5951,7 +5640,7 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
               <strong>{currentAgentName}</strong>
               <small>/ {interview?.experience_level || '标准'} · {interview?.interview_type || '综合模拟'}</small>
             </div>
-            <button className="v4-outline-action" type="button" onClick={() => setInterviewMode('voice')} disabled={submitting || finishing}>转语音 ♪</button>
+            <button className="v4-outline-action" type="button" onClick={switchToVoice} disabled={submitting || finishing || Boolean(processingStage)}>转语音 ♪</button>
           </header>
           <div className="v4-chat-messages">
             {messages.map((item) => {
@@ -5982,6 +5671,9 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
             </button>
           </div>
           {processingNotice}
+          {progress?.question?.id && <QuestionMedia key={progress.question.id} interviewId={interviewId}
+            questionId={progress.question.id} request={apiRequest} beforeLeaveRef={videoBeforeLeaveRef}
+            disabled={submitting || finishing || Boolean(processingStage)} />}
         </section>
       ) : (
         <div className="v4-voice-interview-layout">
@@ -6059,11 +5751,12 @@ function PhoneInterviewPage({ interviewId, onReportReady, onBackToSetup }) {
   );
 }
 
-function ReportPage({ interviewId, user, onBackToList }) {
+function ReportPage({ interviewId, user, onBackToList, onOpenCredentials }) {
   const [reportData, setReportData] = useState(null);
   const [loading, setLoading] = useState(Boolean(interviewId));
   const [error, setError] = useState('');
   const [regenerating, setRegenerating] = useState(false);
+  const [reportReload, setReportReload] = useState(0);
   const [retryError, setRetryError] = useState('');
 
   useEffect(() => {
@@ -6085,8 +5778,8 @@ function ReportPage({ interviewId, user, onBackToList }) {
           if (!mounted) return;
           setReportData(data.report);
           setLoading(false);
-          if (data.report?.generation_status === 'queued') {
-            refreshTimer = window.setTimeout(loadReport, 2000);
+          if (data.report?.generation_status === 'queued' || data.report?.assessment_pending) {
+            refreshTimer = window.setTimeout(loadReport, data.report.generation_status === 'queued' ? 2000 : 5000);
           }
         })
         .catch((requestError) => {
@@ -6102,7 +5795,7 @@ function ReportPage({ interviewId, user, onBackToList }) {
       mounted = false;
       window.clearTimeout(refreshTimer);
     };
-  }, [interviewId]);
+  }, [interviewId, reportReload]);
 
   const regenerateReport = async (messageId = null) => {
     if (!interviewId || regenerating) return;
@@ -6117,10 +5810,27 @@ function ReportPage({ interviewId, user, onBackToList }) {
       }
       const data = await apiRequest(`/api/interviews/${interviewId}/report`, { method: 'POST' });
       setReportData(data.report);
+      setReportReload(n => n + 1);
     } catch (requestError) {
       setRetryError(requestError.message);
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  const downloadReport = async () => {
+    setRetryError('');
+    try {
+      const response = await fetch(apiUrl(`/api/interviews/${encodeURIComponent(interviewId)}/report/download`), { credentials: 'include' });
+      if (!response.ok) throw await responseError(response);
+      const href = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = href;
+      link.download = `面试报告-${interviewId}.md`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+    } catch (failure) {
+      setRetryError(failure.message);
     }
   };
 
@@ -6140,11 +5850,13 @@ function ReportPage({ interviewId, user, onBackToList }) {
   }
 
   if (error) {
-    return <div className="profile-message error">{error}</div>;
+    return <section className="v4-report-wait" role="alert"><p>{error}</p>
+      <button type="button" className="secondary-action" onClick={() => setReportReload(n => n + 1)}>重新读取报告</button>
+      {onBackToList && <button type="button" className="secondary-action" onClick={onBackToList}>返回历史记录</button>}</section>;
   }
 
   if (reportData?.generation_status === 'queued') {
-    return <div className="v4-report-wait" role="status"><Clock3 size={24} /><strong>面试已结束，正在生成复盘报告</strong><span>报告完成后会自动显示。你可以返回历史记录，稍后再查看。</span>{onBackToList && <button type="button" className="secondary-action" onClick={onBackToList}>返回历史记录</button>}</div>;
+    return <div className="v4-report-wait" role="status"><Clock3 size={24} /><strong>面试已结束，正在生成复盘报告</strong><span>{reportData.generation_error || '报告完成后会自动显示。你可以返回历史记录，稍后再查看。'}</span>{onBackToList && <button type="button" className="secondary-action" onClick={onBackToList}>返回历史记录</button>}</div>;
   }
 
   if (reportData?.generation_status === 'failed') {
@@ -6183,6 +5895,8 @@ function ReportPage({ interviewId, user, onBackToList }) {
           <p>{coverageLabel(reportData || {}) || `${currentReport.timeline.length} 条已保存回答 · 有效覆盖未记录`} · {evaluatedInterviewers.length} 位面试官有评价</p>
         </div>
       </header>
+      {reportData?.id && <button type="button" className="secondary-action" onClick={downloadReport}><Download size={15} /> 下载报告</button>}
+      {reportData?.id && <button type="button" className="secondary-action" onClick={() => onOpenCredentials(reportData.id)}>申请训练完成证明</button>}
 
       {currentReport.fallback && <div className="report-fallback-notice"><div><strong>{reportStatusLabel}</strong><span>可重新尝试生成报告文字。</span></div><button type="button" onClick={() => regenerateReport()} disabled={regenerating}>{regenerating ? '正在重新生成…' : '重新尝试 AI 生成'}</button></div>}
       {retryError && <p className="profile-message error">{retryError}</p>}
@@ -6224,7 +5938,7 @@ function ReportPage({ interviewId, user, onBackToList }) {
       <section className="report-rounds">
         <div className="report-section-heading"><div><span className="report-kicker">04 / CONVERSATION REVIEW</span><h2>逐题复盘</h2></div><span>共 {currentReport.timeline.length} 题 · 点击展开</span></div>
         <div className="timeline">
-          {currentReport.timeline.length ? currentReport.timeline.map((item, index) => <TimelineItem key={item.id || index} item={item} index={index} onRetry={regenerateReport} busy={regenerating} />) : <p className="report-muted">本场没有已保存的问答记录。</p>}
+          {currentReport.timeline.length ? currentReport.timeline.map((item, index) => <TimelineItem key={item.id || index} item={item} index={index} interviewId={interviewId} onRetry={regenerateReport} busy={regenerating} />) : <p className="report-muted">本场没有已保存的问答记录。</p>}
         </div>
       </section>
 
@@ -6720,6 +6434,9 @@ function V4MePage({ onNavigate }) {
     <section className="v4-me">
       <div className="v4-home-heading"><div><span className="v4-eyebrow">YOUR PERSONAL ARCHIVE</span><h1>我的，每一步积累。</h1><p>简历是起点，练习是过程，成长是你的答案。</p></div></div>
       <div className="v4-me-grid">
+        <button type="button" className="v4-feature" onClick={() => onNavigate('profile')}><UserRound size={36} /><h2>个人资料</h2><p>编辑训练昵称、求职目标和面试偏好。</p><strong>查看资料 ↗</strong></button>
+        <button type="button" className="v4-feature" onClick={() => onNavigate('credentials')}><Award size={36} /><h2>我的证书</h2><p>查看训练完成证明的审核状态和签名凭证。</p><strong>查看申请 ↗</strong></button>
+        <button type="button" className="v4-feature" onClick={() => onNavigate('training')}><GraduationCap size={36} /><h2>班级训练任务</h2><p>领取老师布置的任务，继续未完成的训练。</p><strong>查看任务 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('resume')}><span className="v4-eyebrow">01 / RESUME</span><FileText size={36} /><h2>我的简历</h2><p>管理简历，查看真实分析结果与就业方向。</p><strong>进入查看 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('report')}><span className="v4-eyebrow">02 / HISTORY</span><Phone size={36} /><h2>我的历史</h2><p>回顾面试记录与真实复盘报告。</p><strong>进入查看 ↗</strong></button>
         <button type="button" className="v4-feature" onClick={() => onNavigate('jobcompare')}><span className="v4-eyebrow">03 / CAREER</span><BriefcaseBusiness size={36} /><h2>招聘对比</h2><p>将简历与招聘岗位对比，查看匹配情况和改进建议。</p><strong>开始对比 ↗</strong></button>
@@ -6731,6 +6448,8 @@ function V4MePage({ onNavigate }) {
 
 function App() {
   const [user, setUser] = useState(undefined);
+  const [sessionError, setSessionError] = useState('');
+  const [sessionCheck, setSessionCheck] = useState(0);
   const [view, setView] = useState('home');
   const [setupMode, setSetupMode] = useState('guided');
   const [setupPresetKey, setSetupPresetKey] = useState(defaultDifficultyPreset.key);
@@ -6738,45 +6457,53 @@ function App() {
   const [runningInterviewId, setRunningInterviewId] = useState('');
   const [reportMode, setReportMode] = useState('list');
   const [reportTab, setReportTab] = useState('interview');
+  const [credentialReport, setCredentialReport] = useState('');
 
   useEffect(() => {
     let mounted = true;
 
+    setSessionError('');
     apiRequest('/api/auth/me')
-      .then((data) => {
-        if (mounted) {
-          setUser(data.user);
-        }
-        if (!data.user || data.user.mustChangePassword) return null;
-        return apiRequest('/api/interviews?status=running')
-          .then((interviewData) => {
-            if (!mounted) return;
-            const runningInterview = interviewData.interviews?.[0];
-            if (runningInterview?.id) {
-              setActiveInterviewId(runningInterview.id);
-              setRunningInterviewId(runningInterview.id);
-              setView('phone');
-            }
-          })
-          .catch(() => {});
-      })
-      .catch(() => {
-        if (mounted) {
-          setUser(null);
-        }
+      .then(data => { if (mounted) setUser(data.user || null); })
+      .catch(failure => {
+        if (!mounted) return;
+        if (failure.status === 401) setUser(null);
+        else setSessionError(failure.message);
       });
+    return () => { mounted = false; };
+  }, [sessionCheck]);
 
-    return () => {
-      mounted = false;
-    };
-  }, []);
+  useEffect(() => {
+    if (!user?.id || user.mustChangePassword) return;
+    let mounted = true;
+    apiRequest('/api/interviews?status=running')
+      .then(data => {
+        const latest = data.interviews?.[0];
+        if (mounted && latest) {
+          setRunningInterviewId(previous => previous || latest.id);
+          setActiveInterviewId(previous => previous || latest.id);
+          setView(previous => previous === 'home' ? 'phone' : previous);
+        }
+      })
+      .catch(failure => { if (mounted) setSessionError(`进行中的面试暂时无法读取：${failure.message}`); });
+    return () => { mounted = false; };
+  }, [user?.id, user?.mustChangePassword]);
 
   const handleLogout = async () => {
-    await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    setSessionError('');
+    try {
+      await apiRequest('/api/auth/logout', { method: 'POST' });
+    } catch (failure) {
+      if (failure.status !== 401) {
+        setSessionError(`未能确认退出，请重试：${failure.message}`);
+        return;
+      }
+    }
     setUser(null);
     setView('home');
     setActiveInterviewId('');
     setRunningInterviewId('');
+    setCredentialReport('');
   };
 
   const handleStartInterview = (interviewId) => {
@@ -6794,6 +6521,7 @@ function App() {
   };
 
   const handleViewChange = (nextView) => {
+    if (nextView === 'credentials') setCredentialReport('');
     if (nextView === 'phone') {
       if (!runningInterviewId) nextView = 'phone-choice';
       else setActiveInterviewId(runningInterviewId);
@@ -6819,8 +6547,8 @@ function App() {
           <div className="brand-mark">
             <ShieldCheck size={22} />
           </div>
-          <strong>正在确认登录状态</strong>
-          <span>我们会先检查当前浏览器是否已有有效的安全会话。</span>
+          <strong>{sessionError ? '暂时无法确认登录状态' : '正在确认登录状态'}</strong>
+          {sessionError ? <><span role="alert">{sessionError}</span><button type="button" className="secondary-action" onClick={() => setSessionCheck(n => n + 1)}>重试</button></> : <span>正在检查当前浏览器的会话。</span>}
         </section>
       </main>
     );
@@ -6831,7 +6559,7 @@ function App() {
   }
 
   if (user.mustChangePassword) {
-    return <InitialPasswordChangePage user={user} onChanged={setUser} onLogout={handleLogout} />;
+    return <InitialPasswordChangePage user={user} onChanged={setUser} onLogout={handleLogout} sessionError={sessionError} />;
   }
 
   return (
@@ -6839,7 +6567,7 @@ function App() {
       <div className="workspace-page v4-workspace">
         <div className="topbar">
           <button type="button" className="v4-brand-button" onClick={() => handleViewChange('home')} aria-label="返回面试空间"><V4Brand /></button>
-          <span className="v4-breadcrumb"><b>{({ home: '面试空间', me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', phone: '正在面试', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告', stats: '能力画像' })[view]}</b></span>
+          <span className="v4-breadcrumb"><b>{({ home: '面试空间', me: '我的', training: '班级训练', credentials: '我的证书', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', phone: '正在面试', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告', stats: '能力画像' })[view]}</b></span>
           {runningInterviewId && view !== 'phone' && <button className="v4-continue-link" type="button" onClick={() => handleViewChange('phone')}>继续面试 ↗</button>}
           <button className="topbar-account" type="button" onClick={() => handleViewChange('me')} aria-label="打开我的空间">
             <span>{user.name}</span>
@@ -6847,15 +6575,24 @@ function App() {
           <button className="v4-logout" aria-label="退出登录" onClick={handleLogout}>退出登录 ↗</button>
         </div>
 
-        {view !== 'home' && view !== 'phone' && <div className="v4-page-toolbar"><button type="button" onClick={() => handleViewChange(({ me: 'home', 'phone-choice': 'home', setup: 'phone-choice', stats: 'me', resume: 'me', jobcompare: 'me', profile: 'me', report: 'me' })[view] || 'home')}>← 返回{({ me: '面试空间', 'phone-choice': '面试空间', setup: '难度选择', stats: '我的', resume: '我的', jobcompare: '我的', profile: '我的', report: '我的' })[view]}</button><span>{view === 'stats' ? '我的' : '面试空间'} / {({ me: '我的', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', stats: '能力画像', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告' })[view]}</span></div>}
+        {sessionError && <p className="profile-message error" role="alert">{sessionError}</p>}
+        {view !== 'home' && view !== 'phone' && <div className="v4-page-toolbar"><button type="button" onClick={() => handleViewChange(({ me: 'home', training: 'me', credentials: 'me', 'phone-choice': 'home', setup: 'phone-choice', stats: 'me', resume: 'me', jobcompare: 'me', profile: 'me', report: 'me' })[view] || 'home')}>← 返回{({ me: '面试空间', training: '我的', credentials: '我的', 'phone-choice': '面试空间', setup: '难度选择', stats: '我的', resume: '我的', jobcompare: '我的', profile: '我的', report: '我的' })[view]}</button><span>{view === 'stats' ? '我的' : '面试空间'} / {({ me: '我的', training: '班级训练', credentials: '我的证书', 'phone-choice': '电话面试', setup: setupMode === 'custom' ? '自主难度设置' : '确认面试', stats: '能力画像', resume: '我的简历', jobcompare: '招聘对比', profile: '个人资料', report: '历史报告' })[view]}</span></div>}
 
         {view === 'home' && <V4HomePage user={user} onNavigate={handleViewChange} onOpenReport={handleOpenReport} />}
         {view === 'phone-choice' && <V4PhoneChoicePage onSelect={handleSelectSetup} />}
         {view === 'me' && <V4MePage onNavigate={handleViewChange} />}
+        {view === 'credentials' && <TeachingCredentials key={user.id} request={apiRequest} reportId={credentialReport} />}
+        {view === 'training' && <StudentTrainingPage request={apiRequest} onOpenAttempt={async ({ attempt_id }) => {
+          const result = await apiRequest(`/api/interviews/training-attempts/${encodeURIComponent(attempt_id)}`, {
+            method: 'POST', body: JSON.stringify({}),
+          });
+          handleStartInterview(result.interview_id);
+        }} />}
         {view === 'setup' && <SetupPage key={`${setupMode}-${setupPresetKey}`} mode={setupMode} presetKey={setupPresetKey} onStart={handleStartInterview} />}
-        {view === 'resume' && <ResumeAnalysisPage onStartInterview={() => handleViewChange('phone-choice')} />}
+        {view === 'resume' && <ResumeAnalysisPage user={user} onStartInterview={() => handleViewChange('phone-choice')} />}
         {view === 'jobcompare' && <JobComparePage />}
-        {view === 'profile' && <ProfilePage user={user} onUserUpdate={setUser} onLogout={handleLogout} />}
+        {view === 'profile' && <><ProfilePage user={user} onLogout={handleLogout} />
+          <ProfileVersions key={user.id} request={apiRequest} /></>}
         {view === 'phone' && (
           <PhoneInterviewPage key={activeInterviewId}
             interviewId={activeInterviewId}
@@ -6890,7 +6627,8 @@ function App() {
             {reportTab === 'jobmatch' ? (
               <JobMatchHistoryPage />
             ) : reportMode === 'detail' && activeInterviewId ? (
-              <ReportPage interviewId={activeInterviewId} user={user} onBackToList={() => setReportMode('list')} />
+              <ReportPage interviewId={activeInterviewId} user={user} onBackToList={() => setReportMode('list')}
+                onOpenCredentials={id => { setCredentialReport(id); setView('credentials'); }} />
             ) : (
               <HistoryPage onOpenReport={handleOpenReport} />
             )}

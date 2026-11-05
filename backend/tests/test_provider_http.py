@@ -7,7 +7,7 @@ def _provider() -> FollowupProvider:
     return FollowupProvider(
         name="qwen",
         api_key="test-key",
-        base_url="https://example.test/v1",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         model="test-model",
         timeout=3,
         temperature=0.2,
@@ -45,6 +45,37 @@ def test_provider_transport_errors_are_retried(monkeypatch):
 
     assert _call_provider_content(_provider(), [{"role": "user", "content": "test"}]) == "OK"
     assert calls["count"] == 3
+
+
+def test_provider_refuses_unapproved_endpoint_before_network(monkeypatch):
+    from dataclasses import replace
+    from unittest.mock import Mock
+    import pytest
+
+    client = Mock()
+    monkeypatch.setattr("backend.src.kimi_followup.httpx.Client", client)
+    with pytest.raises(ValueError, match="白名单"):
+        _call_provider_content(replace(_provider(), base_url="https://untrusted.test"), [])
+    client.assert_not_called()
+
+
+def test_provider_redirect_is_not_followed(monkeypatch):
+    import pytest
+
+    requests = []
+    real_client = httpx.Client
+
+    def redirect(request):
+        requests.append(request.url.host)
+        return httpx.Response(307, headers={"Location": "https://blocked.example.test/probe"})
+
+    def client(**kwargs):
+        return real_client(transport=httpx.MockTransport(redirect), **kwargs)
+
+    monkeypatch.setattr("backend.src.kimi_followup.httpx.Client", client)
+    with pytest.raises(httpx.HTTPStatusError):
+        _call_provider_content(_provider(), [{"role": "user", "content": "test"}])
+    assert requests == ["dashscope.aliyuncs.com"]
 
 
 def test_provider_auth_error_is_not_retried(monkeypatch):
@@ -114,10 +145,9 @@ def test_json_provider_requests_structured_output(monkeypatch):
 def test_openai_provider_can_reuse_realtime_api_key(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_REALTIME_API_KEY", "test-realtime-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.test/v1")
-    monkeypatch.setenv("OPENAI_FOLLOWUP_MODEL", "test-model")
-
-    provider = _provider_config("openai")
+    # 此处仅验证密钥选择，显式传入控制服务的合成公开参数。
+    provider = _provider_config("openai", {"OPENAI_BASE_URL": "https://api.openai.test/v1",
+                                           "OPENAI_FOLLOWUP_MODEL": "test-model"})
 
     assert provider is not None
     assert provider.api_key == "test-realtime-key"

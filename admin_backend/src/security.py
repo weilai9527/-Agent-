@@ -1,79 +1,23 @@
+"""离线管理夹具使用原有密码和会话格式。正式算法仅由共享身份组件持有。"""
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
 import os
 from pathlib import Path
-import re
 import secrets
-
 from cryptography.fernet import Fernet, InvalidToken
 
-
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
-
-
-def normalize_email(value: object) -> str:
-    return str(value or "").strip().lower()
-
-
-def is_valid_email(value: str) -> bool:
-    return re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", value or "") is not None
-
-
-def hash_password(password: str) -> str:
-    salt = _b64url_encode(secrets.token_bytes(16))
-    derived_key = hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt.encode("ascii"),
-        n=2**14,
-        r=8,
-        p=1,
-        dklen=32,
-    )
-    return f"scrypt${salt}${_b64url_encode(derived_key)}"
-
-
-def verify_password(password: str, stored_hash: str) -> bool:
-    try:
-        algorithm, salt, encoded_key = stored_hash.split("$", 2)
-        if algorithm != "scrypt":
-            return False
-        expected_key = _b64url_decode(encoded_key)
-        derived_key = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=salt.encode("ascii"),
-            n=2**14,
-            r=8,
-            p=1,
-            dklen=len(expected_key),
-        )
-    except (TypeError, ValueError):
-        return False
-    return hmac.compare_digest(expected_key, derived_key)
-
-
-def create_token() -> str:
-    return _b64url_encode(secrets.token_bytes(32))
-
-
-def hash_token(token: object) -> str:
-    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+from shared.account_security import (
+    create_token, hash_staff_password as hash_password, hash_staff_token as hash_token,
+    is_valid_email, normalize_email, verify_password,
+)
 
 
 TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 
 
 def generate_temporary_password(length: int = 12) -> str:
-    """Generate a print-friendly, per-student password without ambiguous glyphs."""
+    """为每名学生生成便于打印的密码，避开外形容易混淆的字符。"""
     size = max(10, min(32, int(length)))
     required = [
         secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ"),
@@ -143,6 +87,7 @@ def sanitize_admin(admin: dict | None) -> dict | None:
         "email": admin.get("email"),
         "name": admin.get("name"),
         "role": admin.get("role"),
+        "actorType": admin.get("actor_type", "admin"),
         "status": admin.get("status"),
         "permissions": _json_list(admin.get("permissions")),
         "student_scope": _json_list(admin.get("student_scope")),

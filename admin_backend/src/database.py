@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import ssl
 from pathlib import Path
 import re
 import sqlite3
 import threading
 
+from shared.offline_fixture import connect_offline_sqlite, require_offline_fixture
+
+# 在线网关和诊断服务不读取旧管理库；在创建连接或解析相邻配置之前先核验离线权限。
+require_offline_fixture()
+
 from . import env  # noqa: F401
-from backend.src import database as candidate_database  # noqa: F401
+# 此模块只服务于离线历史夹具，其组织查询仍需连接旧版学生表。正常管理网关不加载此模块。
+if os.getenv("IDENTITY_SESSION_MODE", "legacy") == "legacy":
+    from backend.src import database as candidate_database  # noqa: F401
 
 
 ADMIN_BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -57,6 +65,8 @@ def _normalize_sql(sql: str) -> str:
 
 
 class MySQLDatabase:
+    engine = "mysql"
+
     def __init__(self, cfg: MySQLConfig):
         self.cfg = cfg
         self._local = threading.local()
@@ -86,7 +96,8 @@ class MySQLDatabase:
         conn = getattr(self._local, "conn", None)
         if conn and getattr(conn, "open", False):
             return conn
-        self._ensure_database()
+        if not os.environ.get("SERVICE_ID") and os.getenv("IDENTITY_SESSION_MODE", "legacy") == "legacy":
+            self._ensure_database()
         pymysql = _load_pymysql()
         conn = pymysql.connect(
             host=self.cfg.host,
@@ -97,6 +108,8 @@ class MySQLDatabase:
             charset=self.cfg.charset,
             autocommit=True,
             cursorclass=pymysql.cursors.DictCursor,
+            **({"ssl": ssl.create_default_context(cafile=os.environ.get("MYSQL_SSL_CA") or None)}
+               if os.environ.get("SERVICE_ID") else {}),
         )
         self._local.conn = conn
         return conn
@@ -124,17 +137,21 @@ class MySQLDatabase:
 
 
 class SQLiteDatabase:
+    engine = "sqlite"
+
     def __init__(self, path: Path):
         self.path = path
-        self._conn = None
+        self._local = threading.local()
 
     def connect(self):
-        if self._conn:
-            return self._conn
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        return self._conn
+        # 事务按线程隔离，其他请求的提交或回滚不得改变本请求的名册、权限或会话操作。
+        conn = getattr(self._local, "connection", None)
+        if conn is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = connect_offline_sqlite(self.path)
+            conn.row_factory = sqlite3.Row
+            self._local.connection = conn
+        return conn
 
     def execute(self, sql: str, params: tuple = ()):
         return self.connect().execute(sql, params)
@@ -214,7 +231,7 @@ def _column_exists(table_name: str, column_name: str) -> bool:
 
 
 def ensure_mysql_cross_schema_collations() -> None:
-    """Align columns joined to tables owned by the candidate backend."""
+    """确保冻结旧库的跨表关联键采用匹配的排序规则。"""
     if DB_ENGINE != "mysql":
         return
 
@@ -461,7 +478,7 @@ def ensure_admin_schema() -> None:
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               INDEX idx_admin_perm_requests_user (admin_user_id),
               CONSTRAINT fk_admin_perm_request_user FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
             CREATE TABLE IF NOT EXISTS campus_colleges (
@@ -548,9 +565,7 @@ def ensure_admin_schema() -> None:
 
     _migrate_admin_users()
     _migrate_student_registrations()
-    # Student accounts live in the candidate backend's users table.  The admin
-    # service also applies these additive migrations so either service can be
-    # started first during deployment.
+    # 旧版学生账号保存在同库 users 表中；仅离线夹具重放兼容迁移，为历史记录补齐字段。
     if _table_exists("users"):
         user_columns = [
             ("student_no", "TEXT" if DB_ENGINE == "sqlite" else "VARCHAR(80) NULL"),
@@ -599,32 +614,16 @@ def ensure_admin_schema() -> None:
 
 
 def _migrate_admin_users() -> None:
-    """兼容升级：为 admin_users 补充权限列；仅在首次迁移时清空旧的角色制管理员账号。
-
-    新权限模型下，历史角色（reviewer / operations）不再参与权限判断，
-    管理端启动后只会保留代码中定义的主管理员，其余账号由主管理员重新创建。
-    """
-    if DB_ENGINE == "sqlite":
-        columns = {row["name"] for row in db.execute("PRAGMA table_info(admin_users)").fetchall()}
-        if "permissions" not in columns:
-            db.execute("ALTER TABLE admin_users ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]'")
-        if "student_scope" not in columns:
-            db.execute("ALTER TABLE admin_users ADD COLUMN student_scope TEXT")
-        missing = [column for column in ("permissions", "student_scope") if column not in columns]
-    else:
-        rows = all_rows(
-            """
-            SELECT COLUMN_NAME FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'admin_users'
-            """
-        )
-        existing = {str(row.get("COLUMN_NAME") or "") for row in rows}
-        missing = [column for column in ("permissions", "student_scope") if column not in existing]
-        for column in missing:
-            db.execute(f"ALTER TABLE admin_users ADD COLUMN {column} TEXT NULL")
-    if missing:
-        db.execute("DELETE FROM admin_users")
-        db.commit()
+    """保留历史身份和审计外键，新增的敏感动作默认不授予。"""
+    columns = [
+        ("permissions", "TEXT"),
+        ("student_scope", "TEXT"),
+        ("actor_type", "VARCHAR(16) NOT NULL DEFAULT 'admin'"),
+    ]
+    for name, definition in columns:
+        if not _column_exists("admin_users", name):
+            db.execute(f"ALTER TABLE admin_users ADD COLUMN {name} {definition}").close()
+    db.commit()
 
 
 def _migrate_student_registrations() -> None:

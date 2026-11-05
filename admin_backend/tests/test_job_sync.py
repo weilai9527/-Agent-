@@ -1,4 +1,4 @@
-"""Isolated feed tests: no live DB, credentials, or upstream service required."""
+"""用受控数据源验证岗位同步，不连接学校数据库或真实供应商。"""
 import io
 import json
 import os

@@ -17,8 +17,8 @@ export default function SecurityLogsModal({ request, onClose }) {
   );
 }
 
-export function SecurityLogsPage({ request }) {
-  const [form, setForm] = useState({ event_type: '', request_id: '', actor_id: '', since: '', until: '' });
+export function SecurityLogsPage({ request, native = false, platform = false }) {
+  const [form, setForm] = useState({ school_id: '', event_type: '', request_id: '', actor_id: '', since: '', until: '' });
   const [query, setQuery] = useState({ offset: 0, until: new Date().toISOString() });
   const [payload, setPayload] = useState({ events: [], total: 0, hasMore: false });
   const [loading, setLoading] = useState(true);
@@ -51,6 +51,7 @@ export function SecurityLogsPage({ request }) {
     if (form.since && form.until && form.since > form.until) { setError('开始时间不能晚于结束时间。'); return; }
     load({
       offset: 0,
+      school_id: platform ? form.school_id.trim() : '',
       fixedUntil: Boolean(form.until),
       event_type: form.event_type.trim(), request_id: form.request_id.trim(), actor_id: form.actor_id.trim(),
       since: form.since ? new Date(form.since).toISOString() : '',
@@ -63,12 +64,13 @@ export function SecurityLogsPage({ request }) {
           <p className="form-hint">查看启用新审计后记录的账号操作、权限拒绝和操作异常。时间按本机时区显示。</p>
           <form className="security-log-filters" onSubmit={search}>
             {[
+              ...(platform ? [['school_id','学校编号','查询指定学校的审计记录']] : []),
               ['event_type', '事件类型', '如 student.login'],
               ['request_id', '请求 ID', '精确匹配请求 ID'],
               ['actor_id', '操作者 ID', '精确匹配用户 ID'],
             ].map(([field, label, placeholder]) => (
               <label className="field-block" key={field}><span>{label}</span>
-                <input value={form[field]} placeholder={placeholder} maxLength={field === 'request_id' ? 32 : 80}
+                <input value={form[field]} placeholder={placeholder} maxLength={field === 'request_id' ? 32 : field === 'event_type' ? 80 : 128}
                   onChange={(event) => setForm((current) => ({ ...current, [field]: event.target.value }))} />
               </label>
             ))}
@@ -84,13 +86,13 @@ export function SecurityLogsPage({ request }) {
           {loading && <p role="status">正在读取安全审计…</p>}
           {!loading && !error && <>
             <div className="table-wrap connection-log-table">
-              <table><thead><tr><th>时间</th><th>事件</th><th>操作者</th><th>结果</th><th>来源 IP</th><th>详情</th></tr></thead>
-                <tbody>{payload.events.map((item) => <tr key={item.event_id}>
+              <table><thead><tr><th>时间</th><th>事件</th><th>操作者</th><th>结果</th><th>{native ? '学校' : '来源 IP'}</th><th>详情</th></tr></thead>
+                <tbody>{payload.events.map((item) => <tr key={JSON.stringify([item.school_id, item.event_id])}>
                   <td>{new Date(item.occurred_at).toLocaleString('zh-CN', { hour12: false })}</td>
                   <td><strong>{item.event_type}</strong><small>{item.method} {item.route}</small></td>
                   <td>{item.actor_id || item.attempted_account || '未认证'}<small>{item.actor_type || ''}</small></td>
                   <td><span className={`connection-level ${item.success ? 'info' : 'error'}`}>{item.success ? '成功' : '失败'}</span><small>HTTP {item.status_code}</small></td>
-                  <td>{item.client_ip}</td>
+                  <td>{(native ? item.school_id : item.client_ip) || '—'}</td>
                   <td><button className="table-view-button" type="button" onClick={() => setSelected(item)}>详情</button></td>
                 </tr>)}
                 {payload.events.length === 0 && <tr><td colSpan="6">当前条件下暂无安全审计记录。</td></tr>}
@@ -107,8 +109,8 @@ export function SecurityLogsPage({ request }) {
             {selected && <section className="security-log-detail" ref={detailRef} tabIndex={-1} aria-label="审计详情">
               <header><h3>审计详情</h3><button type="button" className="table-view-button" onClick={() => setSelected(null)}>收起详情</button></header>
               <dl>{[
-                ['请求 ID', selected.request_id], ['原因', selected.reason], ['服务', selected.service],
-                ['处理耗时', `${selected.duration_ms} ms`], ['响应是否完整', selected.response_complete ? '是' : '否'],
+                ['学校', selected.school_id || '—'], ['请求 ID', selected.request_id], ['原因', selected.reason], ['服务', selected.service],
+                ['处理耗时', `${selected.duration_ms ?? 0} ms`], ['响应是否完整', selected.response_complete ? '是' : '否'],
                 ['操作对象', selected.target_id || Object.values(selected.targets || {}).join('、') || '—'],
                 ['异常类型', selected.error_type || '—'],
               ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>

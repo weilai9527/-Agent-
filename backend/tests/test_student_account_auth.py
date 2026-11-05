@@ -16,7 +16,9 @@ def test_student_number_login_requires_initial_password_change(tmp_path):
         '''
         from uuid import uuid4
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         user_id = str(uuid4())
         with main.db:
@@ -34,7 +36,7 @@ def test_student_number_login_requires_initial_password_change(tmp_path):
                 (str(uuid4()), user_id, "测试学生"),
             ).close()
 
-        client = TestClient(main.app)
+        client = TestClient(main.app, base_url='https://testserver')
         closed = client.post(
             "/api/auth/register",
             json={"email": "new@example.com", "password": "Password123!"},

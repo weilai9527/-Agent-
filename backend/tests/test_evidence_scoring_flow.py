@@ -1,4 +1,4 @@
-"""Exercise answer scoring, repair, report generation and history through the HTTP API."""
+"""通过 HTTP 验证作答评分、补评、报告生成及历史查询。"""
 
 import json
 import os
@@ -10,8 +10,7 @@ from unittest.mock import patch
 
 
 def test_evidence_scoring_flow(tmp_path):
-    # The application binds its database at import time. A fresh process also
-    # isolates the HTTP worker threads from the rest of the test suite.
+    # 每个历史夹具独立绑定临时库，测试在新解释器运行以隔离请求线程。
     environment = {
         **os.environ, "APP_ENV": "test", "DB_ENGINE": "sqlite",
         "SQLITE_PATH": str(tmp_path / "scoring.sqlite"),
@@ -26,7 +25,10 @@ def test_evidence_scoring_flow(tmp_path):
 
 def run_flow():
     from fastapi.testclient import TestClient
-    from backend.src import ai_evaluation, main
+    from shared.offline_fixture import enable_offline_fixture
+    enable_offline_fixture()
+    from backend.src import ai_evaluation
+    from backend.offline import main
 
     client = TestClient(main.app)
 
@@ -65,7 +67,7 @@ def run_flow():
 
     def model(provider, messages):
         if provider.model == "REPORT_PROVIDER_ORDER":
-            # The narrator is deliberately unreliable about scores.
+            # 故意让模型叙述与真实分数不一致，验证评分取自证据字段。
             return {"summary": "两次作答讨论了重复请求。", "suggestions": ["补充失败场景。"],
                     "total_score": 99, "grade": "A", "pass_recommendation": "strong_pass",
                     "ability_radar": {"role_fit": 99}}
@@ -120,7 +122,7 @@ def run_flow():
             60, "D", "borderline",
         )
 
-    # Pre-migration rules-only reports had a number but no verified coverage.
+    # 旧版规则报告可能有分数，但没有经过核实的作答覆盖率。
     legacy = post("/api/interviews", target_role="后端工程师")["interview"]
     legacy_path = "/api/interviews/" + legacy["id"]
     post(legacy_path + "/messages", sender_type="candidate", message_type="answer", content="不知道")

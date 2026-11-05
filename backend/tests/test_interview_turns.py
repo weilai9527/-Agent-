@@ -1,4 +1,4 @@
-"""Run through the real routes against an isolated database in a fresh interpreter."""
+"""在新解释器中通过实际 HTTP 路由验证并发作答，数据库使用独立测试文件。"""
 import os
 from pathlib import Path
 import subprocess
@@ -11,7 +11,9 @@ def test_progress_is_atomic_and_recovers_awaited_captions(tmp_path):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
         from fastapi.testclient import TestClient
-        from backend.src import main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline import main
 
         client = TestClient(main.app)
         def post(url, data=None):
@@ -95,7 +97,9 @@ def test_finish_wins_while_model_is_running(tmp_path):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Event
         from fastapi.testclient import TestClient
-        from backend.src import main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline import main
         from unittest.mock import Mock
 
         client = TestClient(main.app)
@@ -130,7 +134,9 @@ def test_legacy_adoption_and_fallback(tmp_path):
     run_isolated(dedent("""
         from concurrent.futures import ThreadPoolExecutor
         from fastapi.testclient import TestClient
-        from backend.src import main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline import main
         client = TestClient(main.app)
         def post(url, body=None):
             response = client.post(url, json=body or {})
@@ -169,7 +175,9 @@ def test_concurrent_opening_and_distinct_submissions(tmp_path):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
         from fastapi.testclient import TestClient
-        from backend.src import main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline import main
         client = TestClient(main.app)
         def post(url, body=None):
             response = client.post(url, json=body or {})
@@ -202,7 +210,9 @@ def test_concurrent_opening_and_distinct_submissions(tmp_path):
 def test_interrupted_legacy_role_switch_and_terminal_recovery(tmp_path):
     run_isolated(dedent("""
         from fastapi.testclient import TestClient
-        from backend.src import main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline import main
         client = TestClient(main.app)
         def post(url, body=None):
             response = client.post(url, json=body or {})

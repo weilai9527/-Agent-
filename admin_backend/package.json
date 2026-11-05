@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "uvicorn admin_backend.src.main:app --app-dir .. --host 127.0.0.1 --port 3002 --reload",
-    "start": "uvicorn admin_backend.src.main:app --app-dir .. --host 127.0.0.1 --port 3002"
+    "dev": "cd .. && python -m deploy.run_service admin-gateway --reload",
+    "start": "cd .. && python -m deploy.run_service admin-gateway"
   }
 }

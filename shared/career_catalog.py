@@ -114,8 +114,7 @@ def _schema_sql(engine: str) -> list[str]:
         timestamp = "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"
         integer = "INT"
         table_suffix = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
-        # UUID relationships make version_id redundant for matrix uniqueness;
-        # omitting it keeps the utf8mb4 key below MySQL's 3072-byte limit.
+        # 岗位和能力由全局唯一 ID 标识；省略版本列可使 utf8mb4 联合索引低于 MySQL 的 3072 字节限制。
         matrix_unique = "UNIQUE(job_role_id, competency_id)"
         permission_unique = "UNIQUE KEY uq_catalog_role_permission (role_code(80), scope_type(40), scope_code(80), permission(40))"
 
@@ -502,7 +501,7 @@ JOB_DOMAIN_KEYWORDS = {
 
 
 def _job_domain_affinity(normalized_name: str, job_code: str) -> float:
-    """Give catalog hints a domain signal so shared suffixes like “工程师” do not dominate."""
+    """结合专业词判断方向，避免“工程师”等通用后缀左右匹配结果。"""
     hits = sum(1 for keyword in JOB_DOMAIN_KEYWORDS.get(job_code, ()) if normalize_job_name(keyword) in normalized_name)
     return min(0.86, 0.68 + (hits - 1) * 0.06) if hits else 0.0
 
@@ -570,6 +569,7 @@ def _job_ability_matrix(db: Any, version_id: str, job_role_id: str) -> list[dict
 
 
 def match_catalog_job(db: Any, suggested_name: str) -> dict:
+    # 在已发布版本内核对标准名和别名。命中后按同一版本读取能力矩阵，避免混入其他版本的要求。
     version = resolve_version(db)
     normalized = normalize_job_name(suggested_name)
     if not version or not normalized:
@@ -595,6 +595,7 @@ def match_catalog_job(db: Any, suggested_name: str) -> dict:
             }
     nearest = None
     nearest_score = 0.0
+    # 未命中时只提供审核线索。semantic_hint 表示领域规则得分高于名称相似度，岗位仍标为 external。
     nearest_method = "similarity_hint"
     for job in jobs:
         similarity_score = SequenceMatcher(None, normalized, normalize_job_name(job["name"])).ratio()
@@ -628,7 +629,7 @@ CATALOG_MATCH_FIELDS = {
 
 
 def refresh_resume_direction_matches(db: Any, directions: list[dict]) -> list[dict]:
-    """Refresh catalog-derived fields without invoking an AI model or duplicating review-pool records."""
+    """仅刷新目录派生字段，不调用模型，也不重复写入审核池。"""
     refreshed: list[dict] = []
     for direction in directions:
         if not isinstance(direction, dict):
@@ -662,28 +663,24 @@ def record_job_suggestion(db: Any, suggested_name: str, match: dict, provider: s
     normalized = normalize_job_name(suggested_name)
     if not normalized:
         raise ValueError("岗位建议名称不能为空。")
-    existing = _one(db, "SELECT * FROM catalog_job_suggestions WHERE normalized_name = ?", (normalized,))
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    if existing:
-        _execute(db, """UPDATE catalog_job_suggestions
-            SET suggested_name = ?, nearest_job_role_id = ?, match_confidence = ?,
-                occurrence_count = occurrence_count + 1, last_provider = ?, updated_at = ?
-            WHERE id = ?""", (
-                suggested_name[:160], match.get("nearest_catalog_job_id"), int(match.get("match_confidence") or 0),
-                provider, now, existing["id"],
-            ))
-        suggestion_id = existing["id"]
+    # 规范名称的唯一键合并多标签页的并发建议，保留原建议 ID、审核状态和首次供应商。
+    if getattr(db, "engine", "sqlite") == "mysql":
+        update = """ON DUPLICATE KEY UPDATE suggested_name=VALUES(suggested_name),
+            nearest_job_role_id=VALUES(nearest_job_role_id), match_confidence=VALUES(match_confidence),
+            last_provider=VALUES(last_provider)"""
     else:
-        suggestion_id = _id()
-        _execute(db, """INSERT INTO catalog_job_suggestions
-            (id, suggested_name, normalized_name, nearest_job_role_id, match_confidence,
-             occurrence_count, source_type, first_provider, last_provider, review_status)
-            VALUES (?, ?, ?, ?, ?, 1, 'resume_ai', ?, ?, 'pending')""", (
-                suggestion_id, suggested_name[:160], normalized, match.get("nearest_catalog_job_id"),
-                int(match.get("match_confidence") or 0), provider, provider,
-            ))
+        update = """ON CONFLICT(normalized_name) DO UPDATE SET suggested_name=excluded.suggested_name,
+            nearest_job_role_id=excluded.nearest_job_role_id, match_confidence=excluded.match_confidence,
+            last_provider=excluded.last_provider"""
+    _execute(db, """INSERT INTO catalog_job_suggestions
+        (id, suggested_name, normalized_name, nearest_job_role_id, match_confidence,
+         occurrence_count, source_type, first_provider, last_provider, review_status)
+        VALUES (?, ?, ?, ?, ?, 1, 'resume_ai', ?, ?, 'pending') """ + update +
+        ", occurrence_count=occurrence_count+1, updated_at=CURRENT_TIMESTAMP",
+        (_id(), suggested_name[:160], normalized, match.get("nearest_catalog_job_id"),
+         int(match.get("match_confidence") or 0), provider, provider))
     db.commit()
-    return _one(db, "SELECT * FROM catalog_job_suggestions WHERE id = ?", (suggestion_id,)) or {}
+    return _one(db, "SELECT * FROM catalog_job_suggestions WHERE normalized_name=?", (normalized,)) or {}
 
 
 def enrich_resume_directions(db: Any, directions: list[dict], provider: str | None = None) -> list[dict]:

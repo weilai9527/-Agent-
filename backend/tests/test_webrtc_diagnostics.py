@@ -23,7 +23,9 @@ def test_webrtc_diagnostics_are_sanitized_and_expire(tmp_path):
     script = textwrap.dedent(
         """
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         client = TestClient(main.app)
         registered = client.post(

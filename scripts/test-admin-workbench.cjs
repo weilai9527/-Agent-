@@ -1,4 +1,4 @@
-/* Local UI regression test. All API requests are intercepted with synthetic data. */
+/* 本地界面回归测试，拦截所有 API 请求并使用合成数据响应。 */
 const { createRequire } = require('node:module');
 const { createServer } = require('node:http');
 const fs = require('node:fs');
@@ -254,7 +254,7 @@ const server = createServer((req, res) => {
     await page.getByRole('button', { name: '报告与评分', exact: true }).click();
     await page.screenshot({ path: path.join(output, 'model-settings-tablet.png'), fullPage: true });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-    // Verify actual filtering, polling recovery, and sync feedback with synthetic data.
+    // 用合成数据验证页面筛选结果、轮询恢复及同步操作的反馈。
     extraReports = [
       { id: 'low', candidate: '低分学生', score: 69, reviewStatus: '待复核' },
       { id: 'boundary', candidate: '边界学生', score: 70, reviewStatus: '待复核' },

@@ -1,4 +1,4 @@
-"""Transactional storage for server-owned interview turns."""
+"""通过事务保存由服务端维护的面试轮次。"""
 from contextlib import contextmanager
 import json
 from uuid import uuid4
@@ -8,7 +8,7 @@ from .database import DB_ENGINE, db, one
 
 @contextmanager
 def locked_session(interview_id, user_id):
-    # Serialize writers across processes, including two tabs opening the same session.
+    # 串行处理不同进程中的写操作，避免两个标签页同时打开同一会话时产生冲突。
     with db:
         if DB_ENGINE == "sqlite":
             db.execute("BEGIN IMMEDIATE").close()
@@ -71,6 +71,7 @@ def commit_turn(interview_id, submission_id, question, answer, decision, next_qu
     db.execute("""UPDATE interview_progress SET question_id=?,agent_id=?,last_submission_id=?
                   WHERE interview_id=?""", (next_id, next_agent_id, submission_id, interview_id)).close()
     db.execute("UPDATE interview_sessions SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (interview_id,)).close()
+    return next_id
 
 
 def complete_pending_question(interview_id, turn, content, transcript=None, source_ref=None):

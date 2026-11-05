@@ -73,9 +73,7 @@ export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnI
       const text = String(message?.message || '').trim();
       const buffered = turns.get(speaker);
 
-      // dingrtc-aiagent may send the final sentence boundary as an empty
-      // transcription with end=true. Do not discard that marker: it is what
-      // turns the buffered candidate transcript into a persistable answer.
+      // 云端可能只发送空文本和 end=true。这个标记负责把已缓冲的字幕封成一条可提交答案。
       if (!text) {
         if (!message?.end || !buffered?.text) return null;
         turns.delete(speaker);
@@ -116,9 +114,7 @@ export function createAliyunRtcTranscriptAssembler({ createTurnId = defaultTurnI
   };
 }
 
-// The provider can finish a candidate caption while an earlier agent caption
-// is still streaming. Bind each question when it starts, and emit business
-// turns in conversational order regardless of which final marker arrives first.
+// 面试官的问题可能比学生的回答更晚收到结束标记。绑定开口时的回合，按实际对话顺序入队。
 export function createRtcCaptionStream(candidate, agent) {
   const assembler = createAliyunRtcTranscriptAssembler();
   let lastCandidateId = null;
@@ -176,8 +172,7 @@ async function loadAiAgentSdk() {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-// A spoken notification does not replace the cloud model's role/history.
-// Confirm the old session has stopped before preparing and starting a new role.
+// 切换面试官必须等旧会话确认结束。只播放切换通知不会替换云端模型的角色与历史。
 export async function handoffAliyunRtcSession({ stop, prepare, start, isCancelled }) {
   const stopped = await stop();
   if (isCancelled()) return;
@@ -193,10 +188,7 @@ export async function ensureAiAgentMessagingReady(aiAgentClient, {
   timeoutMs = 2000,
   pollIntervalMs = 50,
 } = {}) {
-  // isInSession/initAgent are currently runtime fields of Alibaba's official
-  // dingrtc-aiagent package, although its .d.ts marks them private. The 1.0.10
-  // plugin can occasionally miss the channel's connected transition; audio
-  // still works in that state, but no message/agent-status events are emitted.
+  // 1.0.10 插件偶尔漏掉入会通知，此时有声音却无字幕。仅在这版运行时字段存在时尝试补初始化。
   if (!aiAgentClient || !Object.prototype.hasOwnProperty.call(aiAgentClient, 'isInSession')) {
     return true;
   }
@@ -280,14 +272,15 @@ async function createAliyunRtcAudioSessionOnce({
 
   const handleAgentStatus = (status) => onAgentStatus?.(status);
 
-  const handleAgentMessage = (message) => onAgentMessage?.(message);
+  const handleAgentMessage = (message) => {
+    // 离会前已排队的回调可能在新面试官接入后才触发。
+    if (!closed) onAgentMessage?.(message);
+  };
 
   const handleUserPublished = async (user, mediaType, auxiliary) => {
     if (closed || mediaType !== 'audio') return;
     try {
-      // DingRTC Web receives remote audio through the channel's mixed MCU
-      // stream. Subscribing by a participant user ID is rejected with
-      // "only support subscribe mcu audio".
+      // Web SDK 仅支持订阅频道的 MCU 混音流；每个成员发布事件都复用同一订阅。
       if (!mcuAudioSubscription) {
         mcuAudioSubscription = client.subscribe('mcu', mediaType, auxiliary);
       }
@@ -329,7 +322,7 @@ async function createAliyunRtcAudioSessionOnce({
     if (aiAgentClient) {
       aiAgentClient.off('agent-status', handleAgentStatus);
       aiAgentClient.off('message', handleAgentMessage);
-      try { aiAgentClient.detach?.(); } catch { /* Continue releasing RTC resources. */ }
+      try { aiAgentClient.detach?.(); } catch { /* 仍需释放麦克风和频道。 */ }
     }
 
     if (microphoneTrack) {
@@ -337,21 +330,20 @@ async function createAliyunRtcAudioSessionOnce({
         try {
           await client.unpublish(microphoneTrack);
         } catch {
-          // The signaling connection may already be gone; still release the device.
+          // 信令断开时也必须释放设备。
         }
       }
-      try { microphoneTrack.close(); } catch { /* Still leave the channel. */ }
+      try { microphoneTrack.close(); } catch { /* 继续退出频道。 */ }
       microphoneTrack = null;
     }
 
     remoteTracks.forEach((track) => {
-      try { track.stopPlay?.(); } catch { /* Release the remaining tracks. */ }
+      try { track.stopPlay?.(); } catch { /* 继续停止其余轨道。 */ }
     });
     remoteTracks.clear();
     mcuAudioSubscription = null;
-    // join() can fail after opening signaling resources. The SDK's leave()
-    // also resets a partially connected client; do not gate it on success.
-    try { await client.leave(); } catch { /* Preserve the original startup error. */ }
+    // 加入频道失败时信令连接也可能已经建立，仍需调用 leave 清理。
+    try { await client.leave(); } catch { /* 保留最初的启动错误。 */ }
     joined = false;
   };
 
@@ -384,7 +376,7 @@ async function createAliyunRtcAudioSessionOnce({
       }
     }
 
-    // Subscribe to users that published audio before the candidate joined.
+    // 补订阅学生入会前就已发布的声音。
     await Promise.all(
       (joinResult.remoteUsers || [])
         .filter((user) => user.hasAudio)

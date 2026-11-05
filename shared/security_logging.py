@@ -1,4 +1,4 @@
-"""Request diagnostics and durable security events, without request/response bodies."""
+"""记录请求诊断和安全操作；日志不采集请求或响应正文。"""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -22,7 +22,7 @@ logger = logging.getLogger("interview.operations")
 
 
 def configure_logging() -> None:
-    # Own handler: uvicorn's default logging config does not configure application INFO logs.
+    # 单独添加处理器，避免 Uvicorn 默认配置吞掉应用层 INFO 日志。
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(logging.Formatter("%(message)s"))
@@ -47,6 +47,7 @@ def bind_actor(request, actor: dict | None, actor_type: str) -> None:
     if actor:
         request.state.security_actor = {
             "actor_id": clean(actor.get("id"), 80), "actor_type": actor_type,
+            **({"school_id": clean(actor["school_id"], 128)} if actor.get("school_id") else {}),
         }
 
 
@@ -58,8 +59,8 @@ def audit_context(request, **fields: Any) -> None:
 
 
 def exception_details(exc: Exception) -> dict:
-    # Exception messages, source lines and locals can contain SQL values, API keys or tokens.
-    # Preserve the type and call locations without copying those potentially sensitive values.
+    # 异常文本、源代码和局部变量可能包含 SQL 参数、供应商密钥或令牌。
+    # 仅记录异常类型及发生位置，保留可定位性。
     return {
         "error_type": clean(type(exc).__module__ + "." + type(exc).__name__),
         "frames": [
@@ -100,7 +101,7 @@ def ensure_security_schema(db, engine: str) -> None:
 
 
 class SecurityAuditStore:
-    """Separate bounded connections; never commit or roll back a business transaction."""
+    """应急模式使用独立的限时连接持久化审计，避免提交或回滚当前业务事务。"""
 
     def __init__(self, database_module):
         self.engine = database_module.DB_ENGINE
@@ -149,11 +150,12 @@ AUTH_ACTIONS = {
 
 
 class RequestLoggingMiddleware:
-    """Pure ASGI middleware: preserve streaming and isolate concurrent request contexts."""
+    """直接观察 ASGI 消息以支持流式响应，各个请求的审计状态彼此隔离。"""
 
-    def __init__(self, app, service: str, audit_store: SecurityAuditStore):
+    def __init__(self, app, service: str, audit_store: SecurityAuditStore | None = None):
         self.app = app
         self.service = service
+        self.native_gateway = service in {"student-gateway", "admin-gateway"}
         self.audit_store = audit_store
         configure_logging()
 
@@ -162,7 +164,7 @@ class RequestLoggingMiddleware:
             await self.app(scope, receive, send)
             return
         state = scope.setdefault("state", {})
-        # Never accept an arbitrary caller's ID as trusted correlation information.
+        # 请求关联编号由网关生成，防止调用方伪造审计链。
         request_id = uuid4().hex
         state["request_id"] = request_id
         started = time.perf_counter()
@@ -193,7 +195,7 @@ class RequestLoggingMiddleware:
                     {"error": "服务暂时不可用，请稍后重试。", "requestId": request_id}, status_code=500,
                 )(scope, receive, observed_send)
             else:
-                # A partially sent stream cannot be replaced with a JSON response.
+                # 已经发出响应头的流不能再用 JSON 错误响应替换。
                 raise
         finally:
             route = getattr(scope.get("route"), "path", "<unmatched>")
@@ -207,7 +209,8 @@ class RequestLoggingMiddleware:
                 "success": status < 400 and failure is None and response_complete,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 3),
                 "response_ms": response_ms,
-                "client_ip": clean((scope.get("client") or ("unknown",))[0], 64),
+                # 原生网关标准输出也执行脱敏，避免持久日志之外另留客户端 IP。
+                **({} if self.native_gateway else {"client_ip": clean((scope.get("client") or ("unknown",))[0], 64)}),
                 **actor,
             }
             if failure:
@@ -230,27 +233,29 @@ class RequestLoggingMiddleware:
                     "success": event["success"] and context.get("outcome") != "failed",
                     "reason": context.get("reason") or (
                         "unhandled_exception" if failure else "response_incomplete" if not response_complete else f"http_{status}"),
-                    "targets": targets,
-                    **{k: v for k, v in context.items() if k in {"attempted_account", "target_type", "target_id"}},
+                    "targets": {} if self.native_gateway else targets,
+                    **{k: v for k, v in context.items()
+                       if k in ({"target_type"} if self.native_gateway else {"attempted_account","target_type","target_id"})},
                 }
                 if failure:
                     audit["error_type"] = failure["error_type"]
-                # First emit the full bounded security event into the existing journal sink.
+                # 先输出经过裁剪的结构化事件，再交给部署选择的审计持久化通道。
                 emit(audit, logging.WARNING if not audit["success"] else logging.INFO)
-                try:
-                    await run_in_threadpool(self.audit_store.write, audit)
-                except Exception as exc:
-                    emit({
-                        "occurred_at": timestamp(), "service": self.service,
-                        "event_type": "security.audit_persist_failed", "event_id": audit["event_id"],
-                        "request_id": request_id, "error_type": type(exc).__name__,
-                        "fallback": "structured_runtime_log",
-                    }, logging.ERROR)
+                if self.audit_store is not None:
+                    try:
+                        await run_in_threadpool(self.audit_store.write, audit)
+                    except Exception as exc:
+                        emit({
+                            "occurred_at": timestamp(), "service": self.service,
+                            "event_type": "security.audit_persist_failed", "event_id": audit["event_id"],
+                            "request_id": request_id, "error_type": type(exc).__name__,
+                            "fallback": "structured_runtime_log",
+                        }, logging.ERROR)
 
 
 def list_security_events(db, *, limit: int = 50, offset: int = 0, request_id: str = "",
                          actor_id: str = "", event_type: str = "", since: str = "", until: str = "") -> dict:
-    """Super-admin API uses bounded, parameterized filters; timestamps are normalized UTC."""
+    """旧版管理员检索使用参数化条件和有界分页，时间统一为 UTC。"""
     clauses, params = [], []
     for column, value in [("request_id", request_id), ("actor_id", actor_id), ("event_type", event_type)]:
         if value:

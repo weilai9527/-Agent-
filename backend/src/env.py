@@ -4,47 +4,7 @@ import os
 from pathlib import Path
 
 
-PLACEHOLDER_VALUES = {
-    "your-api-key-here",
-    "your-dashscope-api-key",
-    "your-kimi-api-key-here",
-    "your-deepseek-api-key-here",
-    "your-mysql-password",
-    "placeholder",
-}
-
-
-def clean_env_value(value: str | None) -> str:
-    cleaned = (value or "").strip()
-    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
-        cleaned = cleaned[1:-1].strip()
-    return cleaned
-
-
-def is_placeholder_value(value: str | None) -> bool:
-    cleaned = clean_env_value(value).lower()
-    if not cleaned:
-        return False
-    return (
-        cleaned in PLACEHOLDER_VALUES
-        or cleaned.startswith("your-")
-        or "api-key-here" in cleaned
-    )
-
-
-def valid_env_value(name: str, default: str = "") -> str:
-    value = clean_env_value(os.environ.get(name))
-    if not value or is_placeholder_value(value):
-        return default
-    return value
-
-
-def first_env_value(*names: str) -> str:
-    for name in names:
-        value = valid_env_value(name)
-        if value:
-            return value
-    return ""
+from shared.env_values import PLACEHOLDER_VALUES, clean_env_value, first_env_value, is_placeholder_value, valid_env_value
 
 
 def _parse_env_line(line: str) -> tuple[str, str] | None:
@@ -61,6 +21,10 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
 
 
 def load_env_file() -> None:
+    # 各服务进程只使用为本服务注入的凭据。加载兼容处理函数时也不能读取相邻项目的环境配置。
+    from shared.offline_fixture import offline_fixture_enabled
+    if offline_fixture_enabled() or os.environ.get("SERVICE_ID") or os.environ.get("APP_ENV") == "test":
+        return
     env_path = Path(__file__).resolve().parents[1] / ".env"
     if not env_path.is_file():
         return
@@ -71,34 +35,6 @@ def load_env_file() -> None:
             continue
         key, value = parsed
         os.environ.setdefault(key, value)
-
-
-AI_RUNTIME_PREFIXES = (
-    "AI_",
-    "OPENAI_",
-    "QWEN_",
-    "KIMI_",
-    "DEEPSEEK_",
-    "DASHSCOPE_",
-    "REPORT_",
-    "EVALUATION_",
-    "FOLLOWUP_",
-    "RESUME_ANALYSIS_",
-)
-
-
-def reload_runtime_ai_env() -> None:
-    """Reload admin-managed AI settings without replacing unrelated process env."""
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    if not env_path.is_file():
-        return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        parsed = _parse_env_line(raw_line)
-        if not parsed:
-            continue
-        key, value = parsed
-        if key.startswith(AI_RUNTIME_PREFIXES):
-            os.environ[key] = value
 
 
 def normalize_certificate_env() -> None:

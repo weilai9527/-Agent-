@@ -11,7 +11,9 @@ import unittest
 class MySQLCollationIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        from admin_backend.src import main as admin_main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from admin_backend.offline import main as admin_main
         from admin_backend.src.database import DB_ENGINE, MYSQL_COLLATION, db
 
         if DB_ENGINE != "mysql":

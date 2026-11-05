@@ -1,3 +1,4 @@
+import InterviewerPolicyEditor from './InterviewerPolicyEditor.jsx';
 import ModelSettingsPage from './ModelSettingsPage.jsx';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PageRefreshContext, usePageRefresh } from './PageRefreshContext.jsx';
@@ -55,6 +56,9 @@ import {
   X,
 } from 'lucide-react';
 import './styles.css';
+import SchoolUsagePage from './SchoolUsagePage.jsx';
+import TeachingCredentialsPanel from './TeachingCredentialsPanel.jsx';
+import NativeConnectionLogs from './NativeConnectionLogs.jsx';
 import { SecurityLogsPage } from './SecurityLogsModal.jsx';
 import { resolveRegistrationCounselor } from './registrationCounselor.js';
 import { registrationAssignmentCounts, registrationAssignmentLabel } from './registrationAssignment.js';
@@ -62,8 +66,16 @@ import RecordFilterFields from './RecordFilterFields.jsx';
 import { matchesRecordFilters } from './recordFilters.js';
 import { coverageLabel, reportStatusText } from '../../frontend/src/reportPresentation.js';
 import ReportReviewSection from './ReportReviewSection.jsx';
-import DashboardPage from './DashboardPage.jsx';
-import { CatalogModule } from './ProgramJobsPage.jsx';
+import VersionedReportPanel from './VersionedReportPanel.jsx';
+import { careerPermissions } from './careerPermissions.js';
+import { CatalogModule, ProgramJobsPage } from './ProgramJobsPage.jsx';
+import ResumeFormSettings from './ResumeFormSettings.jsx';
+
+const NativeSchoolManagement = React.lazy(() => import('./NativeSchoolManagement.jsx'));
+const NativeAgentTemplates = React.lazy(() => import('./NativeAgentTemplates.jsx'));
+const SchoolRecordBrowser = React.lazy(() => import('./SchoolRecordBrowser.jsx'));
+const NativeTeachingDashboard = React.lazy(() => import('./NativeTeachingDashboard.jsx'));
+const TrainingTasksPage = React.lazy(() => import('./TrainingTasksPage.jsx'));
 
 const ADMIN_API_BASE_URL = import.meta.env.VITE_ADMIN_API_BASE_URL || (import.meta.env.DEV ? 'http://127.0.0.1:3002' : '');
 
@@ -157,29 +169,39 @@ async function adminDownload(path, fallbackFilename) {
 }
 
 const navItems = [
+  { key: 'usage', label: '学校用量', icon: BarChart3, permission: 'canReadUsage', group: '模型与策略' },
+  { key: 'credentials', label: '证书申请', icon: GraduationCap, permission: 'canViewCredentials', group: '记录与质检', parent: 'records' },
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard, group: '总览' },
   { key: 'guide', label: '使用指引', icon: ListOrdered, group: '工作台' },
   { key: 'records', label: '记录与质检', icon: ClipboardList, group: '工作台', container: true },
+  { key: 'agentTemplates',label: '面试官模板',icon: Bot,permission: 'canReadAgentTemplates',group: '记录与质检',parent: 'records' },
+  { key: 'schoolInterviews', label: '学校面试记录', icon: ClipboardList, permission: 'canReadSchoolInterviews', group: '记录与质检', parent: 'records' },
+  { key: 'schoolReports', label: '学校报告记录', icon: FileText, permission: 'canReadSchoolReports', group: '记录与质检', parent: 'records' },
   { key: 'interviews', label: '训练记录', icon: ClipboardList, permission: 'canViewInterviews', group: '记录与质检', parent: 'records' },
+  { key: 'nativeSchool', label: '学校管理', icon: School, permission: 'canUseSchoolManagement', group: '教务信息', parent: 'academic' },
   { key: 'academic', label: '教务信息', icon: School, group: '工作台', container: true },
   { key: 'organization', label: '学生管理', icon: UsersRound, permission: 'canManageStudents', group: '教务信息', parent: 'academic' },
-  { key: 'catalog', label: '岗位信息', icon: BookOpen, permission: 'canViewProgramJobs', group: '工作台' },
+  { key: 'catalog', label: '岗位信息', icon: BookOpen, permission: 'canOpenCatalog', group: '工作台' },
   { key: 'recruitment', label: '招聘信息', icon: Building2, group: '工作台', container: true },
-  { key: 'jobPostings', label: '招聘岗位', icon: Building2, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
-  { key: 'jobMatches', label: '对比记录', icon: FileText, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
-  { key: 'jdSubmissions', label: '学生 JD 审核', icon: ClipboardList, permission: 'canViewJobPostings', group: '招聘信息', parent: 'recruitment' },
+  { key: 'jobPostings', label: '招聘岗位', icon: Building2, permission: 'canOpenPostings', group: '招聘信息', parent: 'recruitment' },
+  { key: 'jobMatches', label: '对比记录', icon: FileText, permission: 'canViewMatches', group: '招聘信息', parent: 'recruitment' },
+  { key: 'jdSubmissions', label: '学生 JD 审核', icon: ClipboardList, permission: 'canOpenJds', group: '招聘信息', parent: 'recruitment' },
   { key: 'agents', label: '模型配置', icon: Bot, permission: 'canViewAgents', group: '工作台', container: true },
   { key: 'modelText', label: '报告与评分', icon: FileText, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
   { key: 'modelRealtime', label: '实时面试', icon: Bot, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
-  { key: 'interviewerPolicy', label: '面试官策略', icon: Bot, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
+  { key: 'schoolProgramJobs', label: '专业关联岗位', icon: BookOpen, permission: 'canReadProgramJobs', group: '教务信息', parent: 'academic' },
+  { key: 'schoolResumeSettings', label: '简历表单配置', icon: ClipboardList, permission: 'canReadResumeFormSettings', group: '教务信息', parent: 'academic' },
+  { key: 'schoolInterviewPolicy', label: '面试官策略', icon: Bot, permission: 'canManageInterviewPolicy', group: '教务信息', parent: 'academic' },
+  { key: 'interviewerPolicy', legacyOnly: true, label: '面试官策略', icon: Bot, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
   { key: 'modelTts', label: '语音合成', icon: Bot, permission: 'canViewAgents', group: '模型配置', parent: 'agents' },
   { key: 'organizationConfig', label: '组织管理', icon: Network, permission: 'canManageOrganization', group: '教务信息', parent: 'academic' },
   { key: 'studentAccounts', label: '学生账号', icon: UserPlus, permission: 'canManageStudents', group: '教务信息', parent: 'academic' },
   { key: 'studentCreate', label: '注册学生', icon: UserPlus, permission: 'canManageStudents', group: '教务信息', parent: 'academic', hidden: true },
+  { key: 'trainingTasks', label: '教学任务与分析', icon: GraduationCap, permission: 'canViewTraining', group: '教务信息', parent: 'academic' },
   { key: 'reports', label: '报告质检', icon: FileText, permission: 'canViewReports', group: '记录与质检', parent: 'records' },
   { key: 'permission', label: '权限管理', icon: ShieldCheck, group: '系统管理', container: true },
   { key: 'adminUsers', label: '管理员管理', icon: UserCog, group: '权限管理', parent: 'permission', superOnly: true },
-  { key: 'permissionRequests', label: '权限申请', icon: KeyRound, group: '权限管理', parent: 'permission' },
+  { key: 'permissionRequests', label: '权限申请', legacyOnly: true, icon: KeyRound, group: '权限管理', parent: 'permission' },
   { key: 'permissionReview', label: '申请审核', icon: ShieldCheck, group: '权限管理', parent: 'permission', superOnly: true },
   { key: 'settings', label: '系统管理', icon: Settings, group: '系统管理', container: true },
   { key: 'connectionLogs', label: '连接日志', icon: Wifi, permission: 'canViewConnectionLogs', group: '系统管理', parent: 'settings' },
@@ -224,26 +246,35 @@ function AdminLogin({ onAuthenticated }) {
   const [form, setForm] = useState({ email: '', password: '' });
   const [submitting, setSubmitting] = useState(false);
   const [loginError, setLoginError] = useState('');
+  const [mustRotate, setMustRotate] = useState(false);
+  const [fresh, setFresh] = useState('');
+  const [confirmFresh, setConfirmFresh] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [capsLock, setCapsLock] = useState(false);
 
   const updateField = (field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
+    if (field === 'email') { setMustRotate(false); setFresh(''); setConfirmFresh(''); }
     setLoginError('');
   };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     if (submitting) return;
+    if (mustRotate && (fresh.length < 12 || fresh === form.password || fresh !== confirmFresh)) {
+      setLoginError('请填写至少 12 位、区别于临时密码且两次一致的新密码。'); return;
+    }
     setSubmitting(true);
     setLoginError('');
     try {
       const data = await adminRequest('/api/admin/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email: form.email.trim(), password: form.password }),
+        body: JSON.stringify({ email: form.email.trim(), password: form.password, ...(mustRotate ? { new_password: fresh } : {}) }),
       });
       onAuthenticated(data.admin);
     } catch (requestError) {
+      if (requestError.status === 428) setMustRotate(true);
+      if (requestError.status === 409) { setMustRotate(false); setFresh(''); setConfirmFresh(''); }
       setLoginError(requestError.status
         ? requestError.message
         : '暂时无法连接登录服务，请检查网络后重试。');
@@ -285,6 +316,12 @@ function AdminLogin({ onAuthenticated }) {
           </div>
         </div>
         <div className="admin-login-field">
+          {mustRotate && <>
+            <label htmlFor="admin-new-password">新密码（至少 12 位）</label>
+            <input id="admin-new-password" type="password" autoComplete="new-password" minLength={12} required value={fresh} onChange={e => setFresh(e.target.value)} />
+            <label htmlFor="admin-confirm-password">确认新密码</label>
+            <input id="admin-confirm-password" type="password" autoComplete="new-password" required value={confirmFresh} onChange={e => setConfirmFresh(e.target.value)} />
+          </>}
           <label htmlFor="admin-login-password">登录密码</label>
           <div className="admin-login-input">
           <LockKeyhole size={18} aria-hidden="true" />
@@ -553,7 +590,11 @@ function DataWorkspace({
   );
 }
 
-function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, onMove, position, onRevealTemporaryPassword, onResetStudentPassword }) {
+function versionedTeacherView(data) {
+  return data.assessmentVersioned && data.admin?.actorType === 'teacher' && data.permissions?.canViewReports;
+}
+
+function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, data, onVersionSaved, onMove, position, onRevealTemporaryPassword, onResetStudentPassword }) {
   const isOpen = Boolean(detail || loading || error);
   const [showTranscript, setShowTranscript] = useState(false);
 
@@ -583,6 +624,8 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
   const blocks = detail?.blocks || [];
   const transcriptMessages = (detail?.messages || []).filter((message) =>
     message.sender_type === 'candidate' || (message.sender_type === 'agent' && message.message_type !== 'system'));
+  const reportId = detail?.type === 'report' ? detail.id : showTranscript && detail?.reviewReport?.id;
+  const versions = reportId && versionedTeacherView(data);
   return (
     <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="detail-drawer" role="dialog" aria-modal="true" aria-label={title}>
@@ -606,7 +649,8 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
         {error && <div className="page-message error">{error}</div>}
         {!loading && !error && (
           <div className="detail-body">
-            {showTranscript && detail?.type === 'interview' ? (
+            {detail?.type === 'report' && !data.permissions?.canViewReports ? <p role="alert">当前账号没有查看报告的权限。</p>
+              : versions && detail.type === 'report' ? null : showTranscript && detail?.type === 'interview' ? (
               <section className="detail-block transcript-review">
                 <h3>完整问答记录 · {transcriptMessages.length} 条</h3>
                 {transcriptMessages.length > 0 ? (
@@ -647,6 +691,8 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
               </section>
             ))}
             </>}
+            {versions && <VersionedReportPanel key={reportId} reportId={reportId} request={adminRequest}
+              canReview={canReview} canAdjust={data.permissions?.canAdjustScores} onSaved={onVersionSaved} />}
           </div>
         )}
         {detail?.type === 'interview' && !error && (
@@ -657,14 +703,14 @@ function DetailDrawer({ detail, loading, error, onClose, onReview, canReview, on
             <div>
               {showTranscript ? <button type="button" disabled={loading} onClick={() => setShowTranscript(false)}>返回训练详情</button>
                 : <button type="button" disabled={loading} onClick={() => setShowTranscript(true)}>{canReview && detail.reviewReport ? '复核质检' : '查看完整问答'}</button>}
-              {showTranscript && canReview && detail.reviewReport && <>
+              {showTranscript && !data.assessmentVersioned && canReview && detail.reviewReport && <>
                 <button type="button" className="danger" disabled={loading} onClick={() => onReview('rejected')}>标记未通过</button>
                 <button type="button" disabled={loading} onClick={() => onReview('approved')}>通过复核</button>
               </>}
             </div>
           </footer>
         )}
-        {detail?.type === 'report' && canReview && !error && (
+        {detail?.type === 'report' && !data.assessmentVersioned && data.permissions?.canViewReports && canReview && !error && (
           <footer className="detail-actions">
             <span>复核结果会立即写入系统并记录操作人</span>
             <div>
@@ -834,7 +880,7 @@ function interviewReviewId() {
   try { return match ? decodeURIComponent(match[1]) : ''; } catch { return ''; }
 }
 
-function InterviewsPage({ data, query, onQueryChange, presetFilter, requestedId, onReviewed }) {
+function InterviewsPage({ data, query, onQueryChange, presetFilter, requestedId, onReviewed, onVersionSaved }) {
   const [expandedId, setExpandedId] = useState(() => requestedId || interviewReviewId());
   const [record, setRecord] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -846,7 +892,7 @@ function InterviewsPage({ data, query, onQueryChange, presetFilter, requestedId,
   const [revision, setRevision] = useState(0);
   const [liveError, setLiveError] = useState('');
   const reviewHeading = useRef(null);
-  const canReview = data.permissions?.canViewReports;
+  const canReview = data.permissions?.canReviewReports;
 
   useEffect(() => { if (requestedId) setExpandedId(requestedId); }, [requestedId]);
   useEffect(() => {
@@ -904,7 +950,7 @@ function InterviewsPage({ data, query, onQueryChange, presetFilter, requestedId,
   useEffect(() => { if (reviewing) reviewHeading.current?.focus(); }, [reviewing]);
 
   const submitReview = async (status) => {
-    if (saving || !record?.reviewReport?.id || !canReview) return;
+    if (data.assessmentVersioned || saving || !record?.reviewReport?.id || !canReview) return;
     setSaving(true);
     setReviewError('');
     try {
@@ -961,7 +1007,13 @@ function InterviewsPage({ data, query, onQueryChange, presetFilter, requestedId,
         <div className="review-transcript">{messages.length ? messages.map((message, index) => <article className={message.sender_type === 'candidate' ? 'candidate-message' : 'agent-message'} key={message.id || index}><header><strong>{message.sender_type === 'candidate' ? '候选人' : message.agent_name || '面试官'}</strong><span>{({ question: '提问', follow_up: '追问', answer: '回答', transcript: '回答' })[message.message_type] || '消息'} · {message.created_at || '-'}</span></header><p>{message.transcript_text || message.content || '无文本内容'}</p></article>) : <EmptyState text="这场训练暂无问答记录" />}</div>
         {notice && <div className="page-message success" role="status"><CheckCircle2 size={18} />{notice}</div>}
         {reviewError && <div className="page-message error" role="alert">{reviewError}</div>}
-        <footer className="review-page-actions"><span>{!canReview ? '当前账号没有复核权限' : !record?.reviewReport ? '训练报告尚未生成，暂不能提交复核' : '复核结果将保存，并记录操作人与时间'}</span><div><button type="button" className="secondary-button danger" disabled={saving || !canReview || !record?.reviewReport} onClick={() => submitReview('rejected')}>标记未通过</button><button type="button" className="primary-button" disabled={saving || !canReview || !record?.reviewReport} onClick={() => submitReview('approved')}>{saving ? '正在保存…' : '通过复核'}</button></div></footer>
+        {data.assessmentVersioned ? (record?.reviewReport && versionedTeacherView(data) &&
+          <VersionedReportPanel key={record.reviewReport.id} reportId={record.reviewReport.id} request={adminRequest}
+            canReview={canReview} canAdjust={data.permissions?.canAdjustScores} onSaved={updated => {
+              setRecord(previous => previous?.reviewReport?.id === updated.id
+                ? { ...previous, reviewReport: { ...previous.reviewReport, review_status: updated.review_status } } : previous);
+              onVersionSaved(updated);
+            }} />) : <footer className="review-page-actions"><span>{!canReview ? '当前账号没有复核权限' : !record?.reviewReport ? '训练报告尚未生成，暂不能提交复核' : '复核结果将保存，并记录操作人与时间'}</span><div><button type="button" className="secondary-button danger" disabled={saving || !canReview || !record?.reviewReport} onClick={() => submitReview('rejected')}>标记未通过</button><button type="button" className="primary-button" disabled={saving || !canReview || !record?.reviewReport} onClick={() => submitReview('approved')}>{saving ? '正在保存…' : '通过复核'}</button></div></footer>}
       </SectionCard>}
     </section>}
   </>;
@@ -2382,6 +2434,7 @@ function CatalogTree({ tree }) {
 function CatalogLibraryPage({ permissions, active = true }) {
   const [versions, setVersions] = useState([]);
   const [selectedCode, setSelectedCode] = useState('');
+  const [draftId, setDraftId] = useState('');
   const [tree, setTree] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
@@ -2399,11 +2452,12 @@ function CatalogLibraryPage({ permissions, active = true }) {
   const [approvalForms, setApprovalForms] = useState({});
   const [suggestionBusy, setSuggestionBusy] = useState('');
   const selectedVersion = versions.find((item) => item.code === selectedCode) || null;
+  const targetDraft = permissions.canViewCatalog ? (selectedVersion?.status === 'draft' ? selectedVersion.id : '') : draftId.trim();
   const catalogGroups = useMemo(() => flattenCatalogEntities(tree), [tree]);
   const draftEmploymentDirections = catalogGroups.job_roles_parent || [];
 
   const loadTree = async (code) => {
-    if (!code) { setTree(null); setLoading(false); return; }
+    if (!permissions.canViewCatalog || !code) { setTree(null); setLoading(false); return; }
     setLoading(true);
     try {
       setTree(await adminRequest(`/api/admin/catalog/tree?version=${encodeURIComponent(code)}`));
@@ -2417,6 +2471,7 @@ function CatalogLibraryPage({ permissions, active = true }) {
   };
 
   const loadVersions = async (preferredCode = '') => {
+    if (!permissions.canViewCatalog) return '';
     const result = await adminRequest('/api/admin/catalog/versions');
     const nextVersions = result.versions || [];
     setVersions(nextVersions);
@@ -2433,6 +2488,7 @@ function CatalogLibraryPage({ permissions, active = true }) {
   };
 
   const loadSuggestions = async (status = suggestionStatus) => {
+    if (!permissions.canViewCatalog) return;
     const result = await adminRequest(`/api/admin/catalog/job-suggestions${status === 'all' ? '' : `?status=${status}`}`);
     setSuggestions(result.suggestions || []);
   };
@@ -2446,9 +2502,8 @@ function CatalogLibraryPage({ permissions, active = true }) {
   }, active);
 
   useEffect(() => {
-    loadVersions().then(loadTree).catch((requestError) => { setCatalogError(requestError.message); setLoading(false); });
-    loadSuggestions().catch((requestError) => setCatalogError(requestError.message));
-  }, []);
+    loadVersions().catch((requestError) => setCatalogError(requestError.message)).finally(() => setLoading(false));
+  }, [permissions.canViewCatalog]);
 
   useEffect(() => {
     if (selectedCode) loadTree(selectedCode);
@@ -2456,7 +2511,7 @@ function CatalogLibraryPage({ permissions, active = true }) {
 
   useEffect(() => {
     loadSuggestions(suggestionStatus).catch((requestError) => setCatalogError(requestError.message));
-  }, [suggestionStatus]);
+  }, [suggestionStatus, permissions.canViewCatalog]);
 
   const createDraft = async (event) => {
     event.preventDefault();
@@ -2464,8 +2519,8 @@ function CatalogLibraryPage({ permissions, active = true }) {
     try {
       const result = await adminRequest('/api/admin/catalog/versions', { method: 'POST', body: JSON.stringify(versionForm) });
       setVersionForm({ code: '', name: '', description: '' });
+      setDraftId(result.version.id);
       await loadVersions(result.version.code);
-      await loadTree(result.version.code);
       setMessage('草稿版本已创建，可以上传 Excel 导入学院、专业和岗位数据。');
     } catch (requestError) { setCatalogError(requestError.message); }
     finally { setCreating(false); }
@@ -2473,14 +2528,14 @@ function CatalogLibraryPage({ permissions, active = true }) {
 
   const importExcel = async (event) => {
     event.preventDefault();
-    if (!selectedVersion || !file) return;
+    if (!targetDraft || !file) return;
     const formElement = event.currentTarget;
     setImporting(true); setMessage(''); setCatalogError('');
     const formData = new FormData();
     formData.append('file', file);
     try {
-      const result = await adminRequest(`/api/admin/catalog/versions/${encodeURIComponent(selectedVersion.id)}/imports?mode=${mode}`, { method: 'POST', body: formData });
-      await loadTree(selectedVersion.code);
+      const result = await adminRequest(`/api/admin/catalog/versions/${encodeURIComponent(targetDraft)}/imports?mode=${mode}`, { method: 'POST', body: formData });
+      await loadTree(selectedVersion?.code);
       setFile(null);
       formElement.reset();
       setMessage(`Excel 导入成功，共写入 ${result.import_job.imported_rows} 行。`);
@@ -2489,12 +2544,13 @@ function CatalogLibraryPage({ permissions, active = true }) {
   };
 
   const publishDraft = async () => {
-    if (!selectedVersion || !window.confirm(`确认发布“${selectedVersion.name}”吗？当前已发布版本会被归档。`)) return;
+    if (!targetDraft || !window.confirm(`确认发布“${selectedVersion?.name || targetDraft}”吗？当前已发布版本会被归档。`)) return;
     setPublishing(true); setMessage(''); setCatalogError('');
     try {
-      await adminRequest(`/api/admin/catalog/versions/${encodeURIComponent(selectedVersion.id)}/publish`, { method: 'POST' });
-      await loadVersions(selectedVersion.code);
-      await loadTree(selectedVersion.code);
+      await adminRequest(`/api/admin/catalog/versions/${encodeURIComponent(targetDraft)}/publish`, { method: 'POST' });
+      await loadVersions(selectedVersion?.code);
+      await loadTree(selectedVersion?.code);
+      setDraftId('');
       setMessage('目录版本已发布，候选人端现在可以读取该版本。');
     } catch (requestError) { setCatalogError(requestError.message); }
     finally { setPublishing(false); }
@@ -2601,13 +2657,13 @@ function CatalogLibraryPage({ permissions, active = true }) {
 
   return (
     <div className="catalog-page">
-      <SectionCard title="职业能力目录" icon={<BookOpen size={18} />} action={<button className="secondary-button" type="button" onClick={() => loadTree(selectedCode)}><RefreshCw size={15} />刷新</button>}>
+      {message && <p className="settings-message success catalog-message">{message}</p>}
+      {catalogError && <p className="settings-message error catalog-message">{catalogError}</p>}
+      {permissions.canViewCatalog && <><SectionCard title="职业能力目录" icon={<BookOpen size={18} />} action={<button className="secondary-button" type="button" onClick={() => loadTree(selectedCode)}><RefreshCw size={15} />刷新</button>}>
         <div className="catalog-toolbar">
           <label className="field-block"><span>查看目录版本</span><select value={selectedCode} onChange={(event) => setSelectedCode(event.target.value)}>{versions.map((version) => <option value={version.code} key={version.id}>{version.name} · {catalogStatusLabels[version.status]}</option>)}</select></label>
           {selectedVersion && <div className="catalog-version-meta"><StatusBadge>{catalogStatusLabels[selectedVersion.status] || selectedVersion.status}</StatusBadge><span>编码：{selectedVersion.code}</span><span>修订：V{selectedVersion.revision}</span></div>}
         </div>
-        {message && <p className="settings-message success catalog-message">{message}</p>}
-        {catalogError && <p className="settings-message error catalog-message">{catalogError}</p>}
         {loading ? <div className="page-message">正在读取目录</div> : <CatalogTree tree={tree} />}
         {permissions.canWriteCatalog && selectedVersion?.status === 'draft' && tree && (
           <CatalogDraftEditor
@@ -2632,7 +2688,7 @@ function CatalogLibraryPage({ permissions, active = true }) {
                 <small>{suggestion.nearest_job_name ? `最接近正式岗位：${suggestion.nearest_job_name}（名称相似度 ${suggestion.match_confidence}%）` : '暂未找到接近的正式岗位'}</small>
                 {suggestion.draft_version_code && <small className="suggestion-draft-link">已纳入草稿：{suggestion.draft_version_code} / {suggestion.draft_job_name}</small>}
               </div>
-              {permissions.canWriteCatalog && suggestion.review_status === 'pending' && (
+              {permissions.canReviewCatalog && suggestion.review_status === 'pending' && (
                 <div className="suggestion-actions">
                   <select value={mergeTargets[suggestion.id] || suggestion.nearest_job_role_id || ''} onChange={(event) => setMergeTargets((current) => ({ ...current, [suggestion.id]: event.target.value }))}>
                     <option value="">选择正式岗位</option>
@@ -2643,7 +2699,7 @@ function CatalogLibraryPage({ permissions, active = true }) {
                   <button type="button" className="reject" onClick={() => reviewSuggestion(suggestion, 'rejected')} disabled={suggestionBusy === suggestion.id}>驳回</button>
                 </div>
               )}
-              {approvalForms[suggestion.id] && (
+              {permissions.canReviewCatalog && approvalForms[suggestion.id] && (
                 <form className="suggestion-approval-form" onSubmit={(event) => approveSuggestionToDraft(event, suggestion)}>
                   <div className="suggestion-approval-heading"><strong>批准并写入：{selectedVersion?.name}</strong><button type="button" onClick={() => setApprovalForms((current) => ({ ...current, [suggestion.id]: undefined }))}>取消</button></div>
                   <label className="field-block"><span>岗位编码</span><input value={approvalForms[suggestion.id].code} onChange={(event) => updateApprovalForm(suggestion.id, 'code', event.target.value)} placeholder="例如：LLM-APP-ENGINEER" required /></label>
@@ -2659,11 +2715,13 @@ function CatalogLibraryPage({ permissions, active = true }) {
             </article>
           ))}
         </div>
-      </SectionCard>
+      </SectionCard></>}
+      {!permissions.canViewCatalog && (permissions.canImportCatalog || permissions.canPublishCatalog) &&
+        <label className="field-block"><span>目标草稿 ID</span><input value={draftId} onChange={(event) => setDraftId(event.target.value)} /></label>}
       <section className="catalog-actions-grid">
         {permissions.canWriteCatalog && <SectionCard title="新建草稿版本" icon={<Plus size={18} />}><form className="catalog-action-form" onSubmit={createDraft}><label className="field-block"><span>版本编码</span><input value={versionForm.code} onChange={(event) => setVersionForm((current) => ({ ...current, code: event.target.value }))} placeholder="school-catalog-v2" required /></label><label className="field-block"><span>版本名称</span><input value={versionForm.name} onChange={(event) => setVersionForm((current) => ({ ...current, name: event.target.value }))} placeholder="全校职业能力目录 V2" required /></label><label className="field-block"><span>说明</span><textarea value={versionForm.description} onChange={(event) => setVersionForm((current) => ({ ...current, description: event.target.value }))} /></label><button className="primary-button" disabled={creating}>{creating ? '创建中...' : '创建草稿'}</button></form></SectionCard>}
-        {permissions.canImportCatalog && <SectionCard title="导入学院、专业与岗位" icon={<Upload size={18} />}><form className="catalog-action-form" onSubmit={importExcel}><p>选择草稿版本，上传包含七个规定工作表的 `.xlsx` 文件，可一次批量添加岗位和能力矩阵。</p><label className="field-block"><span>Excel 文件</span><input type="file" accept=".xlsx" onChange={(event) => setFile(event.target.files?.[0] || null)} required /></label><label className="field-block"><span>导入模式</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="merge">合并更新</option><option value="replace">替换草稿数据</option></select></label><button className="primary-button" disabled={importing || selectedVersion?.status !== 'draft' || !file}>{importing ? '导入中...' : '上传并导入'}</button>{selectedVersion?.status !== 'draft' && <small>已发布版本不可修改，请先新建草稿版本。</small>}</form></SectionCard>}
-        {permissions.canPublishCatalog && <SectionCard title="审核与发布" icon={<Rocket size={18} />}><div className="catalog-action-form"><p>发布前会校验完整层级与岗位能力矩阵；发布后原版本自动归档。</p><button className="primary-button" type="button" onClick={publishDraft} disabled={publishing || selectedVersion?.status !== 'draft'}>{publishing ? '发布中...' : '发布当前草稿'}</button></div></SectionCard>}
+        {permissions.canImportCatalog && <SectionCard title="导入学院、专业与岗位" icon={<Upload size={18} />}><form className="catalog-action-form" onSubmit={importExcel}><p>选择草稿版本，上传包含七个规定工作表的 `.xlsx` 文件，可一次批量添加岗位和能力矩阵。</p><label className="field-block"><span>Excel 文件</span><input type="file" accept=".xlsx" onChange={(event) => setFile(event.target.files?.[0] || null)} required /></label><label className="field-block"><span>导入模式</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="merge">合并更新</option><option value="replace">替换草稿数据</option></select></label><button className="primary-button" disabled={importing || !targetDraft || !file}>{importing ? '导入中...' : '上传并导入'}</button>{permissions.canViewCatalog && selectedVersion?.status !== 'draft' && <small>已发布版本不可修改，请先新建草稿版本。</small>}</form></SectionCard>}
+        {permissions.canPublishCatalog && <SectionCard title="审核与发布" icon={<Rocket size={18} />}><div className="catalog-action-form"><p>发布前会校验完整层级与岗位能力矩阵；发布后原版本自动归档。</p><button className="primary-button" type="button" onClick={publishDraft} disabled={publishing || !targetDraft}>{publishing ? '发布中...' : '发布当前草稿'}</button></div></SectionCard>}
       </section>
     </div>
   );
@@ -2693,7 +2751,7 @@ const jobPostingFormTemplate = {
 const matchStatusLabels = { satisfied: '已满足', partial: '部分满足', missing: '未体现' };
 const jdSubmissionStatusLabels = { pending: '待审核', approved: '已入库', rejected: '已驳回' };
 
-function JobPostingsPage({ tab = 'postings' }) {
+function JobPostingsPage({ tab, permissions }) {
   const [postings, setPostings] = useState([]);
   const [jobRoles, setJobRoles] = useState([]);
   const [postingNote, setPostingNote] = useState('');
@@ -2720,6 +2778,7 @@ function JobPostingsPage({ tab = 'postings' }) {
   const [syncErrors, setSyncErrors] = useState([]);
 
   const loadPostings = async () => {
+    if (!permissions.readPostings) return;
     const query = new URLSearchParams();
     if (keyword.trim()) query.set('keyword', keyword.trim());
     if (statusFilter) query.set('status', statusFilter);
@@ -2740,6 +2799,7 @@ function JobPostingsPage({ tab = 'postings' }) {
   };
 
   const loadSubmissions = async () => {
+    if (!permissions.readJds) return;
     const query = new URLSearchParams();
     if (submissionKeyword.trim()) query.set('keyword', submissionKeyword.trim());
     if (submissionStatusFilter) query.set('status', submissionStatusFilter);
@@ -2762,7 +2822,9 @@ function JobPostingsPage({ tab = 'postings' }) {
     (async () => {
       setLoading(true);
       try {
-        await Promise.all([loadPostings(), loadMatches(), loadSubmissions()]);
+        if (tab === 'postings') await loadPostings();
+        else if (tab === 'matches') await loadMatches();
+        else await loadSubmissions();
         if (!cancelled) setPageError('');
       } catch (requestError) {
         if (!cancelled) setPageError(requestError.message);
@@ -2771,7 +2833,7 @@ function JobPostingsPage({ tab = 'postings' }) {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [tab, permissions.readPostings, permissions.readJds]);
 
   const refreshPostings = async () => {
     setBusy('refresh'); setPageError('');
@@ -2833,7 +2895,7 @@ function JobPostingsPage({ tab = 'postings' }) {
     setBusy(`approve-submission-${submission.id}`); setMessage(''); setPageError('');
     try {
       const result = await adminRequest(`/api/admin/jd-submissions/${encodeURIComponent(submission.id)}/approve`, { method: 'POST' });
-      await Promise.all([loadSubmissions(), loadPostings()]);
+      await loadSubmissions();
       setMessage(result.action === 'updated' ? '已同步更新招聘信息库中的对应岗位。' : '审核通过，已写入招聘信息库岗位列表。');
     } catch (requestError) { setPageError(requestError.message); }
     finally { setBusy(''); }
@@ -2943,14 +3005,14 @@ function JobPostingsPage({ tab = 'postings' }) {
             icon={<Building2 size={18} />}
             action={(
               <div className="job-toolbar-actions">
-                <button className="secondary-button" type="button" onClick={refreshPostings} disabled={busy === 'refresh'}><RefreshCw size={15} className={busy === 'refresh' ? 'spin' : ''} />刷新</button>
-                <button className="secondary-button" type="button" onClick={() => downloadFile('/api/admin/job-postings/template', 'job-posting-import-template.xlsx')}><Download size={15} />模板</button>
-                <button className="secondary-button" type="button" onClick={() => downloadFile('/api/admin/job-postings/export', 'job-postings.xlsx')}><Download size={15} />导出</button>
-                <button className="primary-button" type="button" onClick={openCreate}><Plus size={15} />新增岗位</button>
+                {permissions.readPostings && <button className="secondary-button" type="button" onClick={refreshPostings} disabled={busy === 'refresh'}><RefreshCw size={15} className={busy === 'refresh' ? 'spin' : ''} />刷新</button>}
+                {permissions.readPostings && <button className="secondary-button" type="button" onClick={() => downloadFile('/api/admin/job-postings/template', 'job-posting-import-template.xlsx')}><Download size={15} />模板</button>}
+                {permissions.readPostings && <button className="secondary-button" type="button" onClick={() => downloadFile('/api/admin/job-postings/export', 'job-postings.xlsx')}><Download size={15} />导出</button>}
+                {permissions.writePostings && <button className="primary-button" type="button" onClick={openCreate}><Plus size={15} />新增岗位</button>}
               </div>
             )}
           >
-          <div className="job-toolbar">
+          {permissions.readPostings && <><div className="job-toolbar">
             <label className="job-search">
               <Search size={15} />
               <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索岗位名称、公司、类别或城市" />
@@ -2995,30 +3057,30 @@ function JobPostingsPage({ tab = 'postings' }) {
                     <td>{posting.catalog_job_name || '-'}</td>
                     <td><StatusBadge>{posting.status === 'active' ? '启用' : '停用'}</StatusBadge></td>
                     <td className="row-actions">
-                      <button type="button" onClick={(event) => { event.stopPropagation(); openEdit(posting); }} aria-label="编辑" title="编辑"><Pencil size={15} /></button>
-                      <button type="button" className="danger" onClick={(event) => { event.stopPropagation(); removePosting(posting); }} disabled={busy === `delete-${posting.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>
+                      {permissions.writePostings && <button type="button" onClick={(event) => { event.stopPropagation(); openEdit(posting); }} aria-label="编辑" title="编辑"><Pencil size={15} /></button>}
+                      {permissions.deletePostings && <button type="button" className="danger" onClick={(event) => { event.stopPropagation(); removePosting(posting); }} disabled={busy === `delete-${posting.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </div></>}
           </SectionCard>
 
-          <SectionCard title="Excel 导入与数据源同步" icon={<Upload size={18} />}>
+          {(permissions.importPostings || permissions.syncPostings) && <SectionCard title="Excel 导入与数据源同步" icon={<Upload size={18} />}>
             <div className="job-import-grid">
-              <form className="job-action-form" onSubmit={importExcel}>
+              {permissions.importPostings && <form className="job-action-form" onSubmit={importExcel}>
                 <p>上传 `.xlsx` 招聘岗位表，按「外部编号」或「岗位名称 + 公司」自动去重并更新已有记录。</p>
                 <label className="field-block"><span>Excel 文件</span><input type="file" accept=".xlsx" onChange={(event) => setFile(event.target.files?.[0] || null)} required /></label>
                 <button className="primary-button" type="submit" disabled={busy === 'import' || !file}>{busy === 'import' ? '导入中…' : '上传并导入'}</button>
-              </form>
-              <div className="job-action-form">
-                <p>{syncConfigured ? '数据源已配置。同步会按外部编号新增或更新岗位，不会删除已有岗位。' : '尚未配置招聘数据源，请联系系统维护人员接入。当前可使用手动录入或 Excel 导入。'}</p>
-                <button className="secondary-button" type="button" onClick={syncPostings} disabled={Boolean(busy) || !syncConfigured}><RefreshCw size={15} className={busy === 'sync' ? 'spin' : ''} />{busy === 'sync' ? '正在同步…' : '从数据源同步'}</button>
+              </form>}
+              {permissions.syncPostings && <div className="job-action-form">
+                <p>{!permissions.readPostings ? '同步使用本校已配置的数据源。' : syncConfigured ? '数据源已配置。同步会按外部编号新增或更新岗位，不会删除已有岗位。' : '尚未配置招聘数据源，请联系系统维护人员接入。当前可使用手动录入或 Excel 导入。'}</p>
+                <button className="secondary-button" type="button" onClick={syncPostings} disabled={Boolean(busy) || (permissions.readPostings && !syncConfigured)}><RefreshCw size={15} className={busy === 'sync' ? 'spin' : ''} />{busy === 'sync' ? '正在同步…' : '从数据源同步'}</button>
                 {syncErrors.length > 0 && <div className="page-message warning" role="status"><div>部分记录未能同步（最多显示 20 条）：<ul>{syncErrors.map((item, index) => <li key={index}>{item}</li>)}</ul></div></div>}
-              </div>
+              </div>}
             </div>
-          </SectionCard>
+          </SectionCard>}
         </div>
       ) : tab === 'matches' ? (
         <SectionCard
@@ -3073,12 +3135,12 @@ function JobPostingsPage({ tab = 'postings' }) {
           icon={<ClipboardList size={18} />}
           action={(
             <div className="job-toolbar-actions">
-              <button className="secondary-button" type="button" onClick={refreshSubmissions} disabled={busy === 'refresh-submissions'}><RefreshCw size={15} className={busy === 'refresh-submissions' ? 'spin' : ''} />刷新</button>
-              <button className="primary-button" type="button" onClick={openCreateSubmission}><Plus size={15} />新增记录</button>
+              {permissions.readJds && <button className="secondary-button" type="button" onClick={refreshSubmissions} disabled={busy === 'refresh-submissions'}><RefreshCw size={15} className={busy === 'refresh-submissions' ? 'spin' : ''} />刷新</button>}
+              {permissions.createJds && <button className="primary-button" type="button" onClick={openCreateSubmission}><Plus size={15} />新增记录</button>}
             </div>
           )}
         >
-          <div className="job-toolbar">
+          {permissions.readJds && <><div className="job-toolbar">
             <label className="job-search">
               <Search size={15} />
               <input value={submissionKeyword} onChange={(event) => setSubmissionKeyword(event.target.value)} placeholder="搜索学生姓名、学号、岗位或 JD 内容" />
@@ -3125,19 +3187,19 @@ function JobPostingsPage({ tab = 'postings' }) {
                     <td><StatusBadge>{jdSubmissionStatusLabels[submission.status] || '待审核'}</StatusBadge></td>
                     <td>{String(submission.created_at || '').slice(0, 16)}</td>
                     <td className="row-actions">
-                      <button type="button" onClick={() => approveSubmission(submission)} disabled={busy === `approve-submission-${submission.id}` || submission.status === 'approved'} aria-label="审核入库" title={submission.status === 'approved' ? '已入库' : '审核入库'}><CheckCircle2 size={15} /></button>
-                      <button type="button" onClick={() => openEditSubmission(submission)} aria-label="编辑" title="编辑"><Pencil size={15} /></button>
-                      <button type="button" className="danger" onClick={() => removeSubmission(submission)} disabled={busy === `delete-submission-${submission.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>
+                      {permissions.approveJds && <button type="button" onClick={() => approveSubmission(submission)} disabled={busy === `approve-submission-${submission.id}` || submission.status === 'approved'} aria-label="审核入库" title={submission.status === 'approved' ? '已入库' : '审核入库'}><CheckCircle2 size={15} /></button>}
+                      {permissions.writeJds && submission.status !== 'approved' && <button type="button" onClick={() => openEditSubmission(submission)} aria-label="编辑" title="编辑"><Pencil size={15} /></button>}
+                      {permissions.deleteJds && <button type="button" className="danger" onClick={() => removeSubmission(submission)} disabled={busy === `delete-submission-${submission.id}`} aria-label="删除" title="删除"><Trash2 size={15} /></button>}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </div></>}
         </SectionCard>
       )}
 
-      {submissionForm && (
+      {submissionForm && (submissionForm.id ? permissions.writeJds : permissions.createJds) && (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="粘贴 JD 记录编辑" onClick={() => setSubmissionForm(null)}>
           <div className="modal-card job-form-modal" onClick={(event) => event.stopPropagation()}>
             <header>
@@ -3159,7 +3221,7 @@ function JobPostingsPage({ tab = 'postings' }) {
         </div>
       )}
 
-      {formState && (
+      {formState && permissions.writePostings && (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="招聘岗位编辑" onClick={() => setFormState(null)}>
           <div className="modal-card job-form-modal" onClick={(event) => event.stopPropagation()}>
             <header>
@@ -3196,7 +3258,7 @@ function JobPostingsPage({ tab = 'postings' }) {
         </div>
       )}
 
-      {activePosting && (
+      {activePosting && permissions.readPostings && (
         <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setActivePosting(null); }}>
           <section className="detail-drawer" role="dialog" aria-modal="true" aria-label="岗位详情">
             <header>
@@ -3243,12 +3305,12 @@ function JobPostingsPage({ tab = 'postings' }) {
                 <section className="detail-block"><h3>任职要求</h3><p>{activePosting.requirements}</p></section>
               )}
             </div>
-            <footer className="detail-actions">
+            {permissions.writePostings && <footer className="detail-actions">
               <span>岗位完整信息如上，可点击右侧按钮进入编辑</span>
               <div>
                 <button type="button" onClick={() => { const target = activePosting; setActivePosting(null); openEdit(target); }}>编辑该岗位</button>
               </div>
-            </footer>
+            </footer>}
           </section>
         </div>
       )}
@@ -3344,12 +3406,26 @@ function JobPostingsPage({ tab = 'postings' }) {
 }
 
 const PERMISSION_OPTIONS = [
+  { key: 'usage.read', label: '查看用量', desc: '查看本校月度配额、已用及预留次数' },
+  { key: 'usage.configure', label: '调整配额', desc: '调整本校模型和媒体的月度额度' },
   { key: 'manageCatalog', label: '岗位知识库', desc: '维护目标岗位、专业方向与能力模型，含发布与导入' },
   { key: 'manageStudents', label: '学生管理', desc: '查看与维护学生信息、归班与重点关注，需选择数据范围' },
   { key: 'manageOrganization', label: '组织管理', desc: '维护学院、专业、班级组织结构' },
   { key: 'manageModelConfig', label: '模型配置入口', desc: '查看模型用途说明；全局参数与密钥仅超级管理员可管理' },
   { key: 'viewInterviews', label: '查看训练记录', desc: '查看所选数据范围内的学生训练进度与详情' },
-  { key: 'viewReports', label: '报告质检', desc: '查看所选数据范围内的成长报告并执行质量复核' },
+  { key: 'viewReports', label: '查看报告', desc: '查看所选数据范围内的成长报告' },
+  { key: 'report.review', label: '复核报告', desc: '对获准查看的报告提交审核意见' },
+  { key: 'report.export', label: '导出报告', desc: '导出授权范围内的报告' },
+  { key: 'score.adjust', label: '调整评分', desc: '负责教师可对自己的训练改分并说明原因' },
+  { key: 'training.read', label: '查看教学任务', desc: '查看已授权班级的训练任务和名单' },
+  { key: 'training.assign', label: '发布训练', desc: '教师向负责的班级布置训练' },
+  { key: 'analytics.teaching.read', label: '教学分析', desc: '按班级查看薄弱项和训练依据' },
+  { key: 'analytics.practice.assign', label: '发布复练', desc: '向授权学生布置针对性复练' },
+  { key: 'credential.read', label: '查看证书申请', desc: '查看获授权学生的申请' },
+  { key: 'credential.approve', label: '审核证书', desc: '教师审批与报告版本绑定的申请' },
+  { key: 'credential.issue', label: '签发证书', desc: '为已审核的申请签发凭证' },
+  { key: 'credential.revoke', label: '撤销证书', desc: '撤销授权范围内的证书并记录原因' },
+  { key: 'credential.reissue', label: '补发证书', desc: '根据原审核及当前依据重新签发' },
 ];
 
 const permissionLabel = (key) => (PERMISSION_OPTIONS.find((option) => option.key === key) || {}).label || key;
@@ -3523,12 +3599,26 @@ function PermissionChecklist({ options, value, onChange }) {
 
 const PERMISSION_STATUS_LABELS = { pending: '待审核', approved: '已通过', rejected: '已驳回' };
 
+function StaffCredentials({ data }) {
+  const [input, setInput] = useState('');
+  const [studentId, setStudentId] = useState('');
+  return <section><form className="field-grid" onSubmit={event => { event.preventDefault(); setStudentId(input.trim()); }}>
+    <label className="field-block"><span>选择学生或输入其档案 ID</span>
+      <input list="credential-students" value={input} required onChange={event => setInput(event.target.value)} />
+      <datalist id="credential-students">{data.candidates.filter(c => !c.pending).map(c =>
+        <option key={c.id} value={c.id}>{c.name} · {c.studentNo}</option>)}</datalist>
+    </label><button className="primary-button" disabled={!input.trim()}>查看申请</button></form>
+    {studentId && <TeachingCredentialsPanel key={data.admin.id + ':' + studentId} request={adminRequest}
+      studentId={studentId} actions={data.admin.permissions || []} />}
+  </section>;
+}
+
 function PermissionPage({ data, tab = 'requests' }) {
   const isSuper = data.admin?.role === 'super_admin';
   const [adminUsers, setAdminUsers] = useState(data.adminUsers || []);
   const [requests, setRequests] = useState([]);
   const [org, setOrg] = useState({ colleges: [], programs: [], classes: [] });
-  const [adminForm, setAdminForm] = useState({ email: '', name: '', password: '', role: '' });
+  const [adminForm, setAdminForm] = useState({ email: '', name: '', password: '', role: '', actorType: 'admin' });
   const [adminPermissions, setAdminPermissions] = useState([]);
   const [adminScope, setAdminScope] = useState([]);
   const [adminMessage, setAdminMessage] = useState('');
@@ -3584,7 +3674,7 @@ function PermissionPage({ data, tab = 'requests' }) {
         }),
       });
       setAdminUsers((current) => [...current, result.admin]);
-      setAdminForm({ email: '', name: '', password: '', role: '' });
+      setAdminForm({ email: '', name: '', password: '', role: '', actorType: 'admin' });
       setAdminPermissions([]);
       setAdminScope([]);
       setAdminMessage('管理员账号已创建。');
@@ -3632,7 +3722,7 @@ function PermissionPage({ data, tab = 'requests' }) {
     try {
       const result = await adminRequest(`/api/admin/users/${encodeURIComponent(editingAdmin.id)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ permissions: editPermissions, studentScope: editScope }),
+        body: JSON.stringify({ permissions: editPermissions, studentScope: editScope, actorType: editingAdmin.actor_type || 'admin' }),
       });
       setAdminUsers((current) => current.map((adminItem) => (adminItem.id === result.admin.id ? result.admin : adminItem)));
       setEditingAdmin(null);
@@ -3706,6 +3796,12 @@ function PermissionPage({ data, tab = 'requests' }) {
         <SectionCard title="管理员管理" icon={<UserCog size={18} />}>
           <form className="admin-account-form" onSubmit={createAdmin}>
             <h3>创建管理员</h3>
+            <label className="field-block">
+              <span>业务身份</span>
+              <select value={adminForm.actorType} onChange={(event) => setAdminForm((current) => ({ ...current, actorType: event.target.value }))}>
+                <option value="admin">管理人员</option><option value="teacher">任课教师</option>
+              </select>
+            </label>
             <div className="field-grid">
               <label className="field-block">
                 <span>姓名</span>
@@ -3909,6 +4005,11 @@ function PermissionPage({ data, tab = 'requests' }) {
             </header>
             <p>取消勾选权限点即可回收对应权限，调整学生数据范围；保存后立即生效。</p>
             <form className="admin-account-form" onSubmit={saveEdit}>
+              <label className="field-block"><span>业务身份</span>
+                <select value={editingAdmin.actor_type || 'admin'} onChange={(event) => setEditingAdmin((item) => ({ ...item, actor_type: event.target.value }))}>
+                  <option value="admin">管理人员</option><option value="teacher">任课教师</option>
+                </select>
+              </label>
               <div className="field-block">
                 <span>授予权限</span>
                 <PermissionChecklist options={PERMISSION_OPTIONS} value={editPermissions} onChange={setEditPermissions} />
@@ -3935,6 +4036,9 @@ function PermissionPage({ data, tab = 'requests' }) {
 }
 
 const pageDescriptions = {
+  nativeSchool: '管理本校组织、账号、权限和审计记录',
+  schoolProgramJobs: '配置本校专业的推荐岗位与推荐程度',
+  schoolResumeSettings: '维护学生填写简历时可用的补充学院和专业',
   dashboard: '集中处理学生待办，跟进训练与报告',
   guide: '按步骤了解管理端从初始化到日常运营的完整流程',
   interviews: '展开训练记录查看摘要，进入复核质检核对完整问答',
@@ -4545,12 +4649,12 @@ function AdminApp({ admin, onSignedOut }) {
   const [expandedNavigation, setExpandedNavigation] = useState(() => {
     let saved = {};
     try { saved = JSON.parse(window.localStorage.getItem('admin-navigation-groups') || '{}') || {}; }
-    catch { /* Use expanded defaults if storage is unavailable or invalid. */ }
+    catch { /* 无法读取或解析保存的设置时，默认展开导航分组。 */ }
     return Object.fromEntries(navItems.filter((item) => item.container).map((item) => [item.key, typeof saved[item.key] === 'boolean' ? saved[item.key] : true]));
   });
   useEffect(() => {
     try { window.localStorage.setItem('admin-navigation-groups', JSON.stringify(expandedNavigation)); }
-    catch { /* Navigation remains usable when browser storage is unavailable. */ }
+    catch { /* 无法保存分组状态时，本次导航仍可使用。 */ }
   }, [expandedNavigation]);
   const [orgRevision, setOrgRevision] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -4567,12 +4671,13 @@ function AdminApp({ admin, onSignedOut }) {
   const [detailError, setDetailError] = useState('');
   const [notice, setNotice] = useState('');
   const [requestedInterviewId, setRequestedInterviewId] = useState('');
+  const permissions = useMemo(() => ({ ...adminData.permissions, ...careerPermissions(adminData) }), [adminData]);
   const visibleNavItems = useMemo(
     () => {
-      const allowed = navItems.filter((item) => (!item.permission || adminData.permissions?.[item.permission]) && (!item.superOnly || adminData.admin?.role === 'super_admin'));
+      const allowed = navItems.filter((item) => (!item.legacyOnly || adminData.identityMode !== 'native') && (!item.permission || permissions[item.permission]) && (!item.superOnly || adminData.admin?.role === 'super_admin'));
       return allowed.filter((item) => !item.container || allowed.some((child) => child.parent === item.key && !child.hidden));
     },
-    [adminData.permissions, adminData.admin?.role],
+    [permissions, adminData.admin?.role, adminData.identityMode],
   );
   const navGroups = useMemo(() => visibleNavItems.filter((item) => !item.parent || !visibleNavItems.some((parent) => parent.key === item.parent)).reduce((groups, item) => {
     const previous = groups[groups.length - 1];
@@ -4610,7 +4715,7 @@ function AdminApp({ admin, onSignedOut }) {
   const toggleNavigation = (open) => {
     setNavigationOpen(open);
     try { window.localStorage.setItem('admin-navigation-collapsed', String(!open)); }
-    catch { /* Keep the control usable when browser storage is unavailable. */ }
+    catch { /* 无法保存导航栏状态时，仍允许展开和收起。 */ }
     window.requestAnimationFrame(() => {
       (open ? navigationCloseButtonRef : navigationOpenButtonRef).current?.focus({ preventScroll: true });
     });
@@ -4652,12 +4757,14 @@ function AdminApp({ admin, onSignedOut }) {
     const checkConnection = async () => {
       if (document.hidden || pending || loading || refreshing) return;
       pending = true;
-      const updateData = ['dashboard', 'interviews', 'reports'].includes(activeView) && !detail && !interviewReviewId();
+      // 教务配置须复核真实登录及数据范围，公开健康接口不能证明管理员仍获授权。
+      const protectedConfig = activeView === 'schoolProgramJobs' || activeView === 'schoolResumeSettings';
+      const updateData = protectedConfig || (['dashboard', 'interviews', 'reports', 'nativeSchool'].includes(activeView) && !detail && !interviewReviewId());
       try {
         const data = await adminRequest(updateData ? '/api/admin/snapshot' : '/api/admin/health', { signal: controller.signal });
         if (!active) return;
         setConnectionStatus('connected');
-        if (updateData && !interviewReviewId()) {
+        if (protectedConfig || (updateData && !interviewReviewId())) {
           setAdminData({ ...emptyAdminData, ...data });
           setLastUpdated(new Date());
           setAutoRefreshError('');
@@ -4667,7 +4774,8 @@ function AdminApp({ admin, onSignedOut }) {
         if (!active) return;
         if (failure.status === 401) { onSignedOut(false); return; }
         setConnectionStatus('disconnected');
-        if (updateData) setAutoRefreshError('数据自动更新失败，当前保留上次结果，将自动重试。');
+        if (protectedConfig) setError('暂时无法核验教务权限，已关闭当前配置。');
+        else if (updateData) setAutoRefreshError('数据自动更新失败，当前保留上次结果，将自动重试。');
       } finally { pending = false; }
     };
     const timer = window.setInterval(checkConnection, 30000);
@@ -4751,6 +4859,12 @@ function AdminApp({ admin, onSignedOut }) {
       setDetailError('');
       return;
     }
+    if (type === 'report' && versionedTeacherView(adminData)) {
+      setDetail(formatDetail(type, {}, row));
+      setDetailLoading(false);
+      setDetailError('');
+      return;
+    }
     setDetail(formatDetail(type, {}, row));
     setDetailLoading(true);
     setDetailError('');
@@ -4791,9 +4905,16 @@ function AdminApp({ admin, onSignedOut }) {
     if (nextRow) openDetail(detailContext.type, nextRow, detailContext.rows);
   };
 
+  const updateVersionedReport = (report) => {
+    setAdminData(current => ({ ...current, reports: current.reports.map(item => item.id === report.id
+      ? { ...item, score: report.total_score, grade: report.grade,
+          reviewStatus: ({ approved: '已复核', rejected: '复核未通过', pending: '待复核' })[report.review_status] }
+      : item) }));
+  };
+
   const reviewReport = async (status) => {
     const reportId = detail?.type === 'interview' ? detail.reviewReport?.id : detail?.id;
-    if (!reportId) return;
+    if (!reportId || adminData.assessmentVersioned || !adminData.permissions?.canReviewReports) return;
     setDetailLoading(true);
     setDetailError('');
     try {
@@ -4858,12 +4979,40 @@ function AdminApp({ admin, onSignedOut }) {
   const renderContent = () => {
     if (loading) return <div className="page-message loading-state"><RefreshCw size={18} className="spin" />正在读取管理数据</div>;
     if (error) return <div className="page-message error"><AlertCircle size={18} />{error}<button type="button" onClick={refreshSnapshot}>重新加载</button></div>;
-    // Redirect effects run after children mount. Block forbidden pages here so
-    // a retained URL cannot start their requests while permissions are loading.
-    if (!visibleNavItems.some((item) => item.key === activeView)) return <DashboardPage data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
+    const grants = adminData.admin?.permissions || [];
+    const dashboard = adminData.identityMode === 'native'
+      ? <NativeTeachingDashboard key={JSON.stringify([adminData.admin.school_id, adminData.admin.id])}
+          request={adminRequest} permissions={adminData.permissions} grants={grants} onNavigate={navigateTo}
+          canReadTraining={grants.includes('training.read')} canReadAnalytics={grants.includes('analytics.teaching.read')}
+          revision={lastUpdated?.getTime()} onOpenTasks={() => navigateTo('trainingTasks')} />
+      : <p className="page-message error" role="alert">未取得原生学校会话，无法加载工作台。请重新登录或检查管理网关。</p>;
+    // 重定向会在子组件挂载后才执行，因此在渲染前检查页面权限，
+    // 避免通过旧链接打开页面时，在权限加载完成前发起未授权请求。
+    if (!visibleNavItems.some((item) => item.key === activeView)) return dashboard;
+    if ((activeView === 'schoolInterviews' || activeView === 'schoolReports') && adminData.identityMode === 'native') {
+      return <SchoolRecordBrowser key={JSON.stringify([adminData.admin.school_id, adminData.admin.id, activeView])}
+        owner={activeView === 'schoolInterviews' ? 'interview' : 'assessment'} request={adminRequest}
+        initialFilter={viewPreset.view === activeView && typeof viewPreset.value === 'string' ? viewPreset.value : ''}
+        revision={lastUpdated?.getTime()} />;
+    }
+    if (activeView === 'schoolProgramJobs' && adminData.identityMode === 'native') {
+      return <ProgramJobsPage key={JSON.stringify([adminData.admin.school_id, adminData.admin.id, permissions.canManageProgramJobs])}
+        request={adminRequest} active schoolId={adminData.admin.school_id} allowEdit={permissions.canManageProgramJobs} scopeRevision={lastUpdated} />;
+    }
+    if (activeView === 'schoolResumeSettings' && adminData.identityMode === 'native') {
+      return <ResumeFormSettings key={JSON.stringify([adminData.admin.school_id, adminData.admin.id, permissions.canManageResumeFormSettings])}
+        request={adminRequest} schoolId={adminData.admin.school_id} canEdit={permissions.canManageResumeFormSettings} />;
+    }
+    if (activeView === 'nativeSchool' && adminData.identityMode === 'native') {
+      return <NativeSchoolManagement key={JSON.stringify([adminData.admin.school_id, adminData.admin.id])}
+        admin={adminData.admin} permissions={adminData.permissions} request={adminRequest}
+        initialTab={viewPreset.view === 'nativeSchool' ? viewPreset.value : null}
+        onExpired={() => onSignedOut(false)} />;
+    }
     if (activeView === 'guide') return <GuidePage onNavigate={navigateGuideStep} admin={admin} visibleViews={new Set(visibleNavItems.map((item) => item.key))} />;
-    if (activeView === 'catalog') return <CatalogModule request={adminRequest} permissions={adminData.permissions || {}} renderLibrary={(permissions, active) => <CatalogLibraryPage permissions={permissions} active={active} />} />;
-    if (recruitmentViews[activeView]) return <JobPostingsPage tab={recruitmentViews[activeView]} />;
+    if (activeView === 'catalog' && !permissions.canViewProgramJobs) return <CatalogLibraryPage permissions={permissions} />;
+    if (activeView === 'catalog') return <CatalogModule request={adminRequest} permissions={permissions} renderLibrary={(permissions, active) => <CatalogLibraryPage permissions={permissions} active={active} />} />;
+    if (recruitmentViews[activeView]) return <JobPostingsPage key={activeView} tab={recruitmentViews[activeView]} permissions={permissions} />;
     if (activeView === 'studentAccounts' || activeView === 'studentCreate') return <RegistrationsPage key={activeView} onNavigate={navigateTo} createMode={activeView === 'studentCreate'} onRegistered={setNotice} presetFilter={viewPreset.view === activeView ? viewPreset.value : ''} />;
     if (activeView === 'organization') return <AcademicPage onView={openDetail} admin={admin} presetFilter={viewPreset.view === 'organization' ? viewPreset.value : ''} revision={orgRevision} canManageOrganization={adminData.permissions?.canManageOrganization} onEditOrganization={() => navigateTo('organizationConfig')} />;
     if (activeView === 'organizationConfig') return <OrganizationManagementPage onChanged={() => setOrgRevision((current) => current + 1)} />;
@@ -4876,13 +5025,20 @@ function AdminApp({ admin, onSignedOut }) {
     };
     if (activeView === 'candidates') return <CandidatesPage {...listProps} onAccountsChanged={refreshSnapshot} />;
     if (activeView === 'interviews' || activeView === 'reports') return <>
-      {activeView === 'interviews' ? <InterviewsPage {...listProps} requestedId={requestedInterviewId} onReviewed={(id, status) => setAdminData((current) => ({ ...current, reports: current.reports.map((report) => report.id === id ? { ...report, reviewStatus: status === 'approved' ? '已复核' : '复核未通过' } : report) }))} /> : <ReportsPage {...listProps} />}
+      {activeView === 'interviews' ? <InterviewsPage {...listProps} onVersionSaved={updateVersionedReport} requestedId={requestedInterviewId} onReviewed={(id, status) => setAdminData((current) => ({ ...current, reports: current.reports.map((report) => report.id === id ? { ...report, reviewStatus: status === 'approved' ? '已复核' : '复核未通过' } : report) }))} /> : <ReportsPage {...listProps} />}
     </>;
-    if (modelViews[activeView]) return <ModelSettingsPage active={modelViews[activeView]} settings={adminData.settings} canEdit={adminData.permissions?.canManageSettings} request={adminRequest} onSettingsSaved={handleSettingsSaved} />;
+    if (activeView === 'trainingTasks') return <TrainingTasksPage request={adminRequest} permissions={adminData.permissions}
+      canAssign={Boolean(adminData.permissions?.canAssignTraining)} canAssignPractice={Boolean(adminData.permissions?.canAssignPractice)} />;
+    if (activeView === 'credentials') return <StaffCredentials data={adminData} />;
+    if (activeView === 'usage') return <SchoolUsagePage request={adminRequest} canManage={adminData.permissions?.canManageUsage} />;
+    if (activeView === 'schoolInterviewPolicy') return <InterviewerPolicyEditor request={adminRequest} />;
+    if (modelViews[activeView]) return <ModelSettingsPage active={modelViews[activeView]} settings={adminData.settings} canRead={adminData.identityMode === 'native' && adminData.permissions?.canViewAgents} canEdit={adminData.permissions?.canManageSettings} request={adminRequest} onSettingsSaved={handleSettingsSaved} />;
     if (permissionViews[activeView]) return <PermissionPage data={adminData} tab={permissionViews[activeView]} />;
-    if (activeView === 'connectionLogs') return <ConnectionLogsPage />;
-    if (activeView === 'securityLogs') return <SectionCard title="安全审计记录" icon={<ShieldCheck size={18} />}><SecurityLogsPage request={adminRequest} /></SectionCard>;
-    return <DashboardPage data={adminData} admin={admin} onNavigate={navigateTo} onView={openDetail} />;
+    if (activeView === 'agentTemplates') return <NativeAgentTemplates key={JSON.stringify([adminData.admin.school_id,adminData.admin.id])}
+      request={adminRequest} canReadInterviews={adminData.permissions?.canReadSchoolInterviews} />;
+    if (activeView === 'connectionLogs') return adminData.identityMode === 'native' ? <NativeConnectionLogs key={JSON.stringify([adminData.admin.school_id, adminData.admin.id])} request={adminRequest} /> : <ConnectionLogsPage />;
+    if (activeView === 'securityLogs') return <SectionCard title="安全审计记录" icon={<ShieldCheck size={18} />}><SecurityLogsPage key={JSON.stringify([adminData.admin.school_id, adminData.admin.id])} request={adminRequest} native={adminData.identityMode === 'native'} platform={Boolean(adminData.permissions?.canQueryPlatformAudit)} /></SectionCard>;
+    return dashboard;
   };
 
   return (
@@ -4974,15 +5130,19 @@ function AdminApp({ admin, onSignedOut }) {
 
         {['dashboard', 'interviews', 'reports'].includes(activeView) && <p className="data-scope-note" role="status">页面可见时每 30 秒更新列表；查看报告详情或复核时暂停。{lastUpdated && ` 上次更新：${lastUpdated.toLocaleTimeString('zh-CN', { hour12: false })}`}</p>}
         {autoRefreshError && <p className="page-message warning" role="status">{autoRefreshError}</p>}
-        {renderContent()}
+        <React.Suspense fallback={<p className="page-message" role="status">正在打开页面…</p>}>
+          {renderContent()}
+        </React.Suspense>
       </section>
       {notice && <div className="admin-toast" role="status"><CheckCircle2 size={17} />{notice}</div>}
       <DetailDrawer
         detail={detail}
         loading={detailLoading}
         error={detailError}
+        data={adminData}
+        onVersionSaved={updateVersionedReport}
         onReview={reviewReport}
-        canReview={adminData.permissions?.canViewReports}
+        canReview={adminData.permissions?.canReviewReports}
         onRevealTemporaryPassword={revealTemporaryPassword}
         onResetStudentPassword={resetStudentPassword}
         onClose={closeDetail}

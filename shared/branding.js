@@ -1,4 +1,4 @@
-// Both names use the same application and assets. The URL only selects the name.
+// 两种品牌共用前端和资源，访问路径只决定显示名称。
 const path = typeof window === 'undefined' ? '/' : window.location.pathname;
 const segments = path.split('/').filter(Boolean);
 

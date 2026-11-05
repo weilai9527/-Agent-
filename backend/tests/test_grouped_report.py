@@ -2,7 +2,9 @@ import json
 
 import pytest
 
-from backend.src.main import build_report_markdown, build_scored_report
+from shared.offline_fixture import enable_offline_fixture
+enable_offline_fixture()
+from backend.offline.main import build_report_markdown, build_scored_report
 
 
 def message(id_, kind, order, **fields):

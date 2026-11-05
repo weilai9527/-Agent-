@@ -7,6 +7,7 @@ const roles = { technical: '技术面试官', architecture: '架构面试官', h
 export default function InterviewerPolicyEditor({ request, active = true }) {
   const [policy, setPolicy] = useState(null);
   const [saved, setSaved] = useState(null);
+  const [revision, setRevision] = useState(null);
   const [options, setOptions] = useState({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -17,7 +18,7 @@ export default function InterviewerPolicyEditor({ request, active = true }) {
     let live = true;
     setLoading(true); setError('');
     request('/api/admin/interviewer-policy').then(result => {
-      if (live) { setPolicy(result.policy); setSaved(result.policy); setOptions(result.options); }
+      if (live) { setPolicy(result.policy); setSaved(result.policy); setOptions(result.options); setRevision(result.revision || null); }
     }).catch(failure => { if (live) setError(failure.message); }).finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [request, reload]);
@@ -27,7 +28,7 @@ export default function InterviewerPolicyEditor({ request, active = true }) {
     setError('');
     try {
       const result = await request('/api/admin/interviewer-policy');
-      setPolicy(result.policy); setSaved(result.policy); setOptions(result.options);
+      setPolicy(result.policy); setSaved(result.policy); setOptions(result.options); setRevision(result.revision || null);
     } catch (failure) { setError(failure.message); return false; }
   }, active);
   function change(next) { setPolicy(next); setMessage(''); setError(''); }
@@ -39,8 +40,8 @@ export default function InterviewerPolicyEditor({ request, active = true }) {
   async function save(event) {
     event.preventDefault(); setSaving(true); setError(''); setMessage('');
     try {
-      const result = await request('/api/admin/interviewer-policy', { method: 'PUT', body: JSON.stringify(policy) });
-      setPolicy(result.policy); setSaved(result.policy); setMessage('策略已保存，新建面试立即使用；已有面试与评分标准保持不变。');
+      const result = await request('/api/admin/interviewer-policy', { method: 'PUT', body: JSON.stringify(revision ? { policy, expected_revision: revision } : policy) });
+      setPolicy(result.policy); setSaved(result.policy); setRevision(result.revision || null); setMessage('策略已保存，新建面试将使用此策略。');
     } catch (failure) { setError(failure.message); }
     finally { setSaving(false); }
   }

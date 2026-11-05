@@ -1,4 +1,6 @@
-from backend.src import main
+from shared.offline_fixture import enable_offline_fixture
+enable_offline_fixture()
+from backend.offline import main
 
 
 def test_build_user_dimension_stats_aggregates_all_report_dimensions(monkeypatch):

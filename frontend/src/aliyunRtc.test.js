@@ -410,7 +410,10 @@ test('registers the AI agent plugin before joining and forwards captions and sta
   assert.deepEqual(statuses, ['thinking']);
   assert.deepEqual(messages, [{ message: '请介绍你的项目', userType: 'agent', end: true }]);
 
+  const queuedCaption = pluginEvents.get('message');
   await session.leave();
+  queuedCaption({ message: '上一轮的迟到字幕', userType: 'user', end: true });
+  assert.equal(messages.length, 1);
   assert.equal(calls.plugin.detached, true);
   assert.equal(pluginEvents.size, 0);
 });

@@ -1,0 +1,31 @@
+.native-school { display: grid; gap: 1rem; color: #223047; }
+.native-school-session, .native-school-body { padding: 1.25rem; background: #fff; border: 1px solid #d8e1ed; border-radius: 12px; min-width: 0; }
+.native-school-session, .native-school-line, .native-school-search, .native-school-pages { display: flex; align-items: center; flex-wrap: wrap; gap: 1rem; }
+.native-school-session strong, .native-school-session div > span, .native-school td small { display: block; }
+.native-school-session div > span, .native-school td small { color: #53667f; font-size: .86rem; }
+.native-school-mark { display: grid; place-items: center; width: 44px; height: 44px; color: #254e8e; background: #eaf0fa; border-radius: 10px; }
+.native-school-tenant { display: inline-flex; align-items: center; gap: .4rem; color: #426054; margin-left: auto; }
+.native-school-nav { display: flex; flex-wrap: wrap; gap: .5rem; }
+.native-school-nav button, .native-school-search button, .native-school-line button, .native-school-pages button { display: inline-flex; align-items: center; gap: .4rem; padding: .5rem .85rem; border-radius: 7px; background: #fff; color: #234474; border: 1px solid #bfcfe3; cursor: pointer; }
+.native-school-nav button[aria-current="page"] { color: white; background: #274f88; border-color: #274f88; }
+.native-school button:disabled { opacity: .55; cursor: default; }
+.native-school-line { justify-content: space-between; }
+.native-school-search { margin-block: .75rem; align-items: flex-end; }
+.native-school-search label { display: grid; gap: .25rem; }
+.native-school :where(input:not([type=checkbox],[type=radio]), select, textarea) { max-width: 100%; border: 1px solid #c4cfdf; border-radius: 6px; padding: .45rem .65rem; }
+.native-school-scroll { overflow-x: auto; }
+.native-school table { border-collapse: collapse; width: 100%; }
+.native-school td, .native-school th { padding: .6rem; text-align: left; border-bottom: 1px solid #e0e6ee; overflow-wrap: anywhere; }
+.native-school th { background: #f5f8fc; }
+.native-school pre { max-width: 35rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.native-school-pages { margin-top: .75rem; justify-content: flex-end; }
+.native-school [role=alert] { color: #a02c23; }
+@media (max-width: 650px) { .native-school-tenant { margin-left: 0; } .native-school-body { padding: .8rem; overflow-x: auto; } }
+
+@media print {
+  body:has(.school-password-handout) * { visibility: hidden; }
+  body:has(.school-password-handout) .school-password-handout,
+  body:has(.school-password-handout) .school-password-handout * { visibility: visible; }
+  body:has(.school-password-handout) .school-password-handout { position: absolute; left: 0; top: 0; width: 100%; }
+  body:has(.school-password-handout) .school-password-handout button { display: none; }
+}

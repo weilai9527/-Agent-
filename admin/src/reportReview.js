@@ -20,7 +20,7 @@ function readSection(value) {
     if (!text) return { items: [], text: '', invalid: false };
     try { return readSection(JSON.parse(text)); }
     catch {
-      // Never show a damaged serialized report as a wall of implementation fields.
+      // 报告内容无法解析时，避免把内部字段直接展示给用户。
       return /^[\[{]/.test(text) ? { items: [], text: '', invalid: true } : { items: [], text, invalid: false };
     }
   }

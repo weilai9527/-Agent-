@@ -1,0 +1,6 @@
+-r ../requirements.txt
+python-multipart
+pypdf
+PyMuPDF
+Pillow
+pytesseract

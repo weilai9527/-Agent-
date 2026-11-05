@@ -14,7 +14,9 @@ def test_new_rtc_task_uses_current_role_question_and_bounded_opening_context(tmp
     }
     script = textwrap.dedent('''
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         client = TestClient(main.app)
         registered = client.post('/api/auth/register', json={

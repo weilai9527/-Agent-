@@ -33,12 +33,13 @@ def test_admin_imports_reveals_exports_and_clears_temporary_passwords(tmp_path):
         from fastapi.testclient import TestClient
         from openpyxl import Workbook, load_workbook
 
-        import backend.src.database
-        import backend.src.main as candidate_main
-        import admin_backend.src.main as admin_main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as candidate_main
+        import admin_backend.offline.main as admin_main
 
         origin = {"Origin": "http://127.0.0.1:5174"}
-        admin = TestClient(admin_main.app)
+        admin = TestClient(admin_main.app, base_url='https://testserver')
         login = admin.post(
             "/api/admin/auth/login",
             headers=origin,
@@ -91,7 +92,7 @@ def test_admin_imports_reveals_exports_and_clears_temporary_passwords(tmp_path):
         empty_workbook = load_workbook(BytesIO(empty_year.content), data_only=True)
         assert empty_workbook.active.max_row == 1
 
-        student_client = TestClient(candidate_main.app)
+        student_client = TestClient(candidate_main.app, base_url='https://testserver')
         student_login = student_client.post(
             "/api/auth/login",
             json={"student_no": "20260001", "password": revealed[0]},
@@ -117,8 +118,7 @@ def test_admin_imports_reveals_exports_and_clears_temporary_passwords(tmp_path):
         remaining_workbook = load_workbook(BytesIO(remaining_export.content), data_only=True)
         assert remaining_workbook.active.max_row == 2
 
-        # Re-importing a legacy activated student adopts the existing user ID,
-        # keeping their profile and interview history attached to the account.
+        # 重新导入已激活的旧学生时，应沿用原账号编号，保留个人资料和面试历史的关联。
         admin_main.db.execute(
             "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
             ("legacy-student", "20260003@student.local", "legacy-hash", "Legacy Student"),
@@ -151,7 +151,7 @@ def test_admin_imports_reveals_exports_and_clears_temporary_passwords(tmp_path):
         assert admin_main.one("SELECT id FROM profiles WHERE user_id = ?", ("legacy-student",))["id"] == "legacy-profile"
         assert admin.get("/api/admin/student-accounts/legacy-student/temporary-password").status_code == 200
 
-        # A deleted legacy registration may still leave its synthetic-email user.
+        # 旧注册记录删除后，使用系统生成邮箱的学生账号可能仍然存在。
         admin_main.db.execute(
             "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
             ("orphan-student", "20260004@student.local", "legacy-hash", "Orphan Student"),

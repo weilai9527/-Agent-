@@ -32,18 +32,20 @@ def test_scoped_student_access_and_fresh_admin_database(tmp_path):
         from fastapi.testclient import TestClient
         from openpyxl import load_workbook
 
-        import admin_backend.src.main as admin_main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import admin_backend.offline.main as admin_main
         from admin_backend.src.security import encrypt_temporary_password, hash_password
 
         origin = {"Origin": "http://127.0.0.1:5174"}
-        root = TestClient(admin_main.app)
+        root = TestClient(admin_main.app, base_url='https://testserver')
         login = root.post(
             "/api/admin/auth/login",
             headers=origin,
             json={"email": "scope-root@example.com", "password": "ScopeRootPassword123!"},
         )
         assert login.status_code == 200, login.text
-        # Importing only the management service must initialize the shared tables.
+        # 仅加载管理服务也应能初始化共享数据表。
         assert root.get("/api/admin/snapshot").status_code == 200
 
         college = root.post(
@@ -89,7 +91,7 @@ def test_scoped_student_access_and_fresh_admin_database(tmp_path):
              json.dumps([{"college": college_id, "program": program_id, "class": classes[0]}])),
         )
         admin_main.db.commit()
-        limited = TestClient(admin_main.app)
+        limited = TestClient(admin_main.app, base_url='https://testserver')
         login = limited.post(
             "/api/admin/auth/login", headers=origin,
             json={"email": "limited@example.com", "password": "LimitedPassword123!"},
@@ -130,7 +132,7 @@ def test_scoped_student_access_and_fresh_admin_database(tmp_path):
              "Empty", "manager", "normal", json.dumps(["manageStudents"]), json.dumps([])),
         )
         admin_main.db.commit()
-        empty = TestClient(admin_main.app)
+        empty = TestClient(admin_main.app, base_url='https://testserver')
         assert empty.post(
             "/api/admin/auth/login", headers=origin,
             json={"email": "empty@example.com", "password": "EmptyPassword123!"},
@@ -194,10 +196,14 @@ def test_campus_overview_includes_all_students_before_scope_filtering(tmp_path):
         **os.environ,
         "DB_ENGINE": "sqlite",
         "SQLITE_PATH": str(tmp_path / "campus-overview.sqlite"),
+        "ADMIN_MASTER_EMAIL": "overview-root@example.test",
+        "ADMIN_MASTER_PASSWORD": "SyntheticOverviewRoot123!",
     }
     script = textwrap.dedent(
         """
-        import admin_backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import admin_backend.offline.main as main
 
         main.db.execute(
             "INSERT INTO campus_colleges (id, code, name) VALUES (?, ?, ?)",
@@ -212,8 +218,7 @@ def test_campus_overview_includes_all_students_before_scope_filtering(tmp_path):
                 "INSERT INTO campus_classes (id, program_id, name, invite_code) VALUES (?, ?, ?, ?)",
                 (class_id, "program", class_id, class_id),
             )
-        # The allowed class sorts after the first 500 students. A global limit
-        # would both undercount the overview and hide the scoped class entirely.
+        # 授权班级排在前 500 名学生之后。先对全校名单限量会导致概览人数偏少，且该班完全不可见。
         for index in range(504):
             user_id = f"student-{index}"
             student_no = f"2026{index:04d}"
@@ -226,7 +231,7 @@ def test_campus_overview_includes_all_students_before_scope_filtering(tmp_path):
                 "VALUES (?, ?, ?, ?, ?)",
                 (user_id, user_id, "outside" if index < 500 else "allowed", student_no, int(index < 500)),
             )
-            if index != 503:  # An unregistered account must remain excluded.
+            if index != 503:  # 未登记的账号不应计入名单。
                 main.db.execute(
                     "INSERT INTO student_registrations (id, student_no, name, user_id, deleted_at) "
                     "VALUES (?, ?, ?, ?, ?)",

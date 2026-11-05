@@ -62,8 +62,7 @@ def ensure_rtc_session(
             )
             cursor.close()
     except Exception:
-        # Concurrent token requests can both observe the row as missing. The
-        # unique interview_id constraint decides the winner.
+        # 并发申请令牌时，两个请求可能都查不到记录；interview_id 唯一约束只允许一个请求插入成功。
         existing = get_rtc_session(interview_id)
         if existing:
             return existing

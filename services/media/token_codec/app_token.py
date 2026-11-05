@@ -3,13 +3,13 @@ import io
 import struct
 import time
 
-import util.sign_utils
-import util.bytes_utils
-import util.compress_utils
+from .util import sign_utils
+from .util import bytes_utils
+from .util import compress_utils
 import random
 
-from app_token_options import AppTokenOptions
-from service import Service
+from .app_token_options import AppTokenOptions
+from .service import Service
 
 VERSION_LENGTH = 3
 VERSION_0 = "000"
@@ -40,7 +40,7 @@ class AppToken:
         if self.service is None:
             raise ValueError('missing service')
 
-        signKey = util.sign_utils.generate_sign(self.app_key, self.issue_timestamp, self.salt)
+        signKey = sign_utils.generate_sign(self.app_key, self.issue_timestamp, self.salt)
 
         bufBody = io.BytesIO()
 
@@ -57,18 +57,18 @@ class AppToken:
             self.options = AppTokenOptions()
         bufBody.write(self.options.pack())
 
-        # FIXME
-        bufBodyFixedLength = util.bytes_utils.get_fixed_length_bytes(bufBody.getvalue())
-        signature = util.sign_utils.sign(signKey, bufBodyFixedLength)
+        # 按协议补齐参与 HMAC 的消息边界，签名与接收端使用相同的字节序列。
+        bufBodyFixedLength = bytes_utils.get_fixed_length_bytes(bufBody.getvalue())
+        signature = sign_utils.sign(signKey, bufBodyFixedLength)
 
         buf = io.BytesIO()
         buf.write(struct.pack('>I', len(signature)))
         buf.write(signature)
         buf.write(bufBodyFixedLength)
 
-        bufFixedLength = util.bytes_utils.get_fixed_length_bytes(buf.getvalue())
+        bufFixedLength = bytes_utils.get_fixed_length_bytes(buf.getvalue())
 
-        return "{}{}".format(VERSION_0, base64.b64encode(util.compress_utils.compress(bufFixedLength)).decode('utf-8'))
+        return "{}{}".format(VERSION_0, base64.b64encode(compress_utils.compress(bufFixedLength)).decode('utf-8'))
 
     @classmethod
     def parse(cls, token: str):
@@ -78,7 +78,7 @@ class AppToken:
         if not token.startswith(VERSION_0):
             raise ValueError('unsupported version')
 
-        data = util.compress_utils.decompress(base64.b64decode(token[VERSION_LENGTH:]))
+        data = compress_utils.decompress(base64.b64decode(token[VERSION_LENGTH:]))
 
         buf = io.BytesIO(data)
 
@@ -98,50 +98,25 @@ class AppToken:
         return AppToken(app_id, None, timestamp, issue_timestamp, salt, service, options, signature)
 
 if __name__ == "__main__":
-    # find appId in your RTC console (https://rtc.console.aliyun.com/#/manage/list)
+    # 在 RTC 控制台查看 appId（https://rtc.console.aliyun.com/#/manage/list）。
     app_id = "replace_your_appId"
-    # find appKey in your RTC console 
+    # 在 RTC 控制台查看 appKey。
     app_key = "replace_your_appKey"
-    # Token is valid for a maximum of 24 hours. This example uses 12 hours, adjust according to your needs.
+    # 令牌有效期最长为 24 小时；示例设置为 12 小时，可按需调整。
     expired_ts = int(time.time()) + 12 * 60 * 60 
     channel_id = 'replace_your_channelId'
     user_id = 'replace_your_userId'
 
     appToken = AppToken(app_id, app_key, expired_ts)
 
-    # By default, all privileges are allowed. You can control audio/video/screen privileges individually as shown in the example below.
-    # Please check(https://help.aliyun.com/document_detail/2689025.html) for more detail privilege informations. 
+    # 默认允许全部发布权限。示例展示如何分别控制音频、视频和屏幕共享。
+    # 权限说明见 https://help.aliyun.com/document_detail/2689025.html 。
 
-    # Example0: full privileges as default
+    # 示例 0：使用默认的全部发布权限。
     service = Service(channel_id, user_id)
     appToken.set_service(service)
     token = appToken.build()
     print(token)
 
-    # Example1: only allow audio
-    # service = Service(channel_id, user_id)
-    # service.add_audio_publish_privilege()
-    # appToken.set_service(service)
-    # token = appToken.build()
-    # print(token)
-    # Example2: only allow audio and video
-    # service = Service(channel_id, user_id)
-    # service.add_audio_publish_privilege()
-    # service.add_video_publish_privilege()
-    # appToken.set_service(service)
-    # token = appToken.build()
-    # print(token)
-
-    # By default, no more additional options are set. You can set more options individually as shown in the example below.
-    # Please check(https://help.aliyun.com/document_detail/2689025.html) for more detail options informations.
-    # Example1: add more options
-    # service = Service(channel_id, user_id)
-    # appToken.set_service(service)
-    # engine_options={
-    #     "duration_per_channel": "86400",
-    #     "delay_close_per_channel": "60"
-    # }
-    # token_options = AppTokenOptions(engine_options)
-    # appToken.set_options(token_options)
-    # token = appToken.build()
-    # print(token)
+    # 仅音频或视频场景按需调用 add_audio_publish_privilege / add_video_publish_privilege。
+    # 附加选项由 AppTokenOptions 传入，凭据应仅返回给已获授权的参与者。

@@ -1710,7 +1710,7 @@ tbody tr:last-child td {
   background: #c53b3b;
 }
 
-/* Management workspace refresh */
+/* 管理工作区布局样式 */
 .admin-shell {
   grid-template-columns: 232px minmax(0, 1fr);
   background: #f5f7fa;
@@ -2671,7 +2671,7 @@ td {
   }
 }
 
-/* Campus organization and student growth workspace */
+/* 学校组织与学生成长工作区 */
 .campus-page {
   display: grid;
   gap: 18px;
@@ -5955,7 +5955,7 @@ td {
 .security-log-detail dt { color: #64748b; font-size: 12px; }
 .security-log-detail dd { margin: 4px 0 0; overflow-wrap: anywhere; }
 
-/* Brand symbol is displayed from the top of the supplied transparent lockup. */
+/* 从透明组合标识图的顶部裁出品牌图标。 */
 .admin-logo { position: relative; display: block; width: 40px; height: 40px; flex: none; overflow: hidden; }
 .admin-logo img { position: absolute; top: 0; left: 50%; width: 120%; height: auto; max-width: none; transform: translateX(-50%); }
 .admin-sidebar { grid-template-rows: auto auto 1fr; }
@@ -5976,7 +5976,7 @@ td {
   .admin-nav-group button { white-space: nowrap; }
 }
 
-/* A persistent navigation column; only the user's toggle changes its state. */
+/* 导航栏常驻页面，展开或收起由用户手动切换。 */
 .admin-shell.admin-shell-collapsible {
   grid-template-columns: 260px minmax(0, 1fr);
   transition: grid-template-columns .2s ease;
@@ -6042,7 +6042,7 @@ td {
   .admin-shell.admin-shell-collapsible { transition: none; }
 }
 
-/* Academic workspace: expandable navigation and dedicated editing pages. */
+/* 教务工作区的可展开导航和独立编辑页面。 */
 .admin-nav-branch { display: grid; gap: 4px; }
 .admin-navigation-panel .admin-nav-branch > button { width: 100%; }
 .admin-navigation-panel .admin-nav-branch > button.branch-current { color: #0958d9; font-weight: 600; }

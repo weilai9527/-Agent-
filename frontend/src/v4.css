@@ -1,4 +1,4 @@
-/* V4 visual language for the live React candidate app. All business state stays in main.jsx. */
+/* 学生端通用布局与配色。业务状态由各页面组件维护。 */
 :root {
   --v4-paper: #f4f6f9;
   --v4-ink: #20242c;
@@ -47,7 +47,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .v4-auth-shell .auth-form { gap: 17px; }
 .v4-auth-shell .auth-field > div { height: 48px; padding: 0 14px; gap: 10px; border-color: var(--v4-line); border-radius: 8px; }
 .v4-auth-shell .auth-form input { height: 100%; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-/* The field wrapper owns the focus indicator, including keyboard focus. */
+/* 输入框外层统一显示鼠标和键盘操作的焦点提示。 */
 .v4-auth-shell .auth-field input:focus,
 .v4-auth-shell .auth-field input:focus-visible { outline: none; outline-offset: 0; border: 0; box-shadow: none; }
 .v4-auth-shell .auth-field > div:focus-within { border-color: var(--v4-accent); box-shadow: 0 0 0 3px #3568ce14; }
@@ -168,7 +168,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .v4-workspace .radar-area { fill: #9bac8950; stroke: #91a781; }
 .v4-workspace .history-item:hover { border-color: #a2b694; }
 
-/* The core interview path uses the same V4 hierarchy while retaining live React state. */
+/* 面试流程页的标题、状态提示和操作区。 */
 .v4-setup-page .setup-grid { margin-bottom: 0; }
 .v4-setup-page .v4-setup-card { overflow: hidden; }
 .v4-setup-page .setup-form { grid-template-columns: 1fr; gap: 22px; padding: 27px; }
@@ -236,7 +236,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .v4-resume-page .resume-form-panel, .v4-resume-page .resume-form-fields { border-color: var(--v4-line); }
 .v4-resume-page .resume-form-actions .primary-action { background: var(--v4-dark); border-color: var(--v4-dark); }
 .v4-stats-page .stats-overview { border-radius: 11px; }
-/* Keep the portrait cards on one grid, including the report evidence footer. */
+/* 能力画像卡片及其底部的报告依据共用同一网格。 */
 .v4-stats-page { gap: 20px; }
 .v4-stats-page .stats-main-grid { align-items: stretch; gap: 20px; }
 .v4-stats-page .stats-side-stack { min-width: 0; grid-template-rows: auto 1fr; gap: 20px; }
@@ -321,7 +321,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 @media (prefers-reduced-motion: reduce) { .v4-feature:hover { transform: none; } }
 
-/* Match the supplied fourth-edition prototype. Keep live React controls and data. */
+/* 第四版原型对应的页面控件样式。 */
 body { background: var(--v4-paper); color: var(--v4-ink); }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline-color: var(--v4-accent); }
 .v4-eyebrow, .v4-workspace .eyebrow, .v4-workspace .panel-title { color: #6f7d94; }
@@ -477,8 +477,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .v4-report-wait strong { color: var(--v4-ink); }
 .v4-profile-page .profile-anchor-list a:hover, .v4-profile-page .profile-anchor-list a:focus-visible { background: #eaf0fb; color: var(--v4-accent); }
 
-/* V4 interview: the existing interview data and RTC actions are presented in the
-   two focused layouts from the V4 prototype. */
+/* 面试的文字与实时语音两种布局。 */
 .v4-interview-page { display: grid; gap: 0; }
 .v4-interview-modebar { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 25px; padding: 18px 0; border-top: 1px solid var(--v4-line); border-bottom: 1px solid var(--v4-line); color: #65748a; font-size: 10px; letter-spacing: .3px; }
 .v4-interview-page .v4-page-heading { margin-bottom: 32px; }
@@ -599,7 +598,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .v4-sound-wave.active i, .v4-voice-avatar.active, .v4-voice-controls button.active > span { animation: none; }
 }
 
-/* Report review: compact evidence, actionable feedback, progressive detail. */
+/* 报告复盘中的逐题依据、建议及可展开详情。 */
 .report-studio { max-width: 1240px; padding-top: 18px; padding-bottom: 24px; display: grid; gap: 28px; }
 .report-studio .v4-page-heading { margin: 0 0 4px; }
 .report-studio .v4-page-heading h1 { font-size: clamp(28px, 3vw, 38px); }
@@ -701,7 +700,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .report-details dl { grid-template-columns: 1fr; }
 }
 
-/* Resume studio: V4 upload surface with the existing resume workflow. */
+/* 简历页面的上传区及编辑表单。 */
 .resume-studio { gap: 26px; }
 .resume-studio .v4-page-heading { margin-bottom: 6px; }
 .resume-studio .resume-kicker { color: #647c9e; font-size: 10px; font-weight: 600; letter-spacing: 2px; }
@@ -797,7 +796,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .resume-studio .custom-role-confirm input { width: 100%; flex-basis: 100%; }
 }
 
-/* Use the round CASC symbol from the supplied transparent lockup. */
+/* 从透明品牌图中显示圆形 CASC 标识。 */
 .v4-logo { position: relative; display: block; width: 38px; height: 38px; flex: none; overflow: hidden; }
 .v4-logo img { position: absolute; top: 0; left: 50%; width: 120%; height: auto; max-width: none; transform: translateX(-50%); }
 .v4-brand { gap: 11px; color: #17263d; font-size: 20px; font-weight: 500; letter-spacing: .04em; }
@@ -822,7 +821,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .v4-home .v4-home-heading h1 { margin: 12px 0 8px; color: #17263d; font-size: clamp(30px, 3vw, 42px); font-weight: 500; letter-spacing: 1px; }
 .v4-home .v4-home-heading p { color: #65738a; font-size: 13px; line-height: 1.7; }
 
-/* Home: an editorial layout with the supplied brand mark and a quiet voice motif. */
+/* 首页的品牌标识、面试入口与声波装饰。 */
 .v4-stage {
   min-height: 510px;
   padding: 28px 34px;
@@ -880,7 +879,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .v4-stage { min-height: 440px; }
 }
 
-/* Keep the login illustration and copy together as the viewport changes. */
+/* 登录插图和说明文字随窗口宽度一起调整。 */
 .v4-auth-shell .auth-brand-panel {
   grid-template-rows: auto minmax(min-content, 1fr) auto;
   align-content: normal;

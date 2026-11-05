@@ -2992,7 +2992,7 @@ h1 {
   line-height: 1.7;
 }
 
-/* Long-term skill profile */
+/* 长期能力画像 */
 .stats-overview {
   position: relative;
   display: grid;
@@ -4447,7 +4447,7 @@ h1 {
 
 .jcmp-body {
   display: grid;
-  /* Let long posting content shrink within the panel instead of being clipped. */
+  /* 允许岗位详情在面板内收缩，避免长文本被裁切。 */
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   padding: 18px;
@@ -4520,7 +4520,7 @@ h1 {
   outline: none;
 }
 
-/* The rounded search wrapper owns the focus ring, including the search icon. */
+/* 搜索框的焦点边框包住图标和输入区域。 */
 .jcmp-search input:focus,
 .jcmp-search input:focus-visible {
   outline: none;

@@ -33,7 +33,10 @@ def test_invalid_or_unassessable_response_requires_retry(score, quote):
 def test_retry_reuses_record_and_freezes_conversation(tmp_path):
     script = dedent("""
         from fastapi.testclient import TestClient
-        from backend.src import main, ai_evaluation as ai
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline import main
+        from backend.src import ai_evaluation as ai
         from types import SimpleNamespace
 
         client = TestClient(main.app)

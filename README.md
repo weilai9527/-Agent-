@@ -1,5 +1,7 @@
 # 🎙 AI Interview Agent
 
+> **微服务开发分支，尚未完成上线验收。** 本分支为 `codex/refactor-microservices`，用于保存和继续开发重构。旧版维护继续使用 `main`，生产服务器使用已验收的发布标签；不要将本分支作为生产更新来源。分支与发布约定见[版本管理说明](deploy/RELEASE-WORKFLOW.md)。
+
 <h3 align="center">
 Multi-Agent Real-Time AI Interview Platform
 </h3>
@@ -105,18 +107,31 @@ AI Interview Agent 是一个面向招聘与人才评估场景的智能面试平�
 
 # 🏗 System Architecture
 
-- 候选人端：React + Vite，负责面试配置、实时通话和复盘展示。
-- 业务后端：FastAPI，负责身份、面试状态机、AI 调用、RTC 会话和报告生成。
-- 管理端：独立 FastAPI 服务，负责候选人、职业目录、连接日志和统计管理。
-- 数据层：MySQL 用于生产数据，SQLite 用于本地开发与自动化测试。
+本文下述架构说明对应 `codex/refactor-microservices` 中正在开发的微服务重构，不代表生产服务器已完成切换。过渡阶段由 `main` 维护旧版，微服务改动保存在专属开发分支；运行版本以实际提交与部署记录为准。
+
+学生端与管理端使用独立的原生网关。身份、档案、职业、训练、面试、媒体、评估、教学分析、证书、存证、用量、模型配置和运营审计各有自己的服务。面试与评估分别持有专库，提交、评分和签发通过持久任务或版本化凭据衔接。
+
+从项目根目录运行 `python -m deploy.run_service list` 查看入口。日常运行默认 native 与 isolated，某个服务不可用时不会启用旧系统。新学校可从原生身份库直接开户。配置、权限和迁移见[微服务运行说明](deploy/MICROSERVICES.md)，临时读取冻结快照见[限时应急操作](deploy/EMERGENCY.md)，旧管理能力的归属见[原生覆盖清单](deploy/NATIVE-COVERAGE.md)。
+
+## 本机运行与人工审核
+
+从空目录启动全部原生服务、单独签发各进程密钥、创建第一所学校并登录，见[本地原生启动手册](deploy/NATIVE-LOCAL.md)。代码审查按[人工核对索引](deploy/REVIEW.md)逐条检查。
 
 ## 本地配置与 Git 提交
 
-在启动服务前，将 `backend/.env.example`、`admin_backend/.env.example` 分别复制为同目录的 `.env`，按环境填写数据库和服务配置。管理后端必须设置 `ADMIN_MASTER_EMAIL` 和 `ADMIN_MASTER_PASSWORD`（至少 12 位）；没有内置管理员账号或密码。旧的 `ADMIN_BOOTSTRAP_EMAIL` / `ADMIN_BOOTSTRAP_PASSWORD` 配置仍兼容，`ADMIN_MASTER_*` 非空值优先。
+MySQL 分域建库、只读验真账号和离线 IBD 整理见[分域数据库运维说明](deploy/NATIVE-MYSQL.md)。
+
+日常服务从各自的进程环境读取配置。学校账号直接在原生身份库创建；生产网关不持有旧数据库密码。历史 `.env.example` 仅用于查阅迁移前字段，不能作为日常启动步骤。
 
 实际管理端位于 `admin/`，用 `npm run dev:admin` 启动、`npm run build:admin` 构建；`admin-next/` 是独立原型。管理员数据范围同时约束学生名单、训练记录和报告，服务端也会检查详情与修改操作的权限。
 
 提交源码、测试、依赖锁文件及 `.env.example`；真实 `.env`、数据库、日志、依赖目录、构建产物，以及 `outputs/` 中的验收截图、临时脚本和备份均保留在本地，不纳入 Git。不要使用 `git add -f` 强制提交这些本地产物。
+
+## 分支管理与服务器更新
+
+旧版修复经审核和验收后合入 `main`，按固定发布标签更新服务器；微服务开发分支在完成业务验收和数据迁移演练前不发布到生产。旧版补丁需按问题场景移植到对应的新服务，不能直接用旧后端文件覆盖重构代码。
+
+分支职责、当前 PR 遗留问题、服务器基线核对、日常发布、微服务切换及数据回退步骤见[分支管理、服务器更新与微服务切换](deploy/RELEASE-WORKFLOW.md)。本次开发快照不表示旧版修复已移植、代码已合入 `main` 或服务器已更新。
 
 ## Cloudflare 前端部署
 
@@ -140,7 +155,7 @@ AI Interview Agent 是一个面向招聘与人才评估场景的智能面试平�
 最终字幕按 RTC `turn_id` 幂等写入正式面试消息，再进入单题评价、追问、面试官切换和报告链路。
 临时字幕只用于实时展示，不作为评分证据。结束面试时客户端会退出频道，并等待服务端 Agent 停止。
 
-在 `backend/.env` 中至少配置：
+真实音视频需要在 media 进程的秘密存储中配置下列字段。
 
 ```env
 RTC_APP_ID=
@@ -150,6 +165,6 @@ ALIBABA_CLOUD_ACCESS_KEY_ID=
 ALIBABA_CLOUD_ACCESS_KEY_SECRET=
 ```
 
-完整 RTC、会话回收和诊断日志选项见 `backend/.env.example`。所有密钥只保存在后端，
+完整 RTC、会话回收和诊断日志选项见[媒体服务说明](services/media/INTEGRATION.md)。媒体密钥只注入媒体服务，
 浏览器仅获取与当前面试和用户绑定的短期音频 Token。
 

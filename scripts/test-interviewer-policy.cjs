@@ -1,4 +1,4 @@
-/* All API traffic is mocked; no live credentials, student records or model calls. */
+/* 所有 API 请求都由测试替身响应，不使用真实凭据和学生记录，也不调用模型。 */
 const { createRequire } = require('node:module');
 const { createServer } = require('node:http');
 const fs = require('node:fs');
@@ -72,7 +72,7 @@ const server = createServer((req, res) => {
           assert.equal(submission.question_id, opening.id);
           assert.equal(submission.source, 'text');
           firstAttempt = submission;
-          // Another tab has already answered q2 when this client retries.
+          // 模拟客户端重试前，另一个标签页已经提交 q2 的回答。
           question = next;
           history.push({ id: 'answer1', sender_type: 'candidate', content: submission.content },
             { ...opening, id: 'q2', content: '你的个人贡献是什么？' },

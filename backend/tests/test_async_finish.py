@@ -16,7 +16,9 @@ def test_finish_queues_report_without_running_ai_inline(tmp_path):
         """
         from fastapi import BackgroundTasks
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         client = TestClient(main.app)
         registered = client.post(

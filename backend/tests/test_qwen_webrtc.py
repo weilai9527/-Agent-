@@ -2,7 +2,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-from backend.src.main import QwenRealtimeTtsError, _qwen_realtime_webrtc_url
+from backend.src.qwen_realtime_tts import QwenRealtimeTtsError
+from services.media.speech import _qwen_realtime_webrtc_url
 
 
 class QwenWebrtcUrlTests(unittest.TestCase):
@@ -30,6 +31,14 @@ class QwenWebrtcUrlTests(unittest.TestCase):
             self.build_url("ap-southeast-1"),
             "https://workspace-test.ap-southeast-1.maas.aliyuncs.com/api/v1/webrtc/realtime?model=qwen-test-realtime",
         )
+
+    def test_runtime_region_cannot_change_deployment_approved_destination(self):
+        settings = {"QWEN_OMNI_REALTIME_WORKSPACE_ID": "workspace-test",
+                    "QWEN_OMNI_REALTIME_REGION": "singapore"}
+        with patch.dict(os.environ, {**settings, "QWEN_OMNI_REALTIME_REGION": "beijing"}), \
+                patch("services.media.speech.runtime_settings", return_value=settings):
+            with self.assertRaises(QwenRealtimeTtsError):
+                _qwen_realtime_webrtc_url("qwen-test-realtime")
 
     def test_rejects_unknown_region(self):
         with self.assertRaises(QwenRealtimeTtsError):

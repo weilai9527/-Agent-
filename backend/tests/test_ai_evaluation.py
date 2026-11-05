@@ -6,6 +6,13 @@ from backend.src.ai_evaluation import AiEvaluationError, DIMENSIONS, _call_with_
 from backend.src.kimi_followup import FollowupProvider
 
 
+@pytest.fixture(autouse=True)
+def synthetic_model_configuration(monkeypatch):
+    """这些用例验证评分逻辑；用固定的非敏感配置代替独立模型控制进程。"""
+    monkeypatch.setattr("services.assessment.ai_evaluation.runtime_settings", lambda: {})
+    monkeypatch.setattr("shared.provider_selection.runtime_settings", lambda: {})
+
+
 def test_normalize_evaluation_formats_feedback_without_filling_unassessed_dimensions():
     result = normalize_evaluation(
         {

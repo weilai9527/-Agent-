@@ -21,7 +21,9 @@ def test_resume_context_is_separate_from_short_focus_area(tmp_path):
     script = textwrap.dedent(
         """
         from fastapi.testclient import TestClient
-        from backend.src.main import app
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline.main import app
 
         client = TestClient(app)
         registered = client.post(

@@ -13,7 +13,9 @@ def test_resume_major_options_follow_admin_campus_data(tmp_path):
     environment.update({"APP_ENV": "test", "DB_ENGINE": "sqlite", "SQLITE_PATH": str(tmp_path / "resume-options.sqlite")})
     script = textwrap.dedent(
         """
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         # A candidate-only database still exposes the published catalog.
         before = main.load_resume_form_settings()

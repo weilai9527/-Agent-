@@ -184,7 +184,9 @@ def test_rtc_token_endpoint_is_authenticated_and_interview_scoped(tmp_path):
     script = textwrap.dedent(
         """
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         anonymous = TestClient(main.app)
         unauthorized = anonymous.post("/api/interviews/missing/rtc/token")
@@ -425,7 +427,9 @@ def test_rtc_agent_start_is_idempotent_under_concurrency(tmp_path):
         import time
         from concurrent.futures import ThreadPoolExecutor
         from fastapi.testclient import TestClient
-        import backend.src.main as main
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        import backend.offline.main as main
 
         owner = TestClient(main.app)
         registered = owner.post(

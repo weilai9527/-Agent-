@@ -21,7 +21,9 @@ def test_uploaded_resume_filename_is_persisted_and_profile_updates_do_not_clear_
     script = textwrap.dedent(
         """
         from fastapi.testclient import TestClient
-        from backend.src.main import app
+        from shared.offline_fixture import enable_offline_fixture
+        enable_offline_fixture()
+        from backend.offline.main import app
 
         client = TestClient(app)
         registered = client.post(
